@@ -2,7 +2,9 @@
 
 Repository contains reusable actions workflows. Also contains config files for some of them. 
 
-Actions calls from actions in another ONLYOFFICE repositories. For example:
+Actions calls from actions in another ONLYOFFICE repositories. 
+
+For example:
 
 ```yaml
 name: lint
