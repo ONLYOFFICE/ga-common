@@ -1,5 +1,12 @@
 checks:
   doNotAutoAddDefaults: true
   include:
-    - "privileged-container"
-    - "run-as-non-root"
+    - "dangling-service"
+    - "deprecated-service-account-field"
+    - "docker-sock"
+    - "duplicate-env-var"
+    - "env-var-secret"
+    - "exposed-services"
+    - "invalid-target-ports"
+    - "latest-tag"
+    - "privileged-ports"
