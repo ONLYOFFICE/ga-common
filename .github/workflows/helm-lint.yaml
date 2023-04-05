@@ -18,9 +18,9 @@ on:
         default: true
 
 env:
-  LINT_CONF: 'https://github.com/ONLYOFFICE/ga-common/blob/master/.github/config/lintconf.yaml'
-  KUBELINT_CONF: 'https://github.com/ONLYOFFICE/ga-common/blob/master/.github/config/.kube-linter.yaml'
-  CHART_SCHEMA: 'https://github.com/ONLYOFFICE/ga-common/blob/master/.github/config/chart_schema.yaml'
+  LINT_CONF: 'https://raw.githubusercontent.com/ONLYOFFICE/ga-common/master/.github/config/lintconf.yaml'
+  KUBELINT_CONF: 'https://raw.githubusercontent.com/ONLYOFFICE/ga-common/master/.github/config/.kube-linter.yaml'
+  CHART_SCHEMA: 'https://raw.githubusercontent.com/ONLYOFFICE/ga-common/master/.github/config/chart_schema.yaml'
 
 jobs:
   lint-test:
