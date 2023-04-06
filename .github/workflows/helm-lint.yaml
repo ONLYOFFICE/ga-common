@@ -17,6 +17,11 @@ on:
         description: 'Enable or disable kube manifests linter'
         default: true
 
+env:
+  LINT_CONF: 'https://raw.githubusercontent.com/ONLYOFFICE/ga-common/master/.github/config/lintconf.yaml'
+  KUBELINT_CONF: 'https://raw.githubusercontent.com/ONLYOFFICE/ga-common/master/.github/config/.kube-linter.yaml'
+  CHART_SCHEMA: 'https://raw.githubusercontent.com/ONLYOFFICE/ga-common/master/.github/config/chart_schema.yaml'
+
 jobs:
   lint-test:
     runs-on: ubuntu-latest
@@ -40,9 +45,9 @@ jobs:
            sudo apt-get install -y yamllint
            pip install yamale
            wget https://github.com/helm/chart-testing/releases/download/v${{ inputs.ct_version }}/chart-testing_${{ inputs.ct_version }}_linux_amd64.tar.gz
-           wget https://github.com/ONLYOFFICE/ga-common/blob/master/.github/config/.kube-linter.yaml
-           tar -xvzf chart-testing_${{ inputs.ct_version }}_linux_amd64.tar.gz 
-           cp ./etc/chart_schema.yaml ./etc/lintconf.yaml .
+           wget ${LINT_CONF} ${KUBELINT_CONF} ${CHART_SCHEMA}
+           tar -xvzf chart-testing_${{ inputs.ct_version }}_linux_amd64.tar.gz ct
+           rm -rf ./chart-testing_${{ inputs.ct_version }}_linux_amd64.tar.gz
      
       - name: lint
         if: ${{ inputs.enable_yaml_lint == true }}
