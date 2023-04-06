@@ -1,6 +1,8 @@
 checks:
   doNotAutoAddDefaults: true
   include:
+    - "dangling-horizontalpodautoscaler"
+    - "dangling-ingress"
     - "dangling-service"
     - "deprecated-service-account-field"
     - "docker-sock"
