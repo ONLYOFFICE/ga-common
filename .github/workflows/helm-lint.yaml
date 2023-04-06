@@ -47,7 +47,7 @@ jobs:
            wget https://github.com/helm/chart-testing/releases/download/v${{ inputs.ct_version }}/chart-testing_${{ inputs.ct_version }}_linux_amd64.tar.gz
            wget ${LINT_CONF} ${KUBELINT_CONF} ${CHART_SCHEMA}
            tar -xvzf chart-testing_${{ inputs.ct_version }}_linux_amd64.tar.gz ct
-           rm chart-testing_${{ inputs.ct_version }}_linux_amd64.tar.gz
+           rm -rf ./chart-testing_${{ inputs.ct_version }}_linux_amd64.tar.gz
      
       - name: lint
         if: ${{ inputs.enable_yaml_lint == true }}
