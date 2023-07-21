@@ -33,3 +33,7 @@ jobs:
 ### Helm charts linters
 
 Action for checking helm charts for compliance with the rules for formatting yaml files and for compliance with the configured rules for kubernetes manifests.
+
+### k8s Deprecated recources validator
+
+Action for check deprecated api and other resources in k8s yaml manifests
