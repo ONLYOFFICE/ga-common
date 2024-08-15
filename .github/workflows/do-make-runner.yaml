@@ -64,7 +64,7 @@ jobs:
         cat << EOF > ./user-data
         #!/bin/bash
         apt -y update
-        apt -y install jq curl
+        apt -y install jq curl unzip
         
         useradd -m gha-runner
         echo "gha-runner ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/gha-runner
