@@ -34,6 +34,10 @@ jobs:
 
 Action for checking helm charts for compliance with the rules for formatting yaml files and for compliance with the configured rules for kubernetes manifests.
 
-### k8s Deprecated recources validator
+### Kubernetes Deprecated recources validator
 
 Action for check deprecated api and other resources in k8s yaml manifests
+
+### DigitalOcean make/destoy self-hosted runners
+
+Action for make new Digital Ocean droplet with provided parameters, connect it like a self-hosted runner to repo, after job finished - remove self-hosted runner and destroy the droplet
