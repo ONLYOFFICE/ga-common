@@ -1,0 +1,35 @@
+name: Snyk Scanner
+
+on:
+  schedule:
+    - cron: "00 21 * * 7"
+  workflow_dispatch:
+
+jobs:
+  snyk-secure-scanner:
+    name: "Run Snyk Security Scanner"
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout Snyk Scanner Repository
+      uses: actions/checkout@v4
+      with:
+        repository: 'snyk-labs/github-actions-scanner'
+        path: snyk
+
+    - name: Checkout Target Repository
+      uses: actions/checkout@v4
+      with:
+        path: repo
+
+    - name: Run Snyk Scanner
+      env:
+        GITHUB_TOKEN: ${{ secrets.TOKEN }}
+      run: bash ${GITHUB_WORKSPACE}/repo/.github/scripts/snyk.sh
+            
+    - name: Upload Snyk Scan Result Artifact
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: Snyk-scan-result
+        path: ./snyk/result.log
