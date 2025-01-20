@@ -37,3 +37,7 @@ Action for checking helm charts for compliance with the rules for formatting yam
 ### k8s Deprecated recources validator
 
 Action for check deprecated api and other resources in k8s yaml manifests
+
+### Organization snyk action scanner
+
+Weekly checks the organization's actions in open repositories for the presence of incorrectly formatted actions
