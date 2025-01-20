@@ -1,9 +1,9 @@
 name: Snyk Scanner
 
 on:
-  schedule:
-    - cron: "00 21 * * 7"
   workflow_dispatch:
+  schedule:
+    - cron: '00 21 * * 6'
 
 jobs:
   snyk-secure-scanner:
