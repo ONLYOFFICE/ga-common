@@ -41,3 +41,7 @@ Action for check deprecated api and other resources in k8s yaml manifests
 ### Organization snyk action scanner
 
 Weekly checks the organization's actions in open repositories for the presence of incorrectly formatted actions
+
+### Workflows notification
+
+Scheduled job that monitors workflow failures across multiple repositories and sends notifications to Telegram

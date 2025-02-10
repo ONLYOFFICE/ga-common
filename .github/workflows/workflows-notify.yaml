@@ -1,0 +1,56 @@
+name: Workflows notify
+
+on:
+  schedule:
+    - cron: "30 6 * * *"
+
+jobs:
+  check-workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify failed runs
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WORKFLOWS: |
+            DocSpace-buildtools|oci-release.yml|Upload on S3
+            DocSpace-buildtools|offline-release.yml|Upload offline archive
+            DocSpace-buildtools|build_packages.yml|Build packages
+            DocSpace-buildtools|ci-oci-docker-install.yml|OCI Docker
+            DocSpace-buildtools|ci-oci-install.yml|OCI Packages
+            OneClickInstall-Workspace|s3-release.yml|Upload on S3
+            OneClickInstall-Workspace|ci.yml|OCI Packages
+            OneClickInstall-Workspace|ci-update.yml|OCI Packages Update
+            OneClickInstall-Docs|scripts-upload-s3.yml|Upload on S3
+            OneClickInstall-Docs|ci-docs-test.yml|OCI Packages
+            OneClickInstall-Docs|ci-update.yml|OCI Packages Update
+        run: |
+          declare -A REPO_STATUS
+          declare -a REPO_ORDER
+
+          while IFS='|' read -r REPO WORKFLOW WORKFLOW_NAME; do
+            [[ -z "$REPO" || -z "$WORKFLOW" ]] && continue
+            if [[ ! " ${REPO_ORDER[*]} " =~ " $REPO " ]]; then
+              REPO_ORDER+=("$REPO")
+            fi
+            RUNS_RESPONSE="$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/ONLYOFFICE/$REPO/actions/workflows/$WORKFLOW/runs?per_page=100")"
+            [[ ! $(echo "$RUNS_RESPONSE" | jq -e .workflow_runs) ]] && continue
+            RUNS=$(echo "$RUNS_RESPONSE" | jq --arg start "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)" '[.workflow_runs[]| select(.created_at >= $start)
+              | select(.head_branch | test("^(master|release/.+|hotfix/.+|develop)$"))]')
+            FAIL_COUNT=$(echo "$RUNS" | jq '[.[] | select((.conclusion? // "failure") | test("failure|failed|error|startup_failure"))] | length')
+            STATUS=$([[ $(echo "$RUNS" | jq 'length') -eq 0 ]] && echo "\u26AA" || ([[ $FAIL_COUNT -gt 0 ]] && echo "\uD83D\uDD34" || echo "\uD83D\uDFE2"))
+            REPO_STATUS["$REPO"]+="$STATUS [$WORKFLOW_NAME](https://github.com/ONLYOFFICE/$REPO/actions/workflows/$WORKFLOW)\n"
+          done <<< "$WORKFLOWS"
+
+          for REPO in "${REPO_ORDER[@]}"; do
+            RESULT+="*$REPO*\n${REPO_STATUS[$REPO]}\n"
+          done
+
+          if [[ -n "$RESULT" ]]; then
+              for chat_id in ${TELEGRAM_CHAT_ID//,/ }; do
+                  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                    -H "Content-Type: application/json" -d "{\"chat_id\": ${chat_id}, \"text\": \"$RESULT\", \"parse_mode\": \"Markdown\", \"disable_web_page_preview\": true}"
+              done
+          fi
+
