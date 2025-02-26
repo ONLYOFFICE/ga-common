@@ -37,10 +37,13 @@ jobs:
             RUNS_RESPONSE="$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/ONLYOFFICE/$REPO/actions/workflows/$WORKFLOW/runs?per_page=100")"
             [[ ! $(echo "$RUNS_RESPONSE" | jq -e .workflow_runs) ]] && continue
-            RUNS=$(echo "$RUNS_RESPONSE" | jq --arg start "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)" '[.workflow_runs[]| select(.created_at >= $start)
-              | select(.head_branch | test("^(master|release/.+|hotfix/.+|develop)$"))]')
+            RUNS_24=$(echo "$RUNS_RESPONSE" | jq --arg start "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)" '[.workflow_runs[] | select(.created_at >= $start)
+             | select(.head_branch | test("^(master|release/.+|hotfix/.+|develop)$"))]')
+            RUNS=$(echo "$RUNS_24" | jq 'length' | grep -q '^[1-9]' && echo "$RUNS_24" || echo "$RUNS_RESPONSE" | jq '[.workflow_runs[] | select(.head_branch
+             | test("^(master|release/.+|hotfix/.+|develop)$"))] | if length > 0 then [.[0]] else [] end')
             FAIL_COUNT=$(echo "$RUNS" | jq '[.[] | select((.conclusion? // "failure") | test("failure|failed|error|startup_failure"))] | length')
-            STATUS=$([[ $(echo "$RUNS" | jq 'length') -eq 0 ]] && echo "\u26AA" || ([[ $FAIL_COUNT -gt 0 ]] && echo "\uD83D\uDD34" || echo "\uD83D\uDFE2"))
+            STATUS=$([[ $FAIL_COUNT -gt 0 ]] && echo "\uD83D\uDD34" || echo "\uD83D\uDFE2")
+            [[ $(echo "$RUNS" | jq 'length') -eq 0 || "$(echo "$RUNS" | jq -r '.[0].created_at')" < "$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)" ]] && STATUS="\u26AA"
             REPO_STATUS["$REPO"]+="$STATUS [$WORKFLOW_NAME](https://github.com/ONLYOFFICE/$REPO/actions/workflows/$WORKFLOW)\n"
           done <<< "$WORKFLOWS"
 
