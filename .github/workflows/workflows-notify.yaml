@@ -26,6 +26,7 @@ jobs:
             OneClickInstall-Docs|ci-docker-install.yml|OCI Docker
             OneClickInstall-Docs|ci-docs-test.yml|OCI Packages
             OneClickInstall-Docs|ci-update.yml|OCI Packages Update
+            langflow|docker.yml|Docker build Langflow
         run: |
           declare -A REPO_STATUS
           declare -a REPO_ORDER
@@ -39,9 +40,9 @@ jobs:
               "https://api.github.com/repos/ONLYOFFICE/$REPO/actions/workflows/$WORKFLOW/runs?per_page=100")"
             [[ ! $(echo "$RUNS_RESPONSE" | jq -e .workflow_runs) ]] && continue
             RUNS_24=$(echo "$RUNS_RESPONSE" | jq --arg start "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)" '[.workflow_runs[] | select(.created_at >= $start)
-             | select(.head_branch | test("^(master|release/.+|hotfix/.+|develop)$"))]')
+             | select(.head_branch | test("^(master|main|release/.+|hotfix/.+|develop)$"))]')
             RUNS=$(echo "$RUNS_24" | jq 'length' | grep -q '^[1-9]' && echo "$RUNS_24" || echo "$RUNS_RESPONSE" | jq '[.workflow_runs[] | select(.head_branch
-             | test("^(master|release/.+|hotfix/.+|develop)$"))] | if length > 0 then [.[0]] else [] end')
+             | test("^(master|main|release/.+|hotfix/.+|develop)$"))] | if length > 0 then [.[0]] else [] end')
             FAIL_COUNT=$(echo "$RUNS" | jq '[.[] | select((.conclusion? // "failure") | test("failure|failed|error|startup_failure"))] | length')
             STATUS=$([[ $FAIL_COUNT -gt 0 ]] && echo "\uD83D\uDD34" || echo "\uD83D\uDFE2")
             [[ $(echo "$RUNS" | jq 'length') -eq 0 || "$(echo "$RUNS" | jq -r '.[0].created_at')" < "$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)" ]] && STATUS="\u26AA"
