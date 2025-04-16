@@ -13,6 +13,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WORKFLOWS: |
+            DocSpace|release.yml|Release
+            DocSpace|create_branch.yml|Create Branch
             DocSpace-buildtools|oci-release.yml|Upload on S3
             DocSpace-buildtools|offline-release.yml|Upload offline archive
             DocSpace-buildtools|build_packages.yml|Build packages
@@ -26,7 +28,7 @@ jobs:
             OneClickInstall-Docs|ci-docker-install.yml|OCI Docker
             OneClickInstall-Docs|ci-docs-test.yml|OCI Packages
             OneClickInstall-Docs|ci-update.yml|OCI Packages Update
-            langflow|docker.yml|Docker build Langflow
+            langflow|docker.yml|Build docker
         run: |
           declare -A REPO_STATUS
           declare -a REPO_ORDER
