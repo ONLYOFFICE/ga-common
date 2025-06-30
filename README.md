@@ -45,3 +45,8 @@ Weekly checks the organization's actions in open repositories for the presence o
 ### Workflows notification
 
 Scheduled job that monitors workflow failures across multiple repositories and sends notifications to Telegram
+
+### Workflows keepalive
+
+Scheduled job that makes an empty commit monthly in `feature/keeplive` to keep the repository active and prevent GitHub from disabling scheduled workflows.
+
