@@ -1,0 +1,26 @@
+name: Keepalive commit
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/keeplive
+          fetch-depth: 0
+
+      - name: Empty commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "Keep repo active for cron jobs [skip ci]"
+
+      - name: Push commit
+        run: git push -u origin feature/keeplive
+

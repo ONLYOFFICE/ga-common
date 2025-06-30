@@ -29,6 +29,7 @@ jobs:
             OneClickInstall-Docs|ci-docs-test.yml|OCI Packages
             OneClickInstall-Docs|ci-update.yml|OCI Packages Update
             langflow|docker.yml|Build docker
+            ga-common|keeplive.yml|Actions Keepalive
         run: |
           declare -A REPO_STATUS
           declare -a REPO_ORDER
