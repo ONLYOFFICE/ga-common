@@ -20,14 +20,17 @@ jobs:
             DocSpace-buildtools|build_packages.yml|Build packages
             DocSpace-buildtools|ci-oci-docker-install.yml|OCI Docker
             DocSpace-buildtools|ci-oci-install.yml|OCI Packages
+            DocSpace-buildtools|readme-update.yml|Update readme
             OneClickInstall-Workspace|s3-release.yml|Upload on S3
             OneClickInstall-Workspace|ci-docker-install.yml|OCI Docker
             OneClickInstall-Workspace|ci.yml|OCI Packages
             OneClickInstall-Workspace|ci-update.yml|OCI Packages Update
+            OneClickInstall-Workspace|readme-update.yml|Update readme
             OneClickInstall-Docs|scripts-upload-s3.yml|Upload on S3
             OneClickInstall-Docs|ci-docker-install.yml|OCI Docker
             OneClickInstall-Docs|ci-docs-test.yml|OCI Packages
             OneClickInstall-Docs|ci-update.yml|OCI Packages Update
+            OneClickInstall-Docs|readme-update.yml|Update readme
             langflow|docker.yml|Build docker
             ga-common|keeplive.yml|Actions Keepalive
         run: |
