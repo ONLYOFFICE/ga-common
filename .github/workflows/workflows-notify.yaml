@@ -15,10 +15,12 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WORKFLOWS: |
             DocSpace|release.yml|Release
-            DocSpace|create_branch.yml|Create Branch
             DocSpace-buildtools|oci-release.yml|Upload on S3
             DocSpace-buildtools|offline-release.yml|Upload offline archive
             DocSpace-buildtools|build_packages.yml|Build packages
+            DocSpace-buildtools|main-build.yml|Build docker
+            DocSpace-buildtools|config-build.yml|Config Trigger
+            DocSpace-buildtools|cron-build.yml|Cron Trigger
             DocSpace-buildtools|ci-oci-docker-install.yml|OCI Docker
             DocSpace-buildtools|ci-oci-install.yml|OCI Packages
             DocSpace-buildtools|readme-update.yml|Update readme
