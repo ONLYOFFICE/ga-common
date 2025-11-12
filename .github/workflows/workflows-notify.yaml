@@ -34,7 +34,8 @@ jobs:
             OneClickInstall-Docs|ci-docs-test.yml|OCI Packages
             OneClickInstall-Docs|ci-update.yml|OCI Packages Update
             OneClickInstall-Docs|readme-update.yml|Update readme
-            langflow|docker.yml|Build docker
+            Docker-DocumentServer|4testing-build.yml|Build docker
+            Docker-Docs|build.yaml|Build docker
             ga-common|keeplive.yml|Actions Keepalive
         run: |
           declare -A REPO_STATUS
