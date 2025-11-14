@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "30 6 * * *"
+  push:
+    branches:
+      - bugfix/notify
 
 jobs:
   check-workflows:
@@ -12,7 +15,7 @@ jobs:
       - name: Notify failed runs
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: "226855156"
           WORKFLOWS: |
             DocSpace|release.yml|Release
             DocSpace-buildtools|oci-release.yml|Upload on S3
