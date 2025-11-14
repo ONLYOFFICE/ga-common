@@ -53,7 +53,7 @@ jobs:
              | select(.head_branch | test("^(master|main|release/.+|hotfix/.+|develop)$"))]')
             RUNS=$(echo "$RUNS_24" | jq 'length' | grep -q '^[1-9]' && echo "$RUNS_24" || echo "$RUNS_RESPONSE" | jq '[.workflow_runs[]? | select(.head_branch
              | test("^(master|main|release/.+|hotfix/.+|develop)$"))] | if length > 0 then [.[0]] else [] end')
-            FAIL_COUNT=$(echo "$RUNS" | jq '[.[] | select((.conclusion? // "failure") | test("failure|failed|error|startup_failure"))] | length')
+            FAIL_COUNT=$(echo "$RUNS" | jq '[.[] | select(.status == "completed" and (.conclusion // "" | test("failure|failed|error|startup_failure|timed_out")))] | length')
             STATUS=$([[ $FAIL_COUNT -gt 0 ]] && echo "\uD83D\uDD34" || echo "\uD83D\uDFE2")
             [[ $(echo "$RUNS" | jq 'length') -eq 0 || "$(echo "$RUNS" | jq -r '.[0].created_at')" < "$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)" ]] && STATUS="\u26AA"
             REPO_STATUS["$REPO"]+="$STATUS [$WORKFLOW_NAME](https://github.com/ONLYOFFICE/$REPO/actions/workflows/$WORKFLOW)\n"
