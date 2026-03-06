@@ -13,61 +13,125 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_HOST: ${{ secrets.GITEA_HOST }}
+          GITHUB_ORG: ONLYOFFICE
           WORKFLOWS: |
-            DocSpace|release.yml|Release
-            DocSpace-buildtools|oci-release.yml|Upload on S3
-            DocSpace-buildtools|offline-release.yml|Upload offline archive
-            DocSpace-buildtools|build_packages.yml|Build packages
-            DocSpace-buildtools|main-build.yml|Build docker
-            DocSpace-buildtools|config-build.yml|Config Trigger
-            DocSpace-buildtools|cron-build.yml|Cron Trigger
-            DocSpace-buildtools|ci-oci-docker-install.yml|OCI Docker
-            DocSpace-buildtools|ci-oci-install.yml|OCI Packages
-            DocSpace-buildtools|ci-oci-update.yml|OCI Packages Update
-            DocSpace-buildtools|readme-update.yml|Update readme
-            OneClickInstall-Workspace|s3-release.yml|Upload on S3
-            OneClickInstall-Workspace|ci-docker-install.yml|OCI Docker
-            OneClickInstall-Workspace|ci.yml|OCI Packages
-            OneClickInstall-Workspace|ci-update.yml|OCI Packages Update
-            OneClickInstall-Workspace|readme-update.yml|Update readme
-            OneClickInstall-Docs|scripts-upload-s3.yml|Upload on S3
-            OneClickInstall-Docs|ci-docker-install.yml|OCI Docker
-            OneClickInstall-Docs|ci-docs-test.yml|OCI Packages
-            OneClickInstall-Docs|ci-update.yml|OCI Packages Update
-            OneClickInstall-Docs|readme-update.yml|Update readme
-            Docker-DocumentServer|4testing-build.yml|Build docker
-            Docker-Docs|build.yaml|Build docker
-            ga-common|keeplive.yml|Actions Keepalive
+            DocSpace                  | release               | Release
+            DocSpace-buildtools       | oci-release           | Upload on S3
+                                      | offline-release       | Upload offline archive
+                                      | build_packages        | Build packages
+                                      | main-build            | Build docker
+                                      | config-build          | Config Trigger
+                                      | cron-build            | Cron Trigger
+                                      | ci-oci-docker-install | OCI Docker
+                                      | ci-oci-install        | OCI Packages
+                                      | ci-oci-update         | OCI Packages Update
+                                      | readme-update         | Update readme
+            OneClickInstall-Workspace | s3-release            | Upload on S3
+                                      | ci-docker-install     | OCI Docker
+                                      | ci                    | OCI Packages
+                                      | ci-update             | OCI Packages Update
+                                      | readme-update         | Update readme
+            OneClickInstall-Docs      | scripts-upload-s3     | Upload on S3
+                                      | ci-docker-install     | OCI Docker
+                                      | ci-docs-test          | OCI Packages
+                                      | ci-update             | OCI Packages Update
+                                      | readme-update         | Update readme
+            Docker-DocumentServer     | 4testing-build        | Build docker
+            Docker-Docs               | build.yaml            | Build docker
+            ga-common                 | keeplive              | Actions Keepalive
+          WORKFLOWS_GITEA: |
+            DocSpace-ui-kit-react     | claude-review         | DocSpace-ui-kit-react
+            DocSpace-client           | claude-review         | DocSpace-client
+            DocSpace-server           | claude-review         | DocSpace-server
+            DocSpace-buildtools       | claude-review         | DocSpace-buildtools
         run: |
-          declare -A REPO_STATUS
-          declare -a REPO_ORDER
+          T24="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          T30="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          BRANCH_PATTERN="^(master|main|release/.+|hotfix/.+|develop)$"
 
-          while IFS='|' read -r REPO WORKFLOW WORKFLOW_NAME; do
-            [[ -z "$REPO" || -z "$WORKFLOW" ]] && continue
-            if [[ ! " ${REPO_ORDER[*]} " =~ " $REPO " ]]; then
-              REPO_ORDER+=("$REPO")
-            fi
-            RUNS_RESPONSE="$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/ONLYOFFICE/$REPO/actions/workflows/$WORKFLOW/runs?per_page=100")"
-            ! echo "$RUNS_RESPONSE" | jq -e '.workflow_runs and (.workflow_runs|type=="array")' >/dev/null && continue
-            RUNS_24=$(echo "$RUNS_RESPONSE" | jq --arg start "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)" '[.workflow_runs[]? | select(.created_at >= $start)
-             | select(.head_branch | test("^(master|main|release/.+|hotfix/.+|develop)$"))]')
-            RUNS=$(echo "$RUNS_24" | jq 'length' | grep -q '^[1-9]' && echo "$RUNS_24" || echo "$RUNS_RESPONSE" | jq '[.workflow_runs[]? | select(.head_branch
-             | test("^(master|main|release/.+|hotfix/.+|develop)$"))] | if length > 0 then [.[0]] else [] end')
-            FAIL_COUNT=$(echo "$RUNS" | jq '[.[] | select(.status == "completed" and (.conclusion // "" | test("failure|failed|error|startup_failure|timed_out")))] | length')
-            STATUS=$([[ $FAIL_COUNT -gt 0 ]] && echo "\uD83D\uDD34" || echo "\uD83D\uDFE2")
-            [[ $(echo "$RUNS" | jq 'length') -eq 0 || "$(echo "$RUNS" | jq -r '.[0].created_at')" < "$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)" ]] && STATUS="\u26AA"
-            REPO_STATUS["$REPO"]+="$STATUS [$WORKFLOW_NAME](https://github.com/ONLYOFFICE/$REPO/actions/workflows/$WORKFLOW)\n"
-          done <<< "$WORKFLOWS"
+          JQ_QUERY='(if type=="object" then .workflow_runs//[] else [] end|if type!="array" then [] else . end) as $r
+            |[$r[]?|select((.head_branch//"")|test($b))|select($wf==""
+            or(.path//""|split("@")[0]|(. == $wf or endswith("/"+$wf))))] as $all
+            |($all|map(select((.created_at//.started_at//.updated_at//"")>=$t))|if length>0 then . else $all[:1] end) as $runs
+            |[($runs|map(select(.status=="completed" and (.conclusion//""
+            |test("failure|failed|error|startup_failure|timed_out"))))|length),
+            ($runs[0]|.created_at//.started_at//.updated_at//"")] | @tsv'
 
-          for REPO in "${REPO_ORDER[@]}"; do
-            RESULT+="*$REPO*\n${REPO_STATUS[$REPO]}\n"
+          fetch() {
+            local AUTH="Authorization: $1" URL=$2
+            [[ ! "$URL" =~ ?page=[0-9]+ ]] && { curl -s -H "$AUTH" "$URL"; return; }
+            local ORIG="${BASH_REMATCH[0]}" TMP="$(mktemp)" PAGE=1 OLDEST
+            while true; do
+              curl -s -H "$AUTH" "${URL/$ORIG/page=$PAGE}" | jq -c '.workflow_runs[]?' 2>/dev/null >> "$TMP"
+              OLDEST="$(tail -1 "$TMP" | jq -r '.created_at//.started_at//.updated_at//""' 2>/dev/null)"
+              [[ -z "$OLDEST" || "$OLDEST" < "$T24" ]] && break; (( PAGE++ ))
+            done
+            jq -sc '{workflow_runs:.}' "$TMP"; rm -f "$TMP"
+          }
+
+          check_workflows() {
+            local -n _STATUS=$1 _ORDER=$2
+            local AUTH=$3 API_FMT=$4 LINK_FMT=$5 BRANCH="${6:-$BRANCH_PATTERN}" LAST_REPO=""
+            local -a PIDS=() REPOS=() WFS=() NAMES=() TMPS=() LINKS=()
+
+            while IFS='|' read -r REPO WF NAME; do
+              REPO="${REPO// }"; WF="${WF// }"; NAME="${NAME# }"; NAME="${NAME% }"
+              [[ -z "$WF" ]] && continue
+              [[ -n "$REPO" ]] && LAST_REPO="$REPO" || REPO="$LAST_REPO"; [[ -z "$REPO" ]] && continue
+              [[ ! " ${_ORDER[*]} " =~ " $REPO " ]] && _ORDER+=("$REPO")
+              [[ "$WF" != *.* ]] && WF="$WF.yml"
+              local API="${API_FMT//__REPO__/$REPO}"; API="${API//__WF__/$WF}"
+              local LINK="${LINK_FMT//__REPO__/$REPO}"; LINK="${LINK//__WF__/$WF}"
+              local TMP; TMP="$(mktemp)"
+              fetch "$AUTH" "$API" > "$TMP" &
+              PIDS+=($!); REPOS+=("$REPO"); WFS+=("$WF"); NAMES+=("$NAME"); TMPS+=("$TMP"); LINKS+=("$LINK")
+            done
+
+            local RED; RED="$(printf '\U0001F534')"
+            for i in "${!PIDS[@]}"; do
+              wait "${PIDS[$i]}"
+              local RAW; RAW="$(cat "${TMPS[$i]}")" ; rm -f "${TMPS[$i]}"
+              local FAIL_COUNT LATEST_DATE
+              read -r FAIL_COUNT LATEST_DATE <<< "$(jq -re --arg t "$T24" --arg b "$BRANCH" --arg wf "${WFS[$i]}" "$JQ_QUERY" <<< "$RAW" 2>/dev/null||echo '')"
+              [[ -z "$FAIL_COUNT" ]] && continue
+              local ICON
+              if   [[ -z "$LATEST_DATE" || "$LATEST_DATE" < "$T30" ]]; then ICON="$(printf '\u26AA')"
+              elif (( FAIL_COUNT > 0 ));                                then ICON="$RED"
+              else                                                           ICON="$(printf '\U0001F7E2')"; fi
+              _STATUS[${REPOS[$i]}]+="[$ICON](${LINKS[$i]}) "
+              [[ "$ICON" == "$RED" ]] && _STATUS[${REPOS[$i]}__fails]+="$RED [${NAMES[$i]}](${LINKS[$i]})\n"
+            done
+          }
+
+          declare -A github_status gitea_status; github_order=(); gitea_order=()
+          check_workflows github_status github_order "Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__/runs?per_page=100" \
+            "https://github.com/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__" <<< "$WORKFLOWS"
+          check_workflows gitea_status gitea_order "token ${{ secrets.GITEA_TOKEN }}" \
+            "https://${{ secrets.GITEA_HOST }}/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
+            "https://${{ secrets.GITEA_HOST }}/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
+
+          MESSAGE=""
+          for REPO in "${github_order[@]}"; do
+            [[ -z "${github_status[$REPO]:-}" ]] && continue
+            MESSAGE+="*$REPO*\n${github_status[$REPO]}\n${github_status[${REPO}__fails]:-}\n"
           done
+          GITEA_ICONS=""; GITEA_FAILS=""
+          for REPO in "${gitea_order[@]}"; do
+            ICONS="${gitea_status[$REPO]:-}"
+            [[ -z "$ICONS" ]] && continue
+            GITEA_ICONS+="$ICONS"
+            [[ -n "${gitea_status[${REPO}__fails]:-}" ]] && GITEA_FAILS+="${ICONS% } $REPO\n"
+          done
+          [[ -n "$GITEA_ICONS" ]] && MESSAGE+="*Claude Review* $GITEA_ICONS\n$GITEA_FAILS"
+          [[ -z "$MESSAGE" ]] && exit 0
 
-          if [[ -n "$RESULT" ]]; then
-              for chat_id in ${TELEGRAM_CHAT_ID//,/ }; do
-                  curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                    -H "Content-Type: application/json" -d "{\"chat_id\": ${chat_id}, \"text\": \"$RESULT\", \"parse_mode\": \"Markdown\", \"disable_web_page_preview\": true}"
-              done
-          fi
+          echo -e "$MESSAGE"
+          for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":$CHAT_ID,\"text\":\"$MESSAGE\",\"parse_mode\":\"Markdown\",\"disable_web_page_preview\":true}"
+          done
 
