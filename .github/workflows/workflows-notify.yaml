@@ -89,19 +89,17 @@ jobs:
               PIDS+=($!); REPOS+=("$REPO"); WFS+=("$WF"); NAMES+=("$NAME"); TMPS+=("$TMP"); LINKS+=("$LINK")
             done
 
-            local RED; RED="$(printf '\U0001F534')"
             for i in "${!PIDS[@]}"; do
               wait "${PIDS[$i]}"
-              local RAW; RAW="$(cat "${TMPS[$i]}")" ; rm -f "${TMPS[$i]}"
+              local RAW; RAW="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
               local FAIL_COUNT LATEST_DATE
               read -r FAIL_COUNT LATEST_DATE <<< "$(jq -re --arg t "$T24" --arg b "$BRANCH" --arg wf "${WFS[$i]}" "$JQ_QUERY" <<< "$RAW" 2>/dev/null||echo '')"
               [[ -z "$FAIL_COUNT" ]] && continue
               local ICON
               if   [[ -z "$LATEST_DATE" || "$LATEST_DATE" < "$T30" ]]; then ICON="$(printf '\u26AA')"
-              elif (( FAIL_COUNT > 0 ));                                then ICON="$RED"
+              elif (( FAIL_COUNT > 0 ));                                then ICON="$(printf '\U0001F534')"
               else                                                           ICON="$(printf '\U0001F7E2')"; fi
-              _STATUS[${REPOS[$i]}]+="[$ICON](${LINKS[$i]}) "
-              [[ "$ICON" == "$RED" ]] && _STATUS[${REPOS[$i]}__fails]+="$RED [${NAMES[$i]}](${LINKS[$i]})\n"
+              _STATUS[${REPOS[$i]}]+="$ICON [${NAMES[$i]}](${LINKS[$i]})\n"
             done
           }
 
@@ -113,19 +111,10 @@ jobs:
             "https://${{ secrets.GITEA_HOST }}/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
             "https://${{ secrets.GITEA_HOST }}/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
 
-          MESSAGE=""
-          for REPO in "${github_order[@]}"; do
-            [[ -z "${github_status[$REPO]:-}" ]] && continue
-            MESSAGE+="*$REPO*\n${github_status[$REPO]}\n${github_status[${REPO}__fails]:-}\n"
-          done
-          GITEA_ICONS=""; GITEA_FAILS=""
-          for REPO in "${gitea_order[@]}"; do
-            ICONS="${gitea_status[$REPO]:-}"
-            [[ -z "$ICONS" ]] && continue
-            GITEA_ICONS+="$ICONS"
-            [[ -n "${gitea_status[${REPO}__fails]:-}" ]] && GITEA_FAILS+="${ICONS% } $REPO\n"
-          done
-          [[ -n "$GITEA_ICONS" ]] && MESSAGE+="*Claude Review* $GITEA_ICONS\n$GITEA_FAILS"
+          MESSAGE=""; GITEA_BLOCK=""
+          for REPO in "${github_order[@]}"; do MESSAGE+="*$REPO*\n${github_status[$REPO]}\n"; done
+          for REPO in "${gitea_order[@]}"; do GITEA_BLOCK+="${gitea_status[$REPO]}"; done
+          [[ -n "$GITEA_BLOCK" ]] && MESSAGE+="*Claude Review*\n$GITEA_BLOCK"
           [[ -z "$MESSAGE" ]] && exit 0
 
           echo -e "$MESSAGE"
