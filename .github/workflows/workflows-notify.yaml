@@ -114,71 +114,36 @@ jobs:
             "https://${{ secrets.GITEA_HOST }}/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
             "https://${{ secrets.GITEA_HOST }}/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
 
-          FAILED=0
-          OK=0
-          INACTIVE=0
+          MESSAGE=""; GITEA_BLOCK=""
+          for REPO in "${github_order[@]}"; do MESSAGE+="*$REPO*\n${github_status[$REPO]}\n"; done
+          for REPO in "${gitea_order[@]}"; do GITEA_BLOCK+="${gitea_status[$REPO]}"; done
+          [[ -n "$GITEA_BLOCK" ]] && MESSAGE+="*Claude Review*\n$GITEA_BLOCK"
+          [[ -z "$MESSAGE" ]] && exit 0
+
+          FAILED=$(printf '%b' "$MESSAGE" | grep -c '^🔴 ' || true)
+          OK=$(printf '%b' "$MESSAGE" | grep -c '^🟢 ' || true)
+          INACTIVE=$(printf '%b' "$MESSAGE" | grep -c '^⚪️ ' || true)
+
           ATTENTION=""
-          FULL_REPORT=""
-          GITEA_BLOCK=""
-
           for REPO in "${github_order[@]}"; do
-            BLOCK="${github_status[$REPO]}"
-            FULL_REPORT+="*$REPO*\n$BLOCK\n"
-
-            FAILED_NAMES=""
-            while IFS= read -r LINE; do
-              [[ -z "$LINE" ]] && continue
-
-              case "$LINE" in
-                "🔴 "*)
-                  ((FAILED++))
-                  NAME="$(sed -n 's/^[^[]*\[\([^]]*\)\].*/\1/p' <<< "$LINE")"
-                  [[ -n "$NAME" ]] && FAILED_NAMES+="${FAILED_NAMES:+, }$NAME"
-                  ;;
-                "🟢 "*)
-                  ((OK++))
-                  ;;
-                "⚪️ "*|"⚪ "*)
-                  ((INACTIVE++))
-                  ;;
-              esac
-            done <<< "$(printf '%b' "$BLOCK")"
-
-            [[ -n "$FAILED_NAMES" ]] && ATTENTION+="• $REPO — $FAILED_NAMES\n"
+            REPO_FAILED="$(printf '%b' "${github_status[$REPO]}" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p' | paste -sd ', ' -)"
+            [[ -n "$REPO_FAILED" ]] && ATTENTION+="• $REPO — $REPO_FAILED\n"
           done
-
           for REPO in "${gitea_order[@]}"; do
-            BLOCK="${gitea_status[$REPO]}"
-            GITEA_BLOCK+="$BLOCK"
-
-            FAILED_NAMES=""
-            while IFS= read -r LINE; do
-              [[ -z "$LINE" ]] && continue
-
-              case "$LINE" in
-                "🔴 "*)
-                  ((FAILED++))
-                  NAME="$(sed -n 's/^[^[]*\[\([^]]*\)\].*/\1/p' <<< "$LINE")"
-                  [[ -n "$NAME" ]] && FAILED_NAMES+="${FAILED_NAMES:+, }$NAME"
-                  ;;
-                "🟢 "*)
-                  ((OK++))
-                  ;;
-                "⚪️ "*|"⚪ "*)
-                  ((INACTIVE++))
-                  ;;
-              esac
-            done <<< "$(printf '%b' "$BLOCK")"
-
-            [[ -n "$FAILED_NAMES" ]] && ATTENTION+="• $REPO — $FAILED_NAMES\n"
+            REPO_FAILED="$(printf '%b' "${gitea_status[$REPO]}" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p' | paste -sd ', ' -)"
+            [[ -n "$REPO_FAILED" ]] && ATTENTION+="• $REPO — $REPO_FAILED\n"
           done
 
-          [[ -n "$GITEA_BLOCK" ]] && FULL_REPORT+="*Claude Review*\n$GITEA_BLOCK"
-          [[ -z "$FULL_REPORT" ]] && exit 0
+          SUMMARY="🔴 Failed: $FAILED\n🟢 OK: $OK\n⚪️ Inactive: $INACTIVE"
+          [[ -n "$ATTENTION" ]] && SUMMARY+="\n\n🔴 Need attention\n$ATTENTION"
+          MESSAGE="$SUMMARY\n\nℹ️ Full report below\n\n$MESSAGE"
 
-          MESSAGE="🔴 Failed: $FAILED\n🟢 OK: $OK\n⚪️ Inactive: $INACTIVE"
-          [[ -n "$ATTENTION" ]] && MESSAGE+="\n\n🔴 Need attention\n$ATTENTION"
-          MESSAGE+="\nℹ️ Full report below\n\n$FULL_REPORT"
+          echo -e "$MESSAGE"
+          for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\":$CHAT_ID,\"text\":\"$MESSAGE\",\"parse_mode\":\"Markdown\",\"disable_web_page_preview\":true}"
+          done
 
           echo -e "$MESSAGE"
           for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
