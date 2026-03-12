@@ -122,20 +122,29 @@ jobs:
 
           FAILED=$(printf '%b' "$MESSAGE" | grep -c '^🔴 ' || true)
           OK=$(printf '%b' "$MESSAGE" | grep -c '^🟢 ' || true)
-          INACTIVE=$(printf '%b' "$MESSAGE" | grep -c '^⚪️ ' || true)
+          INACTIVE=$(printf '%b' "$MESSAGE" | grep -c '^⚪' || true)
 
           ATTENTION=""
           for REPO in "${github_order[@]}"; do
-            REPO_FAILED="$(printf '%b' "${github_status[$REPO]}" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p' | paste -sd ', ' -)"
-            [[ -n "$REPO_FAILED" ]] && ATTENTION+="• $REPO — $REPO_FAILED\n"
-          done
-          for REPO in "${gitea_order[@]}"; do
-            REPO_FAILED="$(printf '%b' "${gitea_status[$REPO]}" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p' | paste -sd ', ' -)"
-            [[ -n "$REPO_FAILED" ]] && ATTENTION+="• $REPO — $REPO_FAILED\n"
+            REPO_FAILED="$(printf '%b' "${github_status[$REPO]}" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p')"
+            if [[ -n "$REPO_FAILED" ]]; then
+              ATTENTION+="• $REPO\n"
+              while IFS= read -r NAME; do
+                [[ -n "$NAME" ]] && ATTENTION+="  $NAME\n"
+              done <<< "$REPO_FAILED"
+            fi
           done
 
+          GITEA_FAILED="$(printf '%b' "$GITEA_BLOCK" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p')"
+          if [[ -n "$GITEA_FAILED" ]]; then
+            ATTENTION+="• Claude Review\n"
+            while IFS= read -r NAME; do
+              [[ -n "$NAME" ]] && ATTENTION+="  $NAME\n"
+            done <<< "$GITEA_FAILED"
+          fi
+
           SUMMARY="🔴 Failed: $FAILED\n🟢 OK: $OK\n⚪️ Inactive: $INACTIVE"
-          [[ -n "$ATTENTION" ]] && SUMMARY+="\n\n🔴 Need attention\n$ATTENTION"
+          [[ -n "$ATTENTION" ]] && SUMMARY+="\nNeed attention\n$ATTENTION"
           MESSAGE="$SUMMARY\n\nℹ️ Full report below\n\n$MESSAGE"
 
           echo -e "$MESSAGE"
