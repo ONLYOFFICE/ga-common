@@ -114,38 +114,41 @@ jobs:
             "https://${{ secrets.GITEA_HOST }}/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
             "https://${{ secrets.GITEA_HOST }}/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
 
-          MESSAGE=""; GITEA_BLOCK=""
-          for REPO in "${github_order[@]}"; do MESSAGE+="*$REPO*\n${github_status[$REPO]}\n"; done
+          FULL_MESSAGE=""; GITEA_BLOCK=""
+          for REPO in "${github_order[@]}"; do FULL_MESSAGE+="*$REPO*\n${github_status[$REPO]}\n"; done
           for REPO in "${gitea_order[@]}"; do GITEA_BLOCK+="${gitea_status[$REPO]}"; done
-          [[ -n "$GITEA_BLOCK" ]] && MESSAGE+="*Claude Review*\n$GITEA_BLOCK"
-          [[ -z "$MESSAGE" ]] && exit 0
+          [[ -n "$GITEA_BLOCK" ]] && FULL_MESSAGE+="*Claude Review*\n$GITEA_BLOCK"
+          [[ -z "$FULL_MESSAGE" ]] && exit 0
 
-          FAILED=$(printf '%b' "$MESSAGE" | grep -c '^🔴 ' || true)
-          OK=$(printf '%b' "$MESSAGE" | grep -c '^🟢 ' || true)
-          INACTIVE=$(printf '%b' "$MESSAGE" | grep -c '^⚪' || true)
+          FAILED=$(printf '%b' "$FULL_MESSAGE" | grep -c '^🔴 ' || true)
+          OK=$(printf '%b' "$FULL_MESSAGE" | grep -c '^🟢 ' || true)
+          INACTIVE=$(printf '%b' "$FULL_MESSAGE" | grep -c '^⚪' || true)
 
           ATTENTION=""
           for REPO in "${github_order[@]}"; do
             REPO_FAILED="$(printf '%b' "${github_status[$REPO]}" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p')"
             if [[ -n "$REPO_FAILED" ]]; then
-              ATTENTION+="• $REPO\n"
+              COUNT=$(printf '%s\n' "$REPO_FAILED" | sed '/^$/d' | wc -l)
+              ATTENTION+="• $REPO ($COUNT)\n"
               while IFS= read -r NAME; do
                 [[ -n "$NAME" ]] && ATTENTION+="  $NAME\n"
               done <<< "$REPO_FAILED"
+              ATTENTION+="\n"
             fi
           done
 
           GITEA_FAILED="$(printf '%b' "$GITEA_BLOCK" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p')"
           if [[ -n "$GITEA_FAILED" ]]; then
-            ATTENTION+="• Claude Review\n"
+            COUNT=$(printf '%s\n' "$GITEA_FAILED" | sed '/^$/d' | wc -l)
+            ATTENTION+="• Claude Review ($COUNT)\n"
             while IFS= read -r NAME; do
               [[ -n "$NAME" ]] && ATTENTION+="  $NAME\n"
             done <<< "$GITEA_FAILED"
+            ATTENTION+="\n"
           fi
 
-          SUMMARY="🔴 Failed: $FAILED\n🟢 OK: $OK\n⚪️ Inactive: $INACTIVE"
-          [[ -n "$ATTENTION" ]] && SUMMARY+="\nNeed attention\n$ATTENTION"
-          MESSAGE="$SUMMARY\n\nℹ️ Full report below\n\n$MESSAGE"
+          MESSAGE="🔴 Failed: $FAILED\n🟢 OK: $OK\n⚪️ Inactive: $INACTIVE"
+          [[ -n "$ATTENTION" ]] && MESSAGE+="\n\nNeed attention\n$ATTENTION"
 
           echo -e "$MESSAGE"
           for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
