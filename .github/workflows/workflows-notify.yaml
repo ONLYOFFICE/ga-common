@@ -126,7 +126,7 @@ jobs:
 
           ATTENTION=""
           for REPO in "${github_order[@]}"; do
-            REPO_FAILED="$(printf '%b' "${github_status[$REPO]}" | sed -n 's/^\(🔴 .*\)$/\1/p')"
+            REPO_FAILED="$(printf '%b' "${github_status[$REPO]}" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p')"
             if [[ -n "$REPO_FAILED" ]]; then
               COUNT=$(printf '%s\n' "$REPO_FAILED" | sed '/^$/d' | wc -l)
               ATTENTION+="• $REPO ($COUNT)\n"
@@ -137,7 +137,7 @@ jobs:
             fi
           done
 
-          GITEA_FAILED="$(printf '%b' "$GITEA_BLOCK" | sed -n 's/^\(🔴 .*\)$/\1/p')"
+          GITEA_FAILED="$(printf '%b' "$GITEA_BLOCK" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p')"
           if [[ -n "$GITEA_FAILED" ]]; then
             COUNT=$(printf '%s\n' "$GITEA_FAILED" | sed '/^$/d' | wc -l)
             ATTENTION+="• Claude Review ($COUNT)\n"
@@ -147,13 +147,22 @@ jobs:
             ATTENTION+="\n"
           fi
 
-          MESSAGE="🔴 $FAILED 🟢 $OK ⚪️ $INACTIVE"
-          [[ -n "$ATTENTION" ]] && MESSAGE+="\n\nNeed attention\n$ATTENTION"
+          SUMMARY="🔴 Failed: $FAILED 🟢 OK: $OK ⚪️ Inactive: $INACTIVE"
+          [[ -n "$ATTENTION" ]] && SUMMARY+="\n\nNeed attention\n$ATTENTION"
+
+          FULL_HTML="$(printf '%b' "$FULL_MESSAGE" | perl -pe '
+            s/&/&amp;/g;
+            s/</&lt;/g;
+            s/>/&gt;/g;
+            s/^\*([^*]+)\*$/<b>$1<\/b>/;
+            s/\[([^\]]+)\]\(([^)]+)\)/<a href="$2">$1<\/a>/g;
+          ')"
+
+          MESSAGE="${SUMMARY}\n\n<blockquote expandable>${FULL_HTML}</blockquote>"
 
           echo -e "$MESSAGE"
           for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
-              -d "{\"chat_id\":$CHAT_ID,\"text\":\"$MESSAGE\",\"parse_mode\":\"Markdown\",\"disable_web_page_preview\":true}"
+              -d "{\"chat_id\":$CHAT_ID,\"text\":\"$MESSAGE\",\"parse_mode\":\"HTML\",\"disable_web_page_preview\":true}"
           done
-
