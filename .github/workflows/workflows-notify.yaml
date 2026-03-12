@@ -126,7 +126,7 @@ jobs:
 
           ATTENTION=""
           for REPO in "${github_order[@]}"; do
-            REPO_FAILED="$(printf '%b' "${github_status[$REPO]}" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p')"
+            REPO_FAILED="$(printf '%b' "${github_status[$REPO]}" | sed -n 's/^\(🔴 .*\)$/\1/p')"
             if [[ -n "$REPO_FAILED" ]]; then
               COUNT=$(printf '%s\n' "$REPO_FAILED" | sed '/^$/d' | wc -l)
               ATTENTION+="• $REPO ($COUNT)\n"
@@ -137,7 +137,7 @@ jobs:
             fi
           done
 
-          GITEA_FAILED="$(printf '%b' "$GITEA_BLOCK" | sed -n 's/^🔴 \[\([^]]*\)\].*/\1/p')"
+          GITEA_FAILED="$(printf '%b' "$GITEA_BLOCK" | sed -n 's/^\(🔴 .*\)$/\1/p')"
           if [[ -n "$GITEA_FAILED" ]]; then
             COUNT=$(printf '%s\n' "$GITEA_FAILED" | sed '/^$/d' | wc -l)
             ATTENTION+="• Claude Review ($COUNT)\n"
@@ -147,7 +147,7 @@ jobs:
             ATTENTION+="\n"
           fi
 
-          MESSAGE="🔴 Failed: $FAILED\n🟢 OK: $OK\n⚪️ Inactive: $INACTIVE"
+          MESSAGE="🔴 Failed: $FAILED 🟢 OK: $OK ⚪️ Inactive: $INACTIVE"
           [[ -n "$ATTENTION" ]] && MESSAGE+="\n\nNeed attention\n$ATTENTION"
 
           echo -e "$MESSAGE"
