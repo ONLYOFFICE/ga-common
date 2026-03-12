@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "30 6 * * *"
+  push:
+    branches:
+      - feature/notify
 
 jobs:
   check-workflows:
