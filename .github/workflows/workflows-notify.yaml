@@ -147,7 +147,7 @@ jobs:
             ATTENTION+="\n"
           fi
 
-          MESSAGE="🔴 Failed: $FAILED 🟢 OK: $OK ⚪️ Inactive: $INACTIVE"
+          MESSAGE="🔴 $FAILED 🟢 $OK ⚪️ $INACTIVE"
           [[ -n "$ATTENTION" ]] && MESSAGE+="\n\nNeed attention\n$ATTENTION"
 
           echo -e "$MESSAGE"
