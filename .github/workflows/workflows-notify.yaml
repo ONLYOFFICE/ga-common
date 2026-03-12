@@ -145,11 +145,3 @@ jobs:
               -d "{\"chat_id\":$CHAT_ID,\"text\":\"$MESSAGE\",\"parse_mode\":\"Markdown\",\"disable_web_page_preview\":true}"
           done
 
-          echo -e "$MESSAGE"
-          for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -H "Content-Type: application/json" \
-              -d "$(jq -n --arg chat_id "$CHAT_ID" --arg text "$MESSAGE" \
-                '{chat_id:$chat_id,text:$text,parse_mode:"Markdown",disable_web_page_preview:true}')"
-          done
-
