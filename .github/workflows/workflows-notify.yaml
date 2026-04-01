@@ -42,10 +42,15 @@ jobs:
             Docker-Docs               | build.yaml            | Build docker
             ga-common                 | keeplive              | Actions Keepalive
           WORKFLOWS_GITEA: |
+            DocSpace-buildtools       | claude-review         | DocSpace-buildtools
             DocSpace-ui-kit-react     | claude-review         | DocSpace-ui-kit-react
             DocSpace-client           | claude-review         | DocSpace-client
             DocSpace-server           | claude-review         | DocSpace-server
-            DocSpace-buildtools       | claude-review         | DocSpace-buildtools
+            Docker-Docs               | claude-review         | Docker-Docs
+            Docker-DocumentServer     | claude-review         | Docker-DocumentServer
+            document-server-package   | claude-review         | document-server-package
+            OneClickInstall-Docs      | claude-review         | OneClickInstall-Docs
+            OneClickInstall-Workspace | claude-review         | OneClickInstall-Workspace
         run: |
           T24="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
           T30="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
