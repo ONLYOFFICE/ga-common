@@ -1,10 +1,10 @@
-# Reusable Github actions for/by ONLYOFFICE
+# Reusable GitHub Actions for ONLYOFFICE
 
-Repository contains reusable actions workflows. Also contains config files for some of them. 
+Repository contains reusable workflow actions and configuration files used across ONLYOFFICE repositories.
 
-Actions calls from actions in another ONLYOFFICE repositories. 
+## Usage
 
-For example:
+Workflows are called from other ONLYOFFICE repositories. Example:
 
 ```yaml
 name: lint
@@ -19,34 +19,46 @@ on:
       - '**/LICENSE'
 
 jobs:
-  lint-chart:           
+  lint-chart:
     name: lint chart ${{ github.event.repository.name }}
     uses: ONLYOFFICE/ga-common/.github/workflows/helm-units.yaml@master
-    with: 
+    with:
       ct_version: 3.8.0
       enable_yaml_lint: true
       enable_kube_lint: true
-```  
+```
 
-## Repo content 
+---
 
-### Helm charts linters
+## Workflows
 
-Action for checking helm charts for compliance with the rules for formatting yaml files and for compliance with the configured rules for kubernetes manifests.
+### Helm charts linter
 
-### k8s Deprecated recources validator
+Checks Helm charts for YAML formatting compliance and Kubernetes manifest rules.
 
-Action for check deprecated api and other resources in k8s yaml manifests
+### k8s Deprecated resources validator
 
-### Organization snyk action scanner
+Checks Kubernetes YAML manifests for deprecated API versions and resources.
 
-Weekly checks the organization's actions in open repositories for the presence of incorrectly formatted actions
+### Snyk scanner
+
+Weekly scan of the organization's open repositories for incorrectly formatted GitHub Actions.
 
 ### Workflows notification
 
-Scheduled job that monitors workflow failures across multiple repositories and sends notifications to Telegram
+Scheduled job that monitors workflow failures across multiple repositories and sends Telegram notifications.
 
 ### Workflows keepalive
 
-Scheduled job that makes an empty commit monthly in `feature/keeplive` to keep the repository active and prevent GitHub from disabling scheduled workflows.
+Monthly empty commit to `feature/keeplive` to keep the repository active and prevent GitHub from disabling scheduled workflows.
 
+### Claude Code Review
+
+Automated AI code review for pull requests across all connected Gitea repositories.
+
+An AWS Lambda webhook (`review/lambda/`) receives PR events, verifies the signature, and dispatches `.gitea/workflows/claude-review.yml`. The workflow runs Claude Code against the PR diff and posts a structured review comment with a `✅ APPROVE` / `❌ BLOCKED` verdict and commit status. On subsequent pushes the same comment is updated in place.
+
+- `.gitea/workflows/claude-review.yml` — workflow definition
+- `review/REVIEW.md` — review prompt template
+- `.gitea/scripts/gitea-api.sh` — Gitea API helpers
+- `review/lambda/` — Lambda webhook dispatcher

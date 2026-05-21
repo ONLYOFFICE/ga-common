@@ -1,0 +1,203 @@
+name: Claude Code Review
+run-name: "Review • ${{ inputs.org_name }}/${{ inputs.repo_name }}#${{ inputs.pr_number }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      org_name:
+        description: 'Organization name'
+        required: true
+        type: string
+      repo_name:
+        description: 'Repository name'
+        required: true
+        type: string
+      base_branch:
+        description: 'Base branch name'
+        required: true
+        type: string
+      pr_branch:
+        description: 'PR branch name'
+        required: true
+        type: string
+      pr_number:
+        description: 'PR number'
+        required: true
+        type: string
+      pr_sha:
+        description: 'PR head commit SHA'
+        required: true
+        type: string
+      model:
+        description: 'Claude model'
+        required: false
+        type: string
+        default: claude-sonnet-4-6
+
+env:
+  GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+
+concurrency:
+  group: Claude-Review-${{ inputs.org_name }}-${{ inputs.repo_name }}-${{ inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ORG_NAME: ${{ inputs.org_name }}
+      REPO_NAME: ${{ inputs.repo_name }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      PR_SHA: ${{ inputs.pr_sha }}
+      PR_BRANCH: ${{ inputs.pr_branch }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
+    steps:
+      - name: Select API key
+        id: select_key
+        env:
+          ANTHROPIC_KEYS: ${{ secrets.ANTHROPIC_KEYS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          printf '%s' "$ANTHROPIC_KEYS" | jq '.' > /dev/null 2>&1 || echo "::warning::ANTHROPIC_KEYS is not valid JSON"
+          ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_KEYS" | jq -r --arg repo "$REPO_NAME" '.[$repo] // empty')
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_KEY_DEFAULT }}"
+            echo "::warning::No dedicated API key for $ORG_NAME/$REPO_NAME - using default key"
+            for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -H "Content-Type: application/json" \
+                -d "$(jq -n --argjson id "$CHAT_ID" --arg r "$REPO_NAME" '{chat_id:$id,text:("⚠️ Claude Review: add Anthropic key for `"+$r+"`"),parse_mode:"Markdown"}')" > /dev/null
+            done
+          fi
+          echo "::add-mask::$ANTHROPIC_API_KEY"
+          echo "api_key=$ANTHROPIC_API_KEY" >> $GITHUB_OUTPUT
+
+      - name: Checkout repositories
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
+          git clone "https://$GITEA_HOST/$ORG_NAME/ga-common" --depth=1 --branch "$REF_NAME" .
+          git clone "https://$GITEA_HOST/$ORG_NAME/$REPO_NAME" --depth=1 --branch "$PR_BRANCH" repo
+
+      - name: Prepare review context
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          source .gitea/scripts/gitea-api.sh
+
+          # Diff
+          gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
+          [ -s repo/pr.diff ] || { set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "error" "PR diff is empty"; exit 1; }
+          set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "pending" "In progress"
+
+          # Previous review
+          ALL_COMMENTS=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments")
+          PREVIOUS_REVIEW=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review -->"))] | last | .body // empty')
+          REVIEW_COMMENT_ID=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review -->"))] | last | .id // empty')
+          if echo "$PREVIOUS_REVIEW" | grep -qE "✅ APPROVE|❌ BLOCKED"; then
+            echo "Previous review found (#$REVIEW_COMMENT_ID)"
+            echo "$PREVIOUS_REVIEW" > repo/previous-claude-output.md
+            PREVIOUS_SHA=$(echo "$PREVIOUS_REVIEW" | grep -oP '(?<=<!-- review-sha:)[a-f0-9]+(?= -->)' || true)
+          fi
+          WORKING_ID=$(post_working_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" "$REVIEW_COMMENT_ID" "repo/previous-claude-output.md")
+          echo "$WORKING_ID" > repo/review-comment-id
+
+          # PR metadata
+          PR_INFO=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER")
+          PR_TITLE=$(echo "$PR_INFO" | jq -r '.title' | tr '\n\r`$' '    ' | cut -c1-200)
+          PR_AUTHOR=$(echo "$PR_INFO" | jq -r '.user.login' | tr '\n\r`$' '    ' | cut -c1-100)
+          COMMIT_MESSAGES=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER/commits"| jq -r '.[].commit.message' | head -20 | cut -c1-120 | sed 's/[`$]/./g; s/^/  - /' | tr '\r' ' ' || echo "  (none)")
+          read -r PR_ADDITIONS PR_DELETIONS < <(echo "$PR_INFO" | jq -r '[.additions, .deletions] | @tsv')
+          echo "PR metadata: #$PR_NUMBER '$PR_TITLE' by $PR_AUTHOR ($PR_BRANCH → $BASE_BRANCH) [+$PR_ADDITIONS/-$PR_DELETIONS]"
+
+          # Render prompt
+          export PR_TITLE PR_AUTHOR PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES PREVIOUS_SHA
+          envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $PREVIOUS_SHA' \
+            < review/REVIEW.md > repo/claude-prompt.txt
+
+          # Unshallow for full diff context
+          git -C repo fetch --unshallow 2>/dev/null || true
+          git -C repo fetch origin "$BASE_BRANCH" --depth=1 2>/dev/null || true
+
+      - name: Non-ASCII comment check
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          source .gitea/scripts/gitea-api.sh
+          NON_ASCII_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Non-ASCII-Check -->"))] | last | .id // empty')
+          if python3 .gitea/scripts/check-english-comments.py repo/pr.diff > /tmp/english-check.md; then
+            echo "Non-ASCII check passed"
+            [ -n "$NON_ASCII_COMMENT_ID" ] && gitea_api_json "$ORG_NAME/$REPO_NAME/issues/comments/$NON_ASCII_COMMENT_ID" -X DELETE > /dev/null || true
+            set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "success" "Ok" "Non-ASCII Check"
+          else
+            count=$(grep -c '^- \[' /tmp/english-check.md 2>/dev/null || echo "?")
+            echo "Non-ASCII check failed: $count violation(s)"
+            upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/english-check.md "$NON_ASCII_COMMENT_ID" "<!-- Non-ASCII-Check -->"
+            set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "failure" "Failed: $count violation(s)" "Non-ASCII Check"
+          fi
+
+      - name: Run review
+        working-directory: repo
+        env:
+          ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
+          CLAUDE_MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code
+          export PATH="$(npm config get prefix)/bin:$PATH"
+          date +%s > ../review-start.txt
+          echo "Running review with model: $CLAUDE_MODEL"
+          claude -p "$(cat claude-prompt.txt)" \
+            --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" | tee ../claude-output.md
+          echo "Review size: $(wc -l < ../claude-output.md) lines"
+
+      - name: Post review and set status
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          source .gitea/scripts/gitea-api.sh
+
+          REVIEW_COMMENT_ID=$(cat repo/review-comment-id 2>/dev/null || true)
+          if [ -z "$REVIEW_COMMENT_ID" ]; then
+            REVIEW_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review -->"))] | last | .id // empty')
+          fi
+          DURATION=""
+          [ -f review-start.txt ] && { elapsed=$(( $(date +%s) - $(cat review-start.txt) )); DURATION="[$((elapsed/60))m $((elapsed%60))s]"; }
+
+          # Replace missing/invalid output with a fallback comment
+          FALLBACK_USED=false
+          if ! grep -q "<details>" claude-output.md 2>/dev/null; then
+            FALLBACK_USED=true
+            echo "::warning::claude-output.md is missing or invalid - posting fallback message"
+            {
+              printf '**Review error** - could not complete. See the [workflow run](%s) for details.' "$(_run_url)"
+              if [ -f repo/previous-claude-output.md ]; then
+                printf '\n\n---\n\n<details><summary>Previous review</summary>\n\n'
+                cat repo/previous-claude-output.md
+                printf '\n\n</details>'
+              fi
+            } > claude-output.md
+          fi
+
+          echo "Posting review comment ($(wc -l < claude-output.md) lines)"
+          upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "<!-- Claude-Review -->" "$PR_SHA" || \
+            echo "::warning::Failed to post review comment"
+
+          # Determine commit status from job result and review verdict
+          VERDICT=$(grep -oF -e 'APPROVE' -e 'BLOCKED' claude-output.md 2>/dev/null | head -1 || true)
+          if   [[ "$JOB_STATUS" != "success" ]]; then STATE="failure" DESC="Failed $DURATION"
+          elif [[ "$VERDICT" == "APPROVE" ]];    then STATE="success" DESC="Approved $DURATION"
+          elif [[ "$VERDICT" == "BLOCKED" ]];    then STATE="failure" DESC="Blocked $DURATION"
+          else                                        STATE="error"   DESC="Unknown $DURATION"
+          fi
+
+          echo "Setting commit status: $STATE - $DESC"
+          set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "$STATE" "$DESC"
