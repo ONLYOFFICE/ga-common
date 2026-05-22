@@ -51,6 +51,11 @@ jobs:
             document-server-package   | claude-review         | document-server-package
             OneClickInstall-Docs      | claude-review         | OneClickInstall-Docs
             OneClickInstall-Workspace | claude-review         | OneClickInstall-Workspace
+            Kubernetes-Docs           | claude-review         | Kubernetes-Docs
+            Kubernetes-Docs-Shards    | claude-review         | Kubernetes-Docs-Shards
+            Kubernetes-DocSpace       | claude-review         | Kubernetes-DocSpace
+            helm-charts               | claude-review         | helm-charts
+            office-js-api             | claude-review         | office-js-api
         run: |
           T24="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
           T30="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
