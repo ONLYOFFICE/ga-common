@@ -96,12 +96,12 @@ jobs:
 
           # Previous review
           ALL_COMMENTS=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments")
-          PREVIOUS_REVIEW=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review -->"))] | last | .body // empty')
-          REVIEW_COMMENT_ID=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review -->"))] | last | .id // empty')
+          PREVIOUS_REVIEW=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .body // empty')
+          REVIEW_COMMENT_ID=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
           if echo "$PREVIOUS_REVIEW" | grep -qE "✅ APPROVE|❌ BLOCKED"; then
             echo "Previous review found (#$REVIEW_COMMENT_ID)"
             echo "$PREVIOUS_REVIEW" > repo/previous-claude-output.md
-            PREVIOUS_SHA=$(echo "$PREVIOUS_REVIEW" | grep -oP '(?<=<!-- review-sha:)[a-f0-9]+(?= -->)' || true)
+            PREVIOUS_SHA=$(echo "$PREVIOUS_REVIEW" | grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' || true)
           fi
           WORKING_ID=$(post_working_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" "$REVIEW_COMMENT_ID" "repo/previous-claude-output.md")
           echo "$WORKING_ID" > repo/review-comment-id
@@ -167,7 +167,7 @@ jobs:
 
           REVIEW_COMMENT_ID=$(cat repo/review-comment-id 2>/dev/null || true)
           if [ -z "$REVIEW_COMMENT_ID" ]; then
-            REVIEW_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review -->"))] | last | .id // empty')
+            REVIEW_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
           fi
           DURATION=""
           [ -f review-start.txt ] && { elapsed=$(( $(date +%s) - $(cat review-start.txt) )); DURATION="[$((elapsed/60))m $((elapsed%60))s]"; }
@@ -188,7 +188,7 @@ jobs:
           fi
 
           echo "Posting review comment ($(wc -l < claude-output.md) lines)"
-          upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "<!-- Claude-Review -->" "$PR_SHA" || \
+          upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$PR_SHA" || \
             echo "::warning::Failed to post review comment"
 
           # Determine commit status from job result and review verdict

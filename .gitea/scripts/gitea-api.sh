@@ -52,7 +52,7 @@ $(cat "$previous_review_file")
 
 </details>"
   fi
-  local payload; payload=$(printf '%s\n\n<!-- Claude-Review -->' "$body" | jq -Rs .)
+  local payload; payload=$(printf '%s\n\n<!-- Claude-Review: -->' "$body" | jq -Rs .)
   if [ -n "$comment_id" ]; then
     gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "{\"body\": $payload}" > /dev/null
     echo "$comment_id"
@@ -62,9 +62,9 @@ $(cat "$previous_review_file")
 }
 
 upsert_review_comment() {
-  local repo="$1" pr="$2" file="$3" comment_id="${4:-}" marker="${5:-<!-- Claude-Review -->}" sha="${6:-}"
-  local sha_tag=""; [ -n "$sha" ] && sha_tag="<!-- review-sha:$sha -->\n"
-  local body; body="$(printf '%s%s\n\n%s' "$sha_tag" "$(cat "$file")" "$marker")"
+  local repo="$1" pr="$2" file="$3" comment_id="${4:-}" sha="${5:-}"
+  local end_marker="<!-- Claude-Review:${sha} -->"
+  local body; body="$(printf '%s\n\n%s' "$(cat "$file")" "$end_marker")"
   if [ -n "$comment_id" ]; then
     gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "{\"body\": $(echo "$body" | jq -Rs .)}" > /dev/null
   else
