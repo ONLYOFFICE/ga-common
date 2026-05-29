@@ -149,3 +149,5 @@ Respond with exactly this structure (no extra lines outside it):
 - Repeated bad patterns across files → one entry noting the pattern, not per-file duplicates
 - Replace each counter `X` with the actual count; Fixed = total ⚪️ Fixed across all categories
 - Output ONLY the `<details>…</details>` block — nothing before or after it
+
+**The very first character of your output must be `<`. No text, no explanation, no reasoning before `<details>` — ever. Not even one word.**
