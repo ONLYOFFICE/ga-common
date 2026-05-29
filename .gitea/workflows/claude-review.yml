@@ -100,7 +100,7 @@ jobs:
           REVIEW_COMMENT_ID=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
           if echo "$PREVIOUS_REVIEW" | grep -qE "✅ APPROVE|❌ BLOCKED"; then
             echo "Previous review found (#$REVIEW_COMMENT_ID)"
-            echo "$PREVIOUS_REVIEW" > repo/previous-claude-output.md
+            echo "$PREVIOUS_REVIEW" | grep -v '^<!-- Claude-Review:' > repo/previous-claude-output.md
             PREVIOUS_SHA=$(echo "$PREVIOUS_REVIEW" | grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' || true)
           fi
           WORKING_ID=$(post_working_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" "$REVIEW_COMMENT_ID" "repo/previous-claude-output.md")
