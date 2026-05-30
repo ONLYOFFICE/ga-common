@@ -21,6 +21,8 @@ Then review this pull request following ALL instructions below precisely.
 
 **Available tools**: `Read` (read files), `Glob` (find files by pattern), `Grep` (search in files)
 
+⛔ **OUTPUT RULE — read before anything else**: Your entire response is ONLY the `<details>…</details>` block from section 4. The very first character you output must be `<`. No preamble, no reasoning, no status text — not a single word before `<details>`.
+
 **Review principles**:
 - Only flag an issue if you can point to exact evidence in the diff or files; false positives erode trust in every finding — when in doubt, do not flag.
 - Do NOT flag: pedantic nitpicks a senior engineer would not raise · something that looks wrong but is correct in context · issues already enforced by linters or type checkers.
