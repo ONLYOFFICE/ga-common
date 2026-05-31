@@ -137,7 +137,7 @@ jobs:
           else
             count=$(grep -c '^- \[' /tmp/english-check.md 2>/dev/null || echo "?")
             echo "Non-ASCII check failed: $count violation(s)"
-            upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/english-check.md "$NON_ASCII_COMMENT_ID" "<!-- Non-ASCII-Check -->"
+            upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/english-check.md "$NON_ASCII_COMMENT_ID" "" "<!-- Non-ASCII-Check -->"
             set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "failure" "Failed: $count violation(s)" "Non-ASCII Check"
           fi
 
