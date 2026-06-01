@@ -155,7 +155,7 @@ jobs:
           set +o pipefail
           claude -p "$(cat claude-prompt.txt)" \
             --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" \
-            --output-format stream-json | tee ../claude-stream.jsonl | \
+            --output-format stream-json --verbose | tee ../claude-stream.jsonl | \
             jq -rj --unbuffered 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text'
           CLAUDE_EXIT=${PIPESTATUS[0]}
           set -o pipefail
