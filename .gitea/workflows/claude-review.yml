@@ -156,8 +156,7 @@ jobs:
             --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" \
             --output-format json > ../claude-output.json
           jq -r '.result' ../claude-output.json | tee ../claude-output.md
-          COST=$(jq -r 'if .cost_usd then "$\(.cost_usd | . * 1000 | round / 1000)" else "n/a" end' ../claude-output.json)
-          echo "Review size: $(wc -l < ../claude-output.md) lines | Cost: $COST"
+          echo "Review size: $(wc -l < ../claude-output.md) lines"
 
       - name: Post review and set status
         if: always()
