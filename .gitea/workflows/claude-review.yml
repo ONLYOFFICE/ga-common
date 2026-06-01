@@ -155,13 +155,20 @@ jobs:
           set +o pipefail
           claude -p "$(cat claude-prompt.txt)" \
             --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" \
-            --output-format stream-json --verbose | tee ../claude-stream.jsonl | \
-            jq -rj --unbuffered 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text'
+            --output-format stream-json --verbose | stdbuf -oL tee ../claude-stream.jsonl | \
+            while IFS= read -r line; do
+              echo "$line" | jq -rj '
+                if .type == "assistant" then
+                  .message.content[]? | select(.type == "text") | .text
+                elif .type == "tool_use" then
+                  "[tool: \(.name // "?")] \(.input | to_entries | map(.key+"="+(.value|tostring)) | join(" "))\n"
+                else empty end' 2>/dev/null || true
+            done
           CLAUDE_EXIT=${PIPESTATUS[0]}
           set -o pipefail
           [ "$CLAUDE_EXIT" -eq 0 ] || exit "$CLAUDE_EXIT"
-          jq -rs 'last | .result // ""' ../claude-stream.jsonl > ../claude-output.md
-          COST=$(jq -rs 'last | if .cost_usd then "$\(.cost_usd | . * 1000 | round / 1000)" else "n/a" end' ../claude-stream.jsonl)
+          jq -rs '[.[] | select(.type == "result")] | last | .result // ""' ../claude-stream.jsonl > ../claude-output.md
+          COST=$(jq -rs '[.[] | select(.type == "result")] | last | if .cost_usd then "$\(.cost_usd | . * 1000 | round / 1000)" else "n/a" end' ../claude-stream.jsonl)
           echo "Review size: $(wc -l < ../claude-output.md) lines | Cost: $COST"
 
       - name: Post review and set status
