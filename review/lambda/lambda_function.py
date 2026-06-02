@@ -19,7 +19,7 @@ RETURN_RUN_DETAILS = os.getenv("RETURN_RUN_DETAILS", "false").lower() == "true"
 
 ALLOWED_ACTIONS = tuple(
     value.strip()
-    for value in os.getenv("ALLOWED_ACTIONS", "opened,reopened,synchronize,synchronized,edited").split(",")
+    for value in os.getenv("ALLOWED_ACTIONS", "opened,reopened,synchronize,synchronized").split(",")
     if value.strip()
 )
 ALLOWED_BASE_BRANCH_PATTERNS = tuple(
