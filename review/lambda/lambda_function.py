@@ -24,7 +24,7 @@ ALLOWED_ACTIONS = tuple(
 )
 ALLOWED_BASE_BRANCH_PATTERNS = tuple(
     value.strip()
-    for value in os.getenv("ALLOWED_BASE_BRANCH_PATTERNS", "release/*,hotfix/*").split(",")
+    for value in os.getenv("ALLOWED_BASE_BRANCH_PATTERNS", "develop,master,release/*,hotfix/*").split(",")
     if value.strip()
 )
 ALLOWED_REPOSITORIES = tuple(
