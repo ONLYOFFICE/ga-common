@@ -39,7 +39,7 @@ post_working_comment() {
   local body
   body="**Claude Code Review** • [View run →]($(_run_url))
 
-<img src=\"https://raw.githubusercontent.com/markwylde/claude-code-gitea-action/refs/heads/gitea/assets/spinner.gif\" width=\"20\" align=\"absmiddle\" /> Analyzing PR..."
+<img src=\"https://raw.githubusercontent.com/markwylde/claude-code-gitea-action/refs/heads/gitea/assets/spinner.gif\" width=\"20\" align=\"absmiddle\" /> Analyzing Pull Request..."
   if [ -n "$previous_review_file" ] && [ -f "$previous_review_file" ]; then
     local prev_verdict=""
     grep -q "✅ APPROVE" "$previous_review_file" && prev_verdict=" - ✅ APPROVE"
