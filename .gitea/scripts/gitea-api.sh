@@ -37,7 +37,9 @@ fetch_all_comments() {
 post_working_comment() {
   local repo="$1" pr="$2" comment_id="${3:-}" previous_review_file="${4:-}"
   local body
-  body="**Claude Code Review** • [View run →]($(_run_url))"
+  body="**Claude Code Review** • [View run →]($(_run_url))
+
+![](https://raw.githubusercontent.com/markwylde/claude-code-gitea-action/refs/heads/gitea/assets/spinner.gif) Analyzing PR..."
   if [ -n "$previous_review_file" ] && [ -f "$previous_review_file" ]; then
     local prev_verdict=""
     grep -q "✅ APPROVE" "$previous_review_file" && prev_verdict=" - ✅ APPROVE"
