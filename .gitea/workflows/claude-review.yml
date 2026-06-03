@@ -85,6 +85,7 @@ jobs:
       - name: Prepare review context
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          BUGZILLA_API_KEY: ${{ secrets.BUGZILLA_API_KEY }}
         run: |
           set -euo pipefail
           source .gitea/scripts/gitea-api.sh
@@ -110,13 +111,20 @@ jobs:
           PR_INFO=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER")
           PR_TITLE=$(echo "$PR_INFO" | jq -r '.title' | tr '\n\r`$' '    ' | sed 's/[[:space:]]*$//' | cut -c1-200)
           PR_AUTHOR=$(echo "$PR_INFO" | jq -r '.user.login' | tr '\n\r`$' '    ' | cut -c1-100)
+          PR_BODY=$(echo "$PR_INFO" | jq -r '.body // empty' | tr '\n\r`$' '    ' | cut -c1-4000)
           COMMIT_MESSAGES=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER/commits"| jq -r '.[].commit.message' | head -20 | cut -c1-120 | sed 's/[`$]/./g; s/^/  - /' | tr '\r' ' ' || echo "  (none)")
           read -r PR_ADDITIONS PR_DELETIONS < <(echo "$PR_INFO" | jq -r '[.additions, .deletions] | @tsv')
           echo "PR metadata: #$PR_NUMBER '$PR_TITLE' by $PR_AUTHOR ($PR_BRANCH → $BASE_BRANCH) [+$PR_ADDITIONS/-$PR_DELETIONS]"
 
+          # Bugzilla context: pull referenced bug reports from PR title + body
+          BUGZILLA_CONTEXT=$(printf '%s\n%s' "$PR_TITLE" "$PR_BODY" | python3 .gitea/scripts/bugzilla-api.py --from-text || true)
+          if printf '%s' "$BUGZILLA_CONTEXT" | grep -q '^<bug '; then
+            echo "Bugzilla: referenced bug(s) found, context attached"
+          fi
+
           # Render prompt
-          export PR_TITLE PR_AUTHOR PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES PREVIOUS_SHA
-          envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $PREVIOUS_SHA' \
+          export PR_TITLE PR_AUTHOR PR_BODY PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES PREVIOUS_SHA BUGZILLA_CONTEXT
+          envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_BODY $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $PREVIOUS_SHA $BUGZILLA_CONTEXT' \
             < review/REVIEW.md > repo/claude-prompt.txt
 
           # Unshallow for full diff context

@@ -61,4 +61,5 @@ An AWS Lambda webhook (`review/lambda/`) receives PR events, verifies the signat
 - `.gitea/workflows/claude-review.yml` — workflow definition
 - `review/REVIEW.md` — review prompt template
 - `.gitea/scripts/gitea-api.sh` — Gitea API helpers
+- `.gitea/scripts/bugzilla-api.py` — extracts referenced bug IDs, fetches each as XML, renders them for the prompt
 - `review/lambda/` — Lambda webhook dispatcher
