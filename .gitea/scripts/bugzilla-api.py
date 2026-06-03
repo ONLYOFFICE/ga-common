@@ -19,7 +19,7 @@ Usage:
 
 Environment:
   BUGZILLA_API_KEY        required for REST fetch
-  BUGZILLA_HOST           default: bugzilla.onlyoffice.com
+  BUGZILLA_HOST           required: Bugzilla host name (provided via secret)
   BUGZILLA_MAX_IDS        default: 5  (cap on referenced bugs per PR)
   BUGZILLA_COMMENT_MAXLEN default: 2000 (per-comment text cap)
 """
@@ -31,7 +31,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-HOST = os.environ.get("BUGZILLA_HOST", "bugzilla.onlyoffice.com")
+HOST = os.environ.get("BUGZILLA_HOST", "")
 API_KEY = os.environ.get("BUGZILLA_API_KEY", "")
 MAX_IDS = int(os.environ.get("BUGZILLA_MAX_IDS", "5"))
 MAXLEN = int(os.environ.get("BUGZILLA_COMMENT_MAXLEN", "2000"))

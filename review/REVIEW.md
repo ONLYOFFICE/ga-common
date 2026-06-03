@@ -131,7 +131,7 @@ Write this section entirely in English. The Bugzilla data may be in another lang
 
   <details><summary>[✅/❌/🟡/❓] Bug N: <short English title> — STATUS</summary>
 
-  - **Bug**: [Bug N](https://bugzilla.onlyoffice.com/show_bug.cgi?id=N) · `SEVERITY/PRIORITY` · `Product/Component`
+  - **Bug**: [Bug N](use the `URL` from the bug data) · `SEVERITY/PRIORITY` · `Product/Component`
   - **What's reported**: 1-2 sentences on the symptom and reproduction, from the Bugzilla summary, description, and comments.
   - **Root cause**: The underlying cause of the bug, based on the Bugzilla data.
   - **Fixed by this PR**: ✅ Yes / ❌ No / 🟡 Partially / ❓ Cannot determine — short justification grounded in `pr.diff`. Cite the changed file (add a line number only if the line still exists in the new file). When the verdict is ❌ No or 🟡 Partially, state plainly what the bug asks for that the PR does not deliver — this is the most important signal in this section. If the bug comments proposed a fix, say whether the PR follows it.

@@ -86,6 +86,7 @@ jobs:
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
           BUGZILLA_API_KEY: ${{ secrets.BUGZILLA_API_KEY }}
+          BUGZILLA_HOST: ${{ secrets.BUGZILLA_HOST }}
         run: |
           set -euo pipefail
           source .gitea/scripts/gitea-api.sh
