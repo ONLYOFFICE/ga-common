@@ -82,6 +82,9 @@ def sanitize(text, cap=None):
         return ""
     cap = MAXLEN if cap is None else cap
     text = fix_mojibake(text)
+    # Neutralize angle brackets so untrusted bug text cannot close the
+    # <bugzilla_context>/<bug> wrappers and escape the "data only" zone.
+    text = text.replace("<", "&lt;").replace(">", "&gt;")
     text = text.replace("`", "'").replace("$", "")
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > cap:
