@@ -108,7 +108,7 @@ jobs:
 
           # PR metadata
           PR_INFO=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER")
-          PR_TITLE=$(echo "$PR_INFO" | jq -r '.title' | tr '\n\r`$' '    ' | cut -c1-200)
+          PR_TITLE=$(echo "$PR_INFO" | jq -r '.title' | tr '\n\r`$' '    ' | sed 's/[[:space:]]*$//' | cut -c1-200)
           PR_AUTHOR=$(echo "$PR_INFO" | jq -r '.user.login' | tr '\n\r`$' '    ' | cut -c1-100)
           COMMIT_MESSAGES=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER/commits"| jq -r '.[].commit.message' | head -20 | cut -c1-120 | sed 's/[`$]/./g; s/^/  - /' | tr '\r' ' ' || echo "  (none)")
           read -r PR_ADDITIONS PR_DELETIONS < <(echo "$PR_INFO" | jq -r '[.additions, .deletions] | @tsv')
