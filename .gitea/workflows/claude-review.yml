@@ -89,48 +89,8 @@ jobs:
           BUGZILLA_HOST: ${{ secrets.BUGZILLA_HOST }}
         run: |
           set -euo pipefail
-          source .gitea/scripts/gitea-api.sh
-
-          # Diff
-          gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
-          [ -s repo/pr.diff ] || { set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "error" "PR diff is empty"; exit 1; }
-          set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "pending" "In progress"
-
-          # Previous review
-          ALL_COMMENTS=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments")
-          PREVIOUS_REVIEW=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .body // empty')
-          REVIEW_COMMENT_ID=$(echo "$ALL_COMMENTS" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
-          if echo "$PREVIOUS_REVIEW" | grep -qE "✅ APPROVE|❌ BLOCKED"; then
-            echo "Previous review found (#$REVIEW_COMMENT_ID)"
-            echo "$PREVIOUS_REVIEW" | grep -v '^<!-- Claude-Review:' > repo/previous-claude-output.md
-            PREVIOUS_SHA=$(echo "$PREVIOUS_REVIEW" | grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' || true)
-          fi
-          WORKING_ID=$(post_working_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" "$REVIEW_COMMENT_ID" "repo/previous-claude-output.md")
-          echo "$WORKING_ID" > repo/review-comment-id
-
-          # PR metadata
-          PR_INFO=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER")
-          PR_TITLE=$(echo "$PR_INFO" | jq -r '.title' | tr '\n\r`$' '    ' | sed 's/[[:space:]]*$//' | cut -c1-200)
-          PR_AUTHOR=$(echo "$PR_INFO" | jq -r '.user.login' | tr '\n\r`$' '    ' | cut -c1-100)
-          PR_BODY=$(echo "$PR_INFO" | jq -r '.body // empty' | tr '\n\r`$' '    ' | cut -c1-4000)
-          COMMIT_MESSAGES=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER/commits"| jq -r '.[].commit.message' | head -20 | cut -c1-120 | sed 's/[`$]/./g; s/^/  - /' | tr '\r' ' ' || echo "  (none)")
-          read -r PR_ADDITIONS PR_DELETIONS < <(echo "$PR_INFO" | jq -r '[.additions, .deletions] | @tsv')
-          echo "PR metadata: #$PR_NUMBER '$PR_TITLE' by $PR_AUTHOR ($PR_BRANCH → $BASE_BRANCH) [+$PR_ADDITIONS/-$PR_DELETIONS]"
-
-          # Bugzilla context: pull referenced bug reports from PR title + body
-          BUGZILLA_CONTEXT=$(printf '%s\n%s' "$PR_TITLE" "$PR_BODY" | python3 .gitea/scripts/bugzilla-api.py --from-text || true)
-          if printf '%s' "$BUGZILLA_CONTEXT" | grep -q '^<bug '; then
-            echo "Bugzilla: referenced bug(s) found, context attached"
-          fi
-
-          # Render prompt
-          export PR_TITLE PR_AUTHOR PR_BODY PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES PREVIOUS_SHA BUGZILLA_CONTEXT
-          envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_BODY $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $PREVIOUS_SHA $BUGZILLA_CONTEXT' \
-            < review/REVIEW.md > repo/claude-prompt.txt
-
-          # Unshallow for full diff context
-          git -C repo fetch --unshallow 2>/dev/null || true
-          git -C repo fetch origin "$BASE_BRANCH" --depth=1 2>/dev/null || true
+          source .gitea/scripts/review-steps.sh
+          prepare_review_context
 
       - name: Non-ASCII comment check
         env:
@@ -155,6 +115,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
           CLAUDE_MODEL: ${{ inputs.model }}
+          CLAUDE_CODE_DISABLE_THINKING: "1"
         run: |
           set -euo pipefail
           npm install -g @anthropic-ai/claude-code
@@ -164,7 +125,7 @@ jobs:
           claude -p "$(cat claude-prompt.txt)" \
             --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" \
             --output-format json > ../claude-output.json
-          jq -r '.result' ../claude-output.json | tee ../claude-output.md
+          jq -r '.result' ../claude-output.json | sed -n '/<details>/,$ p' | tee ../claude-output.md
           echo "Review size: $(wc -l < ../claude-output.md) lines"
 
       - name: Post review and set status
@@ -174,41 +135,5 @@ jobs:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
           set -euo pipefail
-          source .gitea/scripts/gitea-api.sh
-
-          REVIEW_COMMENT_ID=$(cat repo/review-comment-id 2>/dev/null || true)
-          if [ -z "$REVIEW_COMMENT_ID" ]; then
-            REVIEW_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
-          fi
-          DURATION=""
-          [ -f review-start.txt ] && { elapsed=$(( $(date +%s) - $(cat review-start.txt) )); DURATION="[$((elapsed/60))m $((elapsed%60))s]"; }
-
-          # Replace missing/invalid output with a fallback comment
-          FALLBACK_USED=false
-          if ! grep -q "<details>" claude-output.md 2>/dev/null; then
-            FALLBACK_USED=true
-            echo "::warning::claude-output.md is missing or invalid - posting fallback message"
-            {
-              printf '**Review error** - could not complete. See the [workflow run](%s) for details.' "$(_run_url)"
-              if [ -f repo/previous-claude-output.md ]; then
-                printf '\n\n---\n\n<details><summary>Previous review</summary>\n\n'
-                cat repo/previous-claude-output.md
-                printf '\n\n</details>'
-              fi
-            } > claude-output.md
-          fi
-
-          echo "Posting review comment ($(wc -l < claude-output.md) lines)"
-          upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$PR_SHA" || \
-            echo "::warning::Failed to post review comment"
-
-          # Determine commit status from job result and review verdict
-          VERDICT=$(grep -oF -e 'APPROVE' -e 'BLOCKED' claude-output.md 2>/dev/null | head -1 || true)
-          if   [[ "$JOB_STATUS" != "success" ]]; then STATE="failure" DESC="Failed $DURATION"
-          elif [[ "$VERDICT" == "APPROVE" ]];    then STATE="success" DESC="Approved $DURATION"
-          elif [[ "$VERDICT" == "BLOCKED" ]];    then STATE="failure" DESC="Blocked $DURATION"
-          else                                        STATE="error"   DESC="Unknown $DURATION"
-          fi
-
-          echo "Setting commit status: $STATE - $DESC"
-          set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "$STATE" "$DESC"
+          source .gitea/scripts/review-steps.sh
+          post_review_and_set_status

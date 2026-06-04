@@ -32,6 +32,10 @@ ALLOWED_REPOSITORIES = tuple(
     for value in os.getenv("ALLOWED_REPOSITORIES", "").split(",")
     if value.strip()
 )
+# Default WIP title prefixes (comma-separated string). Override with WIP_PREFIXES env var.
+# Matching is case-insensitive with an alphanumeric-continuation guard: a bare prefix like "WIP"
+# matches "WIP", "WIP:", "WIP - x", "WIP foo" but never "WIPe".
+DEFAULT_WIP_PREFIXES = "WIP,[WIP],(WIP),Draft,[Draft],(Draft)"
 
 
 def load_config():
@@ -63,6 +67,11 @@ def load_config():
         "allowed_repositories": tuple(
             value.strip()
             for value in os.getenv("ALLOWED_REPOSITORIES", ",".join(ALLOWED_REPOSITORIES)).split(",")
+            if value.strip()
+        ),
+        "wip_prefixes": tuple(
+            value.strip()
+            for value in os.getenv("WIP_PREFIXES", DEFAULT_WIP_PREFIXES).split(",")
             if value.strip()
         ),
     }
@@ -124,6 +133,24 @@ def is_repository_allowed(full_name, repo_name, allowed_repositories):
         return True
 
     return full_name in allowed_repositories or repo_name in allowed_repositories
+
+
+def is_work_in_progress(title, prefixes):
+    if not prefixes:
+        return False
+
+    normalized = (title or "").strip().lower()
+    for prefix in prefixes:
+        candidate = prefix.lower()
+        if not candidate or not normalized.startswith(candidate):
+            continue
+        # Accept when the prefix ends in punctuation (e.g. "wip:", "[wip]") or is
+        # followed by end-of-title or a non-alphanumeric char, so a bare "wip"
+        # matches "wip foo" / "wip" but never "wipe".
+        rest = normalized[len(candidate):]
+        if rest == "" or not rest[0].isalnum():
+            return True
+    return False
 
 
 def get_repo_full_name(payload):
@@ -243,8 +270,12 @@ def lambda_handler(event, context):
     if action not in config["allowed_actions"]:
         return response(200, {"ok": True, "ignored": True, "reason": "unsupported action", "action": action})
 
-    if not payload.get("pull_request"):
+    pull_request = payload.get("pull_request")
+    if not pull_request:
         return response(200, {"ok": True, "ignored": True, "reason": "missing pull_request"})
+
+    if is_work_in_progress(pull_request.get("title"), config["wip_prefixes"]):
+        return response(200, {"ok": True, "ignored": True, "reason": "work in progress"})
 
     try:
         inputs = extract_dispatch_inputs(payload)
