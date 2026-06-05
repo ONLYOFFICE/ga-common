@@ -111,7 +111,7 @@ Start with `<details>` as the very first characters; respond with exactly one to
 
 **Issue block** — every issue uses this exact form. The summary line carries severity and confidence. **Why** is exactly 1 sentence. **Fix** is exactly 1 sentence; add a code snippet only when the fix is not obvious from the sentence alone.
 
-  <details><summary>[🔴 Critical/🟡 Medium/🔵 Low/🟣 Legacy · ⭐ Sure/🌗 Likely/🌑 Unsure]: Issue title</summary>
+  <details><summary>[🔴 Critical/🟡 Medium/🔵 Low/🟣 Legacy · 🌕 Sure/🌗 Likely/🌑 Unsure]: Issue title</summary>
 
   - **File**: [`path/file.ext:42`]($FILE_LINK_BASE/path/file.ext#L42)
   - **Why**: One sentence grounded in the diff.
