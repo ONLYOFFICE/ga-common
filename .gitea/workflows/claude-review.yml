@@ -83,6 +83,7 @@ jobs:
           git clone "https://$GITEA_HOST/$ORG_NAME/$REPO_NAME" --depth=1 --branch "$PR_BRANCH" repo
 
       - name: Prepare review context
+        id: prepare
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
           BUGZILLA_API_KEY: ${{ secrets.BUGZILLA_API_KEY }}
@@ -93,6 +94,7 @@ jobs:
           prepare_review_context
 
       - name: Non-ASCII comment check
+        if: steps.prepare.outputs.skip != 'true'
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
@@ -111,6 +113,7 @@ jobs:
           fi
 
       - name: Run review
+        if: steps.prepare.outputs.skip != 'true'
         working-directory: repo
         env:
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
@@ -129,7 +132,7 @@ jobs:
           echo "Review size: $(wc -l < ../claude-output.md) lines"
 
       - name: Post review and set status
-        if: always()
+        if: always() && steps.prepare.outputs.skip != 'true'
         env:
           JOB_STATUS: ${{ job.status }}
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}

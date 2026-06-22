@@ -44,8 +44,6 @@ prepare_review_context() {
     echo "::warning::Sizable diff (${DIFF_LINES} lines) — reviewing in parts"
   fi
 
-  set_commit_status "$REPO_PATH" "$PR_SHA" "pending" "In progress"
-
   # --- previous review ---
   # Two separate jq calls on the same herestring — body is multi-line so @tsv
   # would escape newlines and break subsequent sed/grep operations.
@@ -66,6 +64,22 @@ prepare_review_context() {
   git -C repo fetch --unshallow 2>/dev/null || true
   git -C repo fetch origin "$BASE_BRANCH" --depth=1 2>/dev/null || true
 
+  # --- sync-merge guard ---
+  # Skip review when HEAD is a merge commit that only brings in the base branch
+  # (e.g. "Merge branch 'develop' into feature/…") with no new feature commits.
+  if git -C repo rev-parse --verify "HEAD^2" &>/dev/null; then
+    local MERGE_P2 BASE_TIP
+    MERGE_P2=$(git -C repo rev-parse HEAD^2 2>/dev/null || true)
+    BASE_TIP=$(git -C repo rev-parse "origin/$BASE_BRANCH" 2>/dev/null || true)
+    if [ -n "$MERGE_P2" ] && [ "$MERGE_P2" = "$BASE_TIP" ]; then
+      echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) — skipping review, keeping previous status"
+      echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+      return 0
+    fi
+  fi
+
+  set_commit_status "$REPO_PATH" "$PR_SHA" "pending" "In progress"
+
   # --- delta-incremental ---
   # Only build a delta when HEAD is a true fast-forward from the previously reviewed commit.
   # Force-push / rebase / same SHA all fall back to the full diff.
@@ -74,7 +88,20 @@ prepare_review_context() {
       || git -C repo fetch origin "$PREVIOUS_SHA" 2>/dev/null || true
     if git -C repo cat-file -e "${PREVIOUS_SHA}^{commit}" 2>/dev/null \
        && git -C repo merge-base --is-ancestor "$PREVIOUS_SHA" HEAD 2>/dev/null; then
-      git -C repo diff "$PREVIOUS_SHA" HEAD > repo/pr-delta.diff 2>/dev/null || true
+      # Abort delta if a base-branch sync merge sits in the range — the diff would include develop changes.
+      local SYNC_IN_RANGE=""
+      while IFS=' ' read -r _ p2 _rest; do
+        [ -z "$p2" ] && continue
+        local P2_TIP
+        P2_TIP=$(git -C repo rev-parse "origin/$BASE_BRANCH" 2>/dev/null || true)
+        if [ -n "$P2_TIP" ] && [ "$p2" = "$P2_TIP" ]; then
+          SYNC_IN_RANGE="yes"; break
+        fi
+      done < <(git -C repo log --merges --format="%P" "${PREVIOUS_SHA}..HEAD" 2>/dev/null || true)
+      if [ "$SYNC_IN_RANGE" = "yes" ]; then
+        echo "Sync merge in delta range — falling back to full PR diff"
+      fi
+      [ "$SYNC_IN_RANGE" = "yes" ] || git -C repo diff "$PREVIOUS_SHA" HEAD > repo/pr-delta.diff 2>/dev/null || true
       local DELTA_LINES DELTA_BYTES
       DELTA_LINES=$(wc -l < repo/pr-delta.diff 2>/dev/null | tr -d ' ' || true)
       DELTA_BYTES=$(wc -c < repo/pr-delta.diff 2>/dev/null | tr -d ' ' || true)
