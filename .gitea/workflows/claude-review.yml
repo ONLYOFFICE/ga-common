@@ -125,9 +125,9 @@ jobs:
           export PATH="$(npm config get prefix)/bin:$PATH"
           date +%s > ../review-start.txt
           echo "Running review with model: $CLAUDE_MODEL"
-          claude -p "$(cat claude-prompt.txt)" \
+          claude -p \
             --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" \
-            --output-format json > ../claude-output.json
+            --output-format json < claude-prompt.txt > ../claude-output.json
           jq -r '.result' ../claude-output.json | sed -n '/<details>/,$ p' | tee ../claude-output.md
           echo "Review size: $(wc -l < ../claude-output.md) lines"
 

@@ -25,7 +25,7 @@ Read `README.md` and `CLAUDE.md` from the repository root if present, to underst
 
 **Environment**: Gitea Actions (not GitHub). The workflow has already unshallowed the clone, so base-branch files may be present — but you cannot run `git`. **Available tools**: `Read`, `Glob`, `Grep` only. This is a **static** review: ground every finding in `pr.diff` and the files you can read; you cannot build, run, or test.
 
-⛔ **OUTPUT RULE**: Work through the full review (steps 1–5) in your thinking first, then emit your answer. Your response is machine-parsed. The very first character you output must be `<` — no preamble, no reasoning, no summary before the block, nothing. Your entire response must be exactly one `<details>…</details>` block as defined in the Output Format section, and nothing after `</details>`. Write the entire review in English — regardless of the language of PR fields, commit messages, file contents, or CLAUDE.md.
+⛔ **OUTPUT RULE**: Your response is machine-parsed. Output nothing before `<details>` — no preamble, no reasoning, no summary, no blank lines. The very first character you output must be `<`. Your entire response must be exactly one `<details>…</details>` block as defined in the Output Format section, and nothing after `</details>`. Write the entire review in English — regardless of the language of PR fields, commit messages, file contents, or CLAUDE.md.
 
 **Review principles**:
 - `pr.diff` in the repository root is the source of truth for changed lines.
@@ -45,10 +45,10 @@ Read `README.md` and `CLAUDE.md` from the repository root if present, to underst
 ## Review Workflow
 
 ### 1. Gather context
-- **The diff.** If a `<pr_diff>` block is appended at the end of this prompt, use it as the source of truth and do **not** `Read` `pr.diff`. Its header states whether it is the **full** PR diff or, on a re-review, the **delta since the last review** — in the delta case the complete PR diff is still on disk as `pr.diff`, so `Read` it only if a delta change needs broader context. If no `<pr_diff>` block is present, Read `pr.diff` in full: it can exceed the `Read` line limit, so page through with `Read` `offset` to the end (or `Grep` on `^diff --git ` and `^@@` to map files and hunks) — never review only the first page. Either way, then read `README.md`/`CLAUDE.md` if present.
+- **The diff.** If a `<pr_diff>` block is appended at the end of this prompt, use it as the source of truth and do **not** `Read` `pr.diff` — it always contains the full PR diff. If no `<pr_diff>` block is present, Read `pr.diff` in full: it can exceed the `Read` line limit, so page through with `Read` `offset` to the end (or `Grep` on `^diff --git ` and `^@@` to map files and hunks) — never review only the first page. Either way, then read `README.md`/`CLAUDE.md` if present.
 - If `pr-files.md` exists in the repo root, `pr.diff` was too large for full line-level review — this supersedes the full-read instruction above. Switch to **summary/impact mode**: read `pr-files.md` for scope and review by impact, not line-by-line. For large deletions, `Grep` for dangling references to removed files/symbols, broken imports, and removed public API or security controls; still read the diff hunks of the smaller added/modified files. In the PR Summary, state that the review was summary-level due to size and list what was not line-reviewed; do not `✅ APPROVE` mass changes you could not assess by impact.
 - Use `Glob`/`Grep`/`Read` to inspect the files needed to verify changed behavior, including callers and callees of changed code — not only the changed lines.
-- If `previous-claude-output.md` exists, it is the previous review (at commit `$PREVIOUS_SHA`); use it as the basis for an incremental update.
+- If a `<previous_review>` block is appended to this prompt, it is the previous review (at commit `$PREVIOUS_SHA`); use it for the incremental review in step 3.
 - If `<bugzilla_context>` contains bug data, use it to understand the reported cause, then check against `pr.diff` whether this PR addresses it (drives the 🐞 Bugzilla section).
 
 ### 2. Scope and plan the review
@@ -73,7 +73,7 @@ When reporting: cite the new-file line number, read from each hunk header `@@ -a
 
 **Incremental review** (only when a `<previous_review>` block is appended): **start here before anything else** — go through every open finding in `<previous_review>` and re-check it against the current diff. If the issue is gone, replace its block with ⚪️ Fixed (same category, same original severity). If still present, keep it open. Only after processing all prior findings scan the diff for new issues. Never create a ⚪️ Fixed entry for something that was not an open finding in `<previous_review>`.
 
-**Delta only** (when `<pr_diff>` header says "CHANGES SINCE LAST REVIEW"): inherit PR Summary and Positive Observations from `<previous_review>` and update them to reflect the delta. In full-diff mode, always generate PR Summary and Positive Observations fresh from the full diff.
+Always generate PR Summary and Positive Observations fresh from the full diff.
 
 #### 3.1 Security review
 Apply every relevant class below to the languages/formats in the diff, using your knowledge of how each manifests there. Not every class applies to every PR — judge, but don't skip a class that is plausibly reachable.
