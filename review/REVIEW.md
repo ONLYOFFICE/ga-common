@@ -67,6 +67,8 @@ For each changed region, reason through this language-agnostic methodology befor
 
 Also cover: broken functionality/regressions, performance on hot paths or with scaling impact, dependency/config risks, maintainability issues that cause real defects, and required documentation updates for user-visible behavior, ops, config, migrations, or breaking changes.
 
+Docker Hub README limit: If `README.md` changes in a repository that publishes it to Docker Hub, check the Docker Hub README/full-description limit (25,000 bytes) as far as the available context allows. Report violations or risk with a concrete fix: shorten content, move details to external docs, or use a dedicated Docker Hub description file. Do not suggest raising this external service limit.
+
 When reporting: cite the new-file line number, read from each hunk header `@@ -a,b +c,d @@` by counting added (`+`) and context lines forward from `c` (ignore removed `-` lines); give the smallest concrete fix; if the same pattern recurs, report it once with representative locations — scan the diff for the same pattern, since secrets and injection sinks are rarely isolated; never put the same issue in two categories.
 
 **Incremental review** (only when a `<previous_review>` block is appended): **start here before anything else** — go through every open finding in `<previous_review>` and re-check it against the current diff. If the issue is gone, replace its block with ⚪️ Fixed (same category, same original severity). If still present, keep it open. Only after processing all prior findings scan the diff for new issues. Never create a ⚪️ Fixed entry for something that was not an open finding in `<previous_review>`.
