@@ -32,7 +32,7 @@ on:
         description: 'Claude model'
         required: false
         type: string
-        default: claude-sonnet-4-6
+        default: claude-sonnet-5
 
 env:
   GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
