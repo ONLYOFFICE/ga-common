@@ -144,6 +144,34 @@ prepare_review_context() {
 }
 
 # ---------------------------------------------------------------------------
+# Defensive: if Claude's raw output nests a draft/self-correction <details>
+# wrapper around the real answer (seen occasionally since extended thinking is
+# disabled for this pipeline), extract just the well-formed [VERDICT] block
+# instead of posting the outer wrapper. No-op on already-well-formed output.
+# ---------------------------------------------------------------------------
+_extract_final_review_block() {
+  awk '
+    { line[NR] = $0 }
+    /- Claude Code Review<\/summary>/ && (/APPROVE/ || /BLOCKED/) { last = NR }
+    END {
+      if (!last) { for (i = 1; i <= NR; i++) print line[i]; exit }
+      open = -1
+      for (i = last; i >= 1; i--) { if (line[i] ~ /<details>/) { open = i; break } }
+      if (open == -1) { for (i = 1; i <= NR; i++) print line[i]; exit }
+      depth = 0; close_line = -1
+      for (i = open; i <= NR; i++) {
+        o = gsub(/<details>/, "<details>", line[i])
+        c = gsub(/<\/details>/, "<\/details>", line[i])
+        depth += o - c
+        if (depth == 0) { close_line = i; break }
+      }
+      if (close_line == -1) close_line = NR
+      for (i = open; i <= close_line; i++) print line[i]
+    }
+  ' "$1"
+}
+
+# ---------------------------------------------------------------------------
 # Post the finished review comment and set the final commit status.
 # Reads: claude-output.md, repo/review-comment-id, review-start.txt.
 # ---------------------------------------------------------------------------
@@ -162,6 +190,13 @@ post_review_and_set_status() {
     local elapsed
     elapsed=$(( $(date +%s) - $(<review-start.txt) )) || elapsed=0
     DURATION="[$((elapsed/60))m $((elapsed%60))s]"
+  fi
+
+  # strip any leading draft/self-correction wrapper before posting
+  if grep -q "<details>" claude-output.md 2>/dev/null; then
+    local NORMALIZED
+    NORMALIZED=$(_extract_final_review_block claude-output.md)
+    [ -n "$NORMALIZED" ] && printf '%s\n' "$NORMALIZED" > claude-output.md
   fi
 
   # fallback when Claude produced no valid output
