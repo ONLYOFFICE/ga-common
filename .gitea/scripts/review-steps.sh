@@ -143,9 +143,16 @@ prepare_review_context() {
   grep -q '^<bug ' <<< "$BUGZILLA_CONTEXT" && echo "Bugzilla: referenced bug(s) attached" || true
 
   # --- render prompt ---
+  # Branch names come straight from the webhook and may legally contain
+  # backticks, $, < and >. Sanitize the copies substituted into the prompt
+  # (scoped to the envsubst call only) — git/API keep the raw values.
+  local PR_BRANCH_SAFE BASE_BRANCH_SAFE
+  PR_BRANCH_SAFE=$(printf '%s' "$PR_BRANCH" | tr '`$' '  ' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-200)
+  BASE_BRANCH_SAFE=$(printf '%s' "$BASE_BRANCH" | tr '`$' '  ' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-200)
   local FILE_LINK_BASE="https://$GITEA_HOST/$ORG_NAME/$REPO_NAME/src/commit/$PR_SHA"
-  export PR_TITLE PR_AUTHOR PR_BODY PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES PREVIOUS_SHA BUGZILLA_CONTEXT FILE_LINK_BASE
-  envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_BODY $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $PREVIOUS_SHA $BUGZILLA_CONTEXT $FILE_LINK_BASE' \
+  export PR_TITLE PR_AUTHOR PR_BODY PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES PREVIOUS_SHA="${PREVIOUS_SHA:-unknown}" BUGZILLA_CONTEXT FILE_LINK_BASE
+  PR_BRANCH="$PR_BRANCH_SAFE" BASE_BRANCH="$BASE_BRANCH_SAFE" \
+    envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_BODY $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $PREVIOUS_SHA $BUGZILLA_CONTEXT $FILE_LINK_BASE' \
     < review/REVIEW.md > repo/claude-prompt.txt
   echo "Prompt (pre-diff): $(wc -l < repo/claude-prompt.txt) lines / $(wc -c < repo/claude-prompt.txt) bytes"
 
@@ -251,7 +258,16 @@ post_review_and_set_status() {
   if [ "$OUTPUT_BYTES" -gt 60000 ]; then
     echo "::warning::Review output is ${OUTPUT_BYTES} bytes — truncating to fit the comment size limit"
     head -c 59000 claude-output.md > claude-output.tmp
-    printf '\n\n_… review truncated: output exceeded the comment size limit; see the [workflow run](%s) for the full text …_\n\n</details>\n' "$(_run_url)" >> claude-output.tmp
+    # The byte cut can land inside nested issue <details> blocks — close every
+    # block left open so the truncation note renders outside collapsed content.
+    local opens closes
+    opens=$( grep -o '<details>'  claude-output.tmp | wc -l || true)
+    closes=$(grep -o '</details>' claude-output.tmp | wc -l || true)
+    while [ "${opens:-0}" -gt "${closes:-0}" ]; do
+      printf '\n</details>\n' >> claude-output.tmp
+      closes=$((closes + 1))
+    done
+    printf '\n\n_… review truncated: output exceeded the comment size limit; see the [workflow run](%s) for the full text …_\n' "$(_run_url)" >> claude-output.tmp
     mv claude-output.tmp claude-output.md
   fi
 

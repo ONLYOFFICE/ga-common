@@ -54,7 +54,9 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Budget: 2 review attempts x 10 min each (see per-attempt timeout below)
+    # plus setup and the posting step.
+    timeout-minutes: 30
     env:
       ORG_NAME: ${{ inputs.org_name }}
       REPO_NAME: ${{ inputs.repo_name }}
@@ -68,13 +70,15 @@ jobs:
         id: select_key
         env:
           ANTHROPIC_KEYS: ${{ secrets.ANTHROPIC_KEYS }}
+          ANTHROPIC_KEY_DEFAULT: ${{ secrets.ANTHROPIC_KEY_DEFAULT }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          set -euo pipefail
           printf '%s' "$ANTHROPIC_KEYS" | jq '.' > /dev/null 2>&1 || echo "::warning::ANTHROPIC_KEYS is not valid JSON"
-          ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_KEYS" | jq -r --arg repo "$REPO_NAME" '.[$repo] // empty')
+          ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_KEYS" | jq -r --arg repo "$REPO_NAME" '.[$repo] // empty' 2>/dev/null || true)
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_KEY_DEFAULT }}"
+            ANTHROPIC_API_KEY="$ANTHROPIC_KEY_DEFAULT"
             echo "::warning::No dedicated API key for $ORG_NAME/$REPO_NAME - using default key"
             for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
               curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -H "Content-Type: application/json" \
@@ -96,6 +100,9 @@ jobs:
           git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
           git clone "https://$GITEA_HOST/$ORG_NAME/ga-common" --depth=1 --branch "$REF_NAME" .
           git clone "https://$GITEA_HOST/$ORG_NAME/$REPO_NAME" --depth=1 --branch "$PR_BRANCH" repo
+          HEAD_SHA=$(git -C repo rev-parse HEAD)
+          [ "$HEAD_SHA" = "$PR_SHA" ] || \
+            echo "::warning::Branch tip $HEAD_SHA differs from dispatched SHA $PR_SHA (new push in flight) — benign: the superseding run will cancel this one"
 
       - name: Prepare review context
         id: prepare
@@ -110,6 +117,9 @@ jobs:
 
       - name: Non-ASCII comment check
         if: steps.prepare.outputs.skip != 'true'
+        # Auxiliary gate with its own "Non-ASCII Check" commit status; an API
+        # hiccup here must not fail the main review job.
+        continue-on-error: true
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
@@ -140,20 +150,24 @@ jobs:
           DISABLE_ERROR_REPORTING: "1"
         run: |
           set -euo pipefail
-          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
+          npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
           export PATH="$(npm config get prefix)/bin:$PATH"
           date +%s > ../review-start.txt
           echo "Running review with model: $CLAUDE_MODEL (claude-code $(claude --version || echo unknown))"
           for attempt in 1 2; do
             rc=0
-            claude -p \
+            # Per-attempt timeout keeps a hung CLI from eating the whole job
+            # budget; --max-turns is a runaway guard sized far above normal runs.
+            timeout -k 30 600 claude -p \
               --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" \
+              --max-turns 100 \
               --output-format json < claude-prompt.txt > ../claude-output.json || rc=$?
             if [ "$rc" -eq 0 ] && jq -e '.is_error == false and ((.result // "") | length > 0)' ../claude-output.json > /dev/null 2>&1; then
               break
             fi
             subtype=$(jq -r '.subtype // "unknown"' ../claude-output.json 2>/dev/null || echo "unparsable")
             echo "::warning::Review attempt $attempt failed (exit $rc, subtype: $subtype)"
+            echo "Result excerpt: $(jq -r '.result // empty' ../claude-output.json 2>/dev/null | head -c 300 || true)"
             if [ "$attempt" -eq 2 ]; then
               echo "::error::Review failed after 2 attempts"
               exit 1
@@ -165,7 +179,10 @@ jobs:
           echo "Review size: $(wc -l < ../claude-output.md) lines"
 
       - name: Post review and set status
-        if: always() && steps.prepare.outputs.skip != 'true'
+        # prepare is skipped iff key selection or checkout failed — nothing to
+        # post then. A prepare/review failure still reaches this step so the
+        # pending status is flipped to Failed.
+        if: always() && steps.prepare.outcome != 'skipped' && steps.prepare.outputs.skip != 'true'
         env:
           JOB_STATUS: ${{ job.status }}
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}

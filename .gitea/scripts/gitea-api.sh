@@ -67,10 +67,15 @@ upsert_review_comment() {
   local repo="$1" pr="$2" file="$3" comment_id="${4:-}" sha="${5:-}" marker="${6:-}"
   local end_marker="${marker:-<!-- Claude-Review:${sha} -->}"
   local body; body="$(printf '%s\n\n%s' "$(cat "$file")" "$end_marker")"
+  local payload; payload="{\"body\": $(echo "$body" | jq -Rs .)}"
   if [ -n "$comment_id" ]; then
-    gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "{\"body\": $(echo "$body" | jq -Rs .)}" > /dev/null
+    # Fall back to POST when the tracked comment was deleted mid-run (stale id)
+    # so the finished review is never silently dropped.
+    gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "$payload" > /dev/null \
+      || { echo "PATCH of comment #$comment_id failed — posting a new comment" >&2
+           gitea_api_json "$repo/issues/$pr/comments" -X POST -d "$payload" > /dev/null; }
   else
-    gitea_api_json "$repo/issues/$pr/comments" -X POST -d "{\"body\": $(echo "$body" | jq -Rs .)}" > /dev/null
+    gitea_api_json "$repo/issues/$pr/comments" -X POST -d "$payload" > /dev/null
   fi
 }
 
