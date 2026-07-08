@@ -43,6 +43,11 @@ on:
         required: false
         type: string
         default: 'latest'
+      effort:
+        description: 'Reasoning effort level (low/medium/high/xhigh/max)'
+        required: false
+        type: string
+        default: 'medium'
 
 env:
   GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
@@ -144,23 +149,21 @@ jobs:
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
           CLAUDE_MODEL: ${{ inputs.model }}
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
-          CLAUDE_CODE_DISABLE_THINKING: "1"
-          DISABLE_AUTOUPDATER: "1"
-          DISABLE_TELEMETRY: "1"
-          DISABLE_ERROR_REPORTING: "1"
+          CLAUDE_EFFORT: ${{ inputs.effort }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
         run: |
           set -euo pipefail
           npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
           export PATH="$(npm config get prefix)/bin:$PATH"
           date +%s > ../review-start.txt
-          echo "Running review with model: $CLAUDE_MODEL (claude-code $(claude --version || echo unknown))"
+          echo "Running review with model: $CLAUDE_MODEL, effort: $CLAUDE_EFFORT (claude-code $(claude --version || echo unknown))"
           for attempt in 1 2; do
             rc=0
             # Per-attempt timeout keeps a hung CLI from eating the whole job
             # budget; --max-turns is a runaway guard sized far above normal runs.
             timeout -k 30 600 claude -p \
               --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" \
-              --max-turns 100 \
+              --effort "$CLAUDE_EFFORT" --max-turns 100 \
               --output-format json < claude-prompt.txt > ../claude-output.json || rc=$?
             if [ "$rc" -eq 0 ] && jq -e '.is_error == false and ((.result // "") | length > 0)' ../claude-output.json > /dev/null 2>&1; then
               break
