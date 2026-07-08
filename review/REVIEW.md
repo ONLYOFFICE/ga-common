@@ -25,7 +25,7 @@ Read `README.md` and `CLAUDE.md` from the repository root if present, to underst
 
 **Environment**: Gitea Actions (not GitHub). The workflow has already unshallowed the clone, so base-branch files may be present — but you cannot run `git`. **Available tools**: `Read`, `Glob`, `Grep` only. This is a **static** review: ground every finding in `pr.diff` and the files you can read; you cannot build, run, or test.
 
-⛔ **OUTPUT RULE**: Your response is machine-parsed. Output nothing before `<details>` — no preamble, no reasoning, no summary, no blank lines. The very first character you output must be `<`. Your entire response must be exactly one `<details>…</details>` block as defined in the Output Format section, and nothing after `</details>`. Decide the verdict and full content before writing any output — never draft a placeholder wrapper, write "let me finalize" or similar aside, or nest a second `<details>…</details>` around a revised answer; extended thinking is disabled for this pipeline, so any reconsideration must happen silently before the first character, never inside the visible response. Write the entire review in English — regardless of the language of PR fields, commit messages, file contents, or CLAUDE.md.
+⛔ **OUTPUT RULE**: Your response is machine-parsed. You may begin with one optional `<review_plan>…</review_plan>` block — a concise working scratchpad (changed files, ecosystems, risks, which checks apply; at most ~40 lines). The pipeline strips this block before posting, so it is never published — do all visible reasoning there and nowhere else. After it (or as your entire response if you skip it), output exactly one `<details>…</details>` block as defined in the Output Format section: no other text before it, between the two blocks, or after `</details>`. Decide the verdict and full content before writing the final block — never draft a placeholder wrapper, write "let me finalize" or similar asides, or nest a second `<details>…</details>` around a revised answer. Write everything, including the plan block, in English — regardless of the language of PR fields, commit messages, file contents, or CLAUDE.md.
 
 **Review principles**:
 - `pr.diff` in the repository root is the source of truth for changed lines.
@@ -54,7 +54,7 @@ Read `README.md` and `CLAUDE.md` from the repository root if present, to underst
 ### 2. Scope and plan the review
 From `pr.diff`, enumerate which file types/ecosystems the PR touches (`.cs`→C#/.NET, `.ts/.tsx/.js/.jsx`→TS/React, `.c/.cpp/.h`→C/C++, `.py`→Python, `.sh`/CI `run:`→Shell, `Dockerfile`→Docker, `.yml/.yaml` under `.github`/`.gitea`→CI, `Makefile/.m4`→build, `.sql`→SQL, `.env/.json/.ini/.toml`→config). Reason about each present ecosystem from your own expert knowledge; ignore ecosystems absent from the diff.
 
-Then build a short **review plan** in your thinking: a work-list of every changed file with its ecosystem, its risk level, and which checks and language reasoning apply. Work through that list in step 3, highest-risk first, so no file is skipped. Keep the plan internal — it must never appear in your output.
+Then build a short **review plan** inside your `<review_plan>` block: a work-list of every changed file with its ecosystem, its risk level, and which checks and language reasoning apply. Work through that list in step 3, highest-risk first, so no file is skipped. The plan block is stripped by the pipeline and never published — but it must stay outside the final `<details>` block.
 
 ### 3. Build the review
 For each changed region, reason through this language-agnostic methodology before concluding it is clean:
@@ -103,15 +103,17 @@ Before output, verify: did I read `pr.diff` to its end (paging past the read lim
 
 Then quickly sanity-check each finding against the diff: drop it or lower its confidence if you cannot point to specific evidence. A finding you cannot defend does not ship.
 
+Finally, verify the counter line: each count must equal the actual number of issue blocks of that severity across all category sections.
+
 ### 5. Verdict Logic
 Severity = impact; **Confidence** = how sure the issue is real. They are independent — assign both. **Confidence rubric**: *High* = provable from the diff alone (you see both the flaw and the path to it); *Medium* = likely, but depends on code or runtime behavior outside the diff; *Low* = plausible, needs human judgment to confirm. Base the verdict only on currently open issues (⚪️ Fixed don't count), and **only High-confidence issues affect it**:
 - `❌ BLOCKED` — one or more open 🔴 Critical or 🟡 Medium issues **with High confidence**.
 - `✅ APPROVE` — none of the above. Open 🔵 Low, 🟣 Legacy, and any Medium/Low-confidence issues are allowed and still reported.
 
 ### 6. Output Format
-Start with `<details>` as the very first characters; respond with exactly one top-level `<details>…</details>` block and nothing else.
+After the optional `<review_plan>` block, respond with exactly one top-level `<details>…</details>` block and nothing else.
 
-**Issue block** — every issue uses this exact form. The summary line carries severity and confidence. **Why** is exactly 1 sentence. **Fix** is exactly 1 sentence; add a code snippet only when the fix is not obvious from the sentence alone.
+**Issue block** — every issue uses this exact form. The summary line carries severity and confidence; confidence maps to the step-5 rubric as 🌕 Sure = High, 🌗 Likely = Medium, 🌑 Unsure = Low. **Why** is exactly 1 sentence. **Fix** is exactly 1 sentence; add a code snippet only when the fix is not obvious from the sentence alone.
 
   <details><summary>[🔴 Critical/🟡 Medium/🔵 Low/🟣 Legacy · 🌕 Sure/🌗 Likely/🌑 Unsure]: Issue title</summary>
 
@@ -211,4 +213,4 @@ This section is informational: not counted, never changes the verdict.
 - Unpinned/unversioned dependencies are 🔵 Low at most, unless the diff adds a direct security or reproducibility risk with stronger evidence. PR title/commit violations are 🔵 Low. Non-English/transliterated comments are 🟡 Medium.
 
 ### 8. Final Output Rules
-Output only the `<details>…</details>` block above, after applying the omission rules. No analysis, tool logs, markdown outside the top-level block, or text after `</details>`. The first character of your output must be `<`.
+Apart from the optional `<review_plan>` block, output only the `<details>…</details>` block above, after applying the omission rules. No analysis, tool logs, or markdown outside those two blocks, and no text after `</details>`.

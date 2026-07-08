@@ -6,6 +6,31 @@
 source "$(dirname "${BASH_SOURCE[0]}")/gitea-api.sh"
 
 # ---------------------------------------------------------------------------
+# Copy the latest review statuses from a previously reviewed commit to the
+# current head. Used when the review is skipped on a base-branch sync merge:
+# statuses are bound to a SHA, so without this the new merge commit would have
+# no "Claude Code Review" status at all and a required status check would
+# block the PR. Best-effort — any failure degrades to a plain skip.
+# ---------------------------------------------------------------------------
+carry_over_statuses() {
+  local repo="$1" from_sha="$2" to_sha="$3"
+  [ -n "$from_sha" ] || { echo "No previous reviewed SHA — nothing to carry over"; return 0; }
+  local statuses
+  statuses=$(gitea_api "$repo/commits/$from_sha/statuses?limit=50") || return 0
+  local ctx entry state desc
+  for ctx in "Claude Code Review" "Non-ASCII Check"; do
+    entry=$(jq -c --arg ctx "$ctx" '[.[] | select(.context == $ctx)] | sort_by(.id) | last // empty' <<< "$statuses" 2>/dev/null) || continue
+    [ -n "$entry" ] && [ "$entry" != "null" ] || continue
+    state=$(jq -r '.status // empty' <<< "$entry")
+    case "$state" in success|failure|error) ;; *) continue ;; esac
+    # set_commit_status re-adds the "/ " description prefix, so strip it here.
+    desc=$(jq -r '.description // "" | sub("^/ "; "")' <<< "$entry")
+    set_commit_status "$repo" "$to_sha" "$state" "${desc:+$desc }(carried over)" "$ctx"
+    echo "Carried over '$ctx' status ($state) from ${from_sha:0:10} to ${to_sha:0:10}"
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Fetch the PR diff, build the prompt, and inline the diff.
 # Produces: repo/pr.diff, repo/claude-prompt.txt, optionally repo/pr-files.md,
 #           repo/previous-claude-output.md, repo/review-comment-id.
@@ -58,9 +83,13 @@ prepare_review_context() {
     sed '/^<!-- Claude-Review:/d' <<< "$PREVIOUS_REVIEW" > repo/previous-claude-output.md
     PREVIOUS_SHA=$(grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' <<< "$PREVIOUS_REVIEW" || true)
     if [ "${PREVIOUS_SHA:-}" = "$PR_SHA" ]; then
-      echo "Head unchanged since last review ($PR_SHA) — skipping"
-      echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
-      return 0
+      if [ "${FORCE_REVIEW:-false}" = "true" ]; then
+        echo "Head unchanged since last review ($PR_SHA) — force review requested, continuing"
+      else
+        echo "Head unchanged since last review ($PR_SHA) — skipping"
+        echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+        return 0
+      fi
     fi
   fi
 
@@ -76,7 +105,8 @@ prepare_review_context() {
     MERGE_P2=$(git -C repo rev-parse HEAD^2 2>/dev/null || true)
     BASE_TIP=$(git -C repo rev-parse "origin/$BASE_BRANCH" 2>/dev/null || true)
     if [ -n "$MERGE_P2" ] && [ "$MERGE_P2" = "$BASE_TIP" ]; then
-      echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) — skipping review, keeping previous status"
+      echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) — skipping review"
+      carry_over_statuses "$REPO_PATH" "$PREVIOUS_SHA" "$PR_SHA"
       echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
       return 0
     fi
@@ -161,7 +191,7 @@ _extract_final_review_block() {
       depth = 0; close_line = -1
       for (i = open; i <= NR; i++) {
         o = gsub(/<details>/, "<details>", line[i])
-        c = gsub(/<\/details>/, "<\/details>", line[i])
+        c = gsub(/<\/details>/, "</details>", line[i])
         depth += o - c
         if (depth == 0) { close_line = i; break }
       }
@@ -192,6 +222,12 @@ post_review_and_set_status() {
     DURATION="[$((elapsed/60))m $((elapsed%60))s]"
   fi
 
+  # strip the model's <review_plan> scratchpad — it is never posted
+  if grep -q '<review_plan>' claude-output.md 2>/dev/null && grep -q '</review_plan>' claude-output.md 2>/dev/null; then
+    sed -i '/<review_plan>/,/<\/review_plan>/d' claude-output.md
+    echo "Stripped review_plan block"
+  fi
+
   # strip any leading draft/self-correction wrapper before posting
   if grep -q "<details>" claude-output.md 2>/dev/null; then
     local NORMALIZED
@@ -207,6 +243,16 @@ post_review_and_set_status() {
         printf '\n\n---\n\n<details><summary>Previous review</summary>\n\n%s\n\n</details>' \
                "$(<repo/previous-claude-output.md)"
     } > claude-output.md
+  fi
+
+  # Gitea rejects comment bodies over ~64 KB — truncate with a valid closing tag
+  local OUTPUT_BYTES
+  OUTPUT_BYTES=$(wc -c < claude-output.md | tr -d ' ')
+  if [ "$OUTPUT_BYTES" -gt 60000 ]; then
+    echo "::warning::Review output is ${OUTPUT_BYTES} bytes — truncating to fit the comment size limit"
+    head -c 59000 claude-output.md > claude-output.tmp
+    printf '\n\n_… review truncated: output exceeded the comment size limit; see the [workflow run](%s) for the full text …_\n\n</details>\n' "$(_run_url)" >> claude-output.tmp
+    mv claude-output.tmp claude-output.md
   fi
 
   echo "Posting review ($(wc -l < claude-output.md) lines)"
