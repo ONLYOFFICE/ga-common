@@ -58,10 +58,10 @@ jobs:
 
           fetch() {
             local AUTH="Authorization: $1" URL=$2
-            [[ ! "$URL" =~ ?page=[0-9]+ ]] && { curl -s -H "$AUTH" "$URL"; return; }
+            [[ ! "$URL" =~ ?page=[0-9]+ ]] && { curl -s --retry 3 --retry-delay 1 -H "$AUTH" "$URL"; return; }
             local ORIG="${BASH_REMATCH[0]}" TMP="$(mktemp)" PAGE=1 OLDEST
             while true; do
-              curl -s -H "$AUTH" "${URL/$ORIG/page=$PAGE}" | jq -c '.workflow_runs[]?' 2>/dev/null >> "$TMP"
+              curl -s --retry 3 --retry-delay 1 -H "$AUTH" "${URL/$ORIG/page=$PAGE}" | jq -c '.workflow_runs[]?' 2>/dev/null >> "$TMP"
               OLDEST="$(tail -1 "$TMP" | jq -r '.created_at//.started_at//.updated_at//""' 2>/dev/null)"
               [[ -z "$OLDEST" || "$OLDEST" < "$T24" ]] && break; (( PAGE++ ))
             done
@@ -93,14 +93,15 @@ jobs:
               read -r FAIL_COUNT LATEST_DATE <<< "$(jq -re --arg t "$T24" --arg b "$BRANCH" --arg wf "${WFS[$i]}" "$JQ_QUERY" <<< "$RAW" 2>/dev/null||echo '')"
               [[ -z "$FAIL_COUNT" ]] && continue
               local ICON
-              if   [[ -z "$LATEST_DATE" || "$LATEST_DATE" < "$T30" ]]; then ICON="$(printf '\u26AA')"
-              elif (( FAIL_COUNT > 0 ));                                then ICON="$(printf '\U0001F534')"
-              else                                                           ICON="$(printf '\U0001F7E2')"; fi
-              _STATUS[${REPOS[$i]}]+="$ICON [${NAMES[$i]}](${LINKS[$i]})\n"
+              if   [[ -z "$LATEST_DATE" || "$LATEST_DATE" < "$T30" ]]; then ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
+              elif (( FAIL_COUNT > 0 ));                                then ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
+              else                                                           ICON="🟢"; GREEN_COUNT=$((GREEN_COUNT + 1)); fi
+              _STATUS[${REPOS[$i]}]+="$ICON <a href=\"${LINKS[$i]}\">${NAMES[$i]}</a>\n"
             done
           }
 
           declare -A github_status gitea_status; github_order=(); gitea_order=()
+          RED_COUNT=0 WHITE_COUNT=0 GREEN_COUNT=0
           check_workflows github_status github_order "Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__/runs?per_page=100" \
             "https://github.com/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__" <<< "$WORKFLOWS"
@@ -113,13 +114,237 @@ jobs:
             [[ -n "${seen[$REPO]}" ]] && continue
             seen[$REPO]=1; ALL_ORDER+=("$REPO")
           done
-          for REPO in "${ALL_ORDER[@]}"; do MESSAGE+="*$REPO*\n${github_status[$REPO]}${gitea_status[$REPO]}\n"; done
-          [[ -z "$MESSAGE" ]] && exit 0
+          for REPO in "${ALL_ORDER[@]}"; do MESSAGE+="<b>$REPO</b>\n${github_status[$REPO]}${gitea_status[$REPO]}\n"; done
 
-          echo -e "$MESSAGE"
-          for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -H "Content-Type: application/json" \
-              -d "{\"chat_id\":$CHAT_ID,\"text\":\"$MESSAGE\",\"parse_mode\":\"Markdown\",\"disable_web_page_preview\":true}"
+          declare -a SUMMARY_PARTS=()
+          (( GREEN_COUNT > 0 )) && SUMMARY_PARTS+=("${GREEN_COUNT} 🟢")
+          (( WHITE_COUNT > 0 )) && SUMMARY_PARTS+=("${WHITE_COUNT} ⚪️")
+          (( RED_COUNT > 0 )) && SUMMARY_PARTS+=("${RED_COUNT} 🔴")
+          SUMMARY=""
+          for PART in "${SUMMARY_PARTS[@]}"; do
+            [[ -n "$SUMMARY" ]] && SUMMARY+=" · "
+            SUMMARY+="$PART"
           done
 
+          FULL_MESSAGE=""
+          if [[ -n "$MESSAGE" ]]; then
+            # printf %b turns the literal "\n" markers accumulated above (and in this
+            # template) into real newlines, needed because the payload below is
+            # JSON-encoded with jq instead of naive string interpolation.
+            FULL_MESSAGE="$(printf '%b' "<pre>Workflows\n\n${SUMMARY}</pre><blockquote expandable>\n\n\n${MESSAGE}</blockquote>")"
+          fi
+
+          # ---- Claude Review stats ----
+          AUTH="token ${{ secrets.GITEA_TOKEN }}"
+          API_BASE="https://${{ secrets.GITEA_HOST }}/api/v1/repos/${GITHUB_ORG}/ga-common"
+
+          RUNS_RAW="$(fetch "$AUTH" "$API_BASE/actions/runs?page=1&limit=100")"
+          RUNS_JSON="$(jq -c --arg t "$T24" --arg wf "claude-review.yml" '
+            (.workflow_runs // []) as $r
+            | [$r[] | select(.status=="completed")
+              | select((.path//"" | split("@")[0] | (. == $wf or endswith("/"+$wf))))
+              | select((.created_at//.started_at//.updated_at//"") >= $t)
+              | {id, display_title, html_url}]
+          ' <<< "$RUNS_RAW" 2>/dev/null || echo '[]')"
+
+          declare -a PIDS=() TITLES=() URLS=() TMPS=()
+          while IFS= read -r RUN; do
+            RUN_ID="$(jq -r '.id' <<< "$RUN")"
+            TITLE="$(jq -r '.display_title' <<< "$RUN")"
+            RUN_URL="$(jq -r '.html_url' <<< "$RUN")"
+            TMP="$(mktemp)"
+            (
+              JOB_ID="$(fetch "$AUTH" "$API_BASE/actions/runs/$RUN_ID/jobs" 2>/dev/null | jq -r '.jobs[0].id // empty' 2>/dev/null || echo '')"
+              [[ -z "$JOB_ID" ]] && exit 0
+              fetch "$AUTH" "$API_BASE/actions/jobs/$JOB_ID/logs" 2>/dev/null
+            ) > "$TMP" &
+            PIDS+=($!); TITLES+=("$TITLE"); URLS+=("$RUN_URL"); TMPS+=("$TMP")
+          done < <(jq -c '.[]' <<< "$RUNS_JSON")
+
+          # Runs are newest-first (fetch()/pagination assumes descending order), so the
+          # first run seen for a given PR key is its latest run — used as current state
+          # (verdict, severity counts, Fixed counts). Older runs for the same PR only
+          # contribute to that PR's error count/link, since a run's Fixed count is already
+          # a running total for the PR's whole lifetime, not specific to that one run.
+          declare -A PR_SEEN PR_VERDICT PR_CRIT PR_MED PR_LOW PR_LEG PR_FIXED PR_ERRORS PR_ERR_LINK PR_LINK
+          declare -A PR_FIXED_CRIT PR_FIXED_MED PR_FIXED_LOW PR_FIXED_LEG
+          PR_ORDER=()
+
+          for i in "${!PIDS[@]}"; do
+            wait "${PIDS[$i]}" || true
+            LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
+            TITLE="${TITLES[$i]}"; RUN_URL="${URLS[$i]}"
+            REPO="$(grep -oP "${GITHUB_ORG}/\K[^#]+" <<< "$TITLE" || true)"
+            PR="$(grep -oP '#\K[0-9]+' <<< "$TITLE" || true)"
+            [[ -z "$REPO" || -z "$PR" ]] && continue
+            KEY="${REPO}#${PR}"
+
+            if [[ -z "${PR_SEEN[$KEY]:-}" ]]; then
+              PR_SEEN[$KEY]=1; PR_ORDER+=("$KEY")
+              PR_FIXED[$KEY]=0; PR_ERRORS[$KEY]=0
+              PR_FIXED_CRIT[$KEY]=0; PR_FIXED_MED[$KEY]=0; PR_FIXED_LOW[$KEY]=0; PR_FIXED_LEG[$KEY]=0
+              PR_LINK[$KEY]="https://${{ secrets.GITEA_HOST }}/${GITHUB_ORG}/${REPO}/pulls/${PR}"
+            fi
+
+            VERDICT="$(grep -oP 'Verdict: \K\S+' <<< "$LOG" | head -1 || true)"
+            # No "Verdict:" line at all means the review was legitimately skipped
+            # (SHA already reviewed, base-branch sync merge, WIP title) — not an error.
+            [[ -z "$VERDICT" ]] && continue
+            if [[ "$VERDICT" == "none" ]]; then
+              PR_ERRORS[$KEY]=$((${PR_ERRORS[$KEY]} + 1))
+              [[ -z "${PR_ERR_LINK[$KEY]:-}" ]] && PR_ERR_LINK[$KEY]="$RUN_URL"
+              continue
+            fi
+
+            # Only the latest run's state is used (see comment above PR_ORDER) — Claude
+            # re-prints every previously-Fixed entry in each new review, so summing Fixed
+            # across a PR's runs today would count the same fix multiple times. The latest
+            # run's Fixed count is a running total for the PR's whole lifetime, not "today".
+            if [[ -z "${PR_VERDICT[$KEY]:-}" ]]; then
+              C=0 M=0 L=0 G=0 P=0 F=0
+              COUNTS_LINE="$(grep -P 'Critical.*Fixed' <<< "$LOG" | head -1 || true)"
+              [[ -n "$COUNTS_LINE" ]] && read -r C M L G P F <<< "$(grep -oP '(?<=\*\*)\d+(?=\*\*)' <<< "$COUNTS_LINE" | tr '\n' ' ')"
+              PR_VERDICT[$KEY]="$VERDICT"
+              PR_CRIT[$KEY]="$C"; PR_MED[$KEY]="$M"; PR_LOW[$KEY]="$L"; PR_LEG[$KEY]="$G"
+              PR_FIXED[$KEY]="$F"
+
+              # Each ⚪️ Fixed entry's summary carries its original severity, e.g.
+              # "⚪️ Fixed [🔴 Critical]: Issue title" — count those to break Fixed down by severity.
+              PR_FIXED_CRIT[$KEY]="$(grep -c -F 'Fixed [🔴' <<< "$LOG" || true)"
+              PR_FIXED_MED[$KEY]="$(grep -c -F 'Fixed [🟡' <<< "$LOG" || true)"
+              PR_FIXED_LOW[$KEY]="$(grep -c -F 'Fixed [🔵' <<< "$LOG" || true)"
+              PR_FIXED_LEG[$KEY]="$(grep -c -F 'Fixed [🟣' <<< "$LOG" || true)"
+            fi
+          done
+
+          REVIEW_COUNT=0 APPROVE_COUNT=0 BLOCKED_COUNT=0
+          CRITICAL_SUM=0 MEDIUM_SUM=0 LOW_SUM=0 LEGACY_SUM=0 FIXED_SUM=0
+          FIXED_CRIT_SUM=0 FIXED_MED_SUM=0 FIXED_LOW_SUM=0 FIXED_LEG_SUM=0
+          ERROR_PR_LIST=()
+
+          for KEY in "${PR_ORDER[@]}"; do
+            V="${PR_VERDICT[$KEY]:-}"
+            FIXED_N="${PR_FIXED[$KEY]:-0}"
+            FIXED_SUM=$((FIXED_SUM + FIXED_N))
+            FIXED_CRIT_SUM=$((FIXED_CRIT_SUM + ${PR_FIXED_CRIT[$KEY]:-0})); FIXED_MED_SUM=$((FIXED_MED_SUM + ${PR_FIXED_MED[$KEY]:-0}))
+            FIXED_LOW_SUM=$((FIXED_LOW_SUM + ${PR_FIXED_LOW[$KEY]:-0})); FIXED_LEG_SUM=$((FIXED_LEG_SUM + ${PR_FIXED_LEG[$KEY]:-0}))
+
+            if [[ -n "$V" ]]; then
+              REVIEW_COUNT=$((REVIEW_COUNT + 1))
+              [[ "$V" == "APPROVE" ]] && APPROVE_COUNT=$((APPROVE_COUNT + 1))
+              [[ "$V" == "BLOCKED" ]] && BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+              CRITICAL_SUM=$((CRITICAL_SUM + ${PR_CRIT[$KEY]:-0})); MEDIUM_SUM=$((MEDIUM_SUM + ${PR_MED[$KEY]:-0}))
+              LOW_SUM=$((LOW_SUM + ${PR_LOW[$KEY]:-0})); LEGACY_SUM=$((LEGACY_SUM + ${PR_LEG[$KEY]:-0}))
+            fi
+
+            ERR_N="${PR_ERRORS[$KEY]:-0}"
+            if (( ERR_N > 0 )); then
+              LINK="${PR_ERR_LINK[$KEY]:-}"
+              LABEL="$KEY"; [[ -n "$LINK" ]] && LABEL="<a href=\"${LINK}\">${KEY}</a>"
+              ERROR_PR_LIST+=("$LABEL")
+            fi
+          done
+          ERROR_COUNT="${#ERROR_PR_LIST[@]}"
+
+          REVIEW_MESSAGE=""
+          STATS_BLOCK=""
+          if (( REVIEW_COUNT > 0 || ERROR_COUNT > 0 )); then
+            STATS_BLOCK+="Claude Review\n\n"
+          fi
+          if (( REVIEW_COUNT > 0 )); then
+            BAR_LEN=10
+            FILLED=$(( (BAR_LEN * APPROVE_COUNT) / REVIEW_COUNT ))
+            EMPTY=$((BAR_LEN - FILLED))
+            BAR=""
+            for ((BAR_I = 0; BAR_I < FILLED; BAR_I++)); do BAR+="█"; done
+            for ((BAR_I = 0; BAR_I < EMPTY; BAR_I++)); do BAR+="░"; done
+            STATS_BLOCK+="${REVIEW_COUNT} PRs reviewed\n"
+            # Left-justify APPROVE_COUNT in a 2-char field so "✔️" (and "·" after it)
+            # line up in the same column whether the count is 1 or 2 digits wide.
+            APPROVE_PAD="$(printf '%-2s' "$APPROVE_COUNT")"
+            STATS_BLOCK+="${BAR} ${APPROVE_PAD} ✔️ · ${BLOCKED_COUNT}  ✖️\n"
+            STATS_BLOCK+="Bugs\n"
+
+            # One bar per severity: filled = fixed / (open + fixed), same "filled = good
+            # outcome" direction as the APPROVE/BLOCKED bar above. Rows with no open and
+            # no fixed issues for that severity are omitted entirely. The severity emoji
+            # sits after the count (replacing the word "found") instead of prefixing the
+            # line, so every bar starts in the same column.
+            sev_bar() {
+              local EMOJI="$1" FIXED_N="$3" TOTAL=$(($2 + $3))
+              (( TOTAL == 0 )) && return
+              local SEV_LEN=10
+              local SEV_FILLED=$(( (SEV_LEN * FIXED_N) / TOTAL ))
+              local SEV_EMPTY=$((SEV_LEN - SEV_FILLED))
+              local SEV_BAR="" k
+              for ((k = 0; k < SEV_FILLED; k++)); do SEV_BAR+="█"; done
+              for ((k = 0; k < SEV_EMPTY; k++)); do SEV_BAR+="░"; done
+              # Left-justify TOTAL in a 2-char field so "·" lines up in the same
+              # column regardless of whether TOTAL is 1 or 2 digits wide.
+              local TOTAL_PAD; TOTAL_PAD="$(printf '%-2s' "$TOTAL")"
+              STATS_BLOCK+="${SEV_BAR} ${TOTAL_PAD} ${EMOJI} ￫ ${FIXED_N} fixed\n"
+            }
+            sev_bar "🔴" "$CRITICAL_SUM" "$FIXED_CRIT_SUM"
+            sev_bar "🟡" "$MEDIUM_SUM" "$FIXED_MED_SUM"
+            sev_bar "🔵" "$LOW_SUM" "$FIXED_LOW_SUM"
+            sev_bar "🟣" "$LEGACY_SUM" "$FIXED_LEG_SUM"
+          fi
+          # The whole stats block (header, bars, counts) is plain text with no
+          # nested HTML entities, so it can be wrapped in one <pre> block for a
+          # bordered, copyable, monospace-aligned box. The error list and PR list
+          # below contain <a href> links and must stay outside any code/pre tag,
+          # since Telegram doesn't allow entities nested inside code/pre.
+          [[ -n "$STATS_BLOCK" ]] && REVIEW_MESSAGE+="<pre>${STATS_BLOCK}</pre>"
+          if (( ERROR_COUNT > 0 )); then
+            [[ "$REVIEW_COUNT" -gt 0 ]] && REVIEW_MESSAGE+="\n"
+            REVIEW_MESSAGE+="⚠️ ${ERROR_COUNT} PR(s) with errors:\n"
+            for ENTRY in "${ERROR_PR_LIST[@]}"; do
+              REVIEW_MESSAGE+="${ENTRY}\n"
+            done
+          fi
+
+          if (( REVIEW_COUNT > 0 )); then
+            declare -a SORTED_KEYS=()
+            while IFS= read -r KEY; do
+              [[ -n "$KEY" ]] && SORTED_KEYS+=("$KEY")
+            done < <(printf '%s\n' "${PR_ORDER[@]}" | sort -f)
+
+            declare -a ALL_PR_LIST=()
+            for KEY in "${SORTED_KEYS[@]}"; do
+              V="${PR_VERDICT[$KEY]:-}"
+              [[ -z "$V" ]] && continue
+              ICON="✅"; [[ "$V" == "BLOCKED" ]] && ICON="❌"
+              ALL_PR_LIST+=("${ICON} <a href=\"${PR_LINK[$KEY]:-}\">${KEY}</a>")
+            done
+            REVIEW_MESSAGE+="<blockquote expandable>\n\n\n"
+            for ENTRY in "${ALL_PR_LIST[@]}"; do
+              REVIEW_MESSAGE+="${ENTRY}\n"
+            done
+            REVIEW_MESSAGE+="</blockquote>"
+          fi
+
+          FULL_REVIEW_MESSAGE=""
+          if [[ -n "$REVIEW_MESSAGE" ]]; then
+            # printf %b turns the literal "\n" markers accumulated above into real
+            # newlines, needed because the payload below is JSON-encoded with jq
+            # instead of naive string interpolation (required since <a href="..."> now
+            # contains double quotes that would otherwise break the JSON string).
+            FULL_REVIEW_MESSAGE="$(printf '%b' "$REVIEW_MESSAGE")"
+          fi
+
+          # ---- Combine both sections into one message and send once ----
+          COMBINED_MESSAGE="$FULL_MESSAGE"
+          if [[ -n "$FULL_REVIEW_MESSAGE" ]]; then
+            [[ -n "$COMBINED_MESSAGE" ]] && COMBINED_MESSAGE+=$'\n\n'
+            COMBINED_MESSAGE+="$FULL_REVIEW_MESSAGE"
+          fi
+          [[ -z "$COMBINED_MESSAGE" ]] && exit 0
+
+          echo "$COMBINED_MESSAGE"
+          for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
+            PAYLOAD="$(jq -n --arg chat_id "$CHAT_ID" --arg text "$COMBINED_MESSAGE" \
+              '{chat_id: ($chat_id|tonumber), text: $text, parse_mode: "HTML", disable_web_page_preview: true}')"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD"
+          done
