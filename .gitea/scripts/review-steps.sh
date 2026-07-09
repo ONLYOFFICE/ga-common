@@ -252,6 +252,25 @@ post_review_and_set_status() {
     } > claude-output.md
   fi
 
+  # Reconcile the [VERDICT] header with the actual findings. The model writes the
+  # header and each issue's severity badge in the same freeform response, so
+  # nothing guarantees they agree — recompute from structural evidence (any open
+  # Critical/Medium issue, regardless of confidence — stricter than REVIEW.md §5's
+  # High-confidence-only rule, since the model's own confidence call isn't trusted
+  # here) and correct the header in place if it disagrees. Skipped for the fallback
+  # error text above (no header there), which keeps the review as an "Unknown"
+  # status, not auto-approved.
+  local CORRECT_VERDICT=""
+  if grep -qF -- '- Claude Code Review</summary>' claude-output.md 2>/dev/null; then
+    if grep -qE '\[(🔴 Critical|🟡 Medium) ·' claude-output.md 2>/dev/null; then
+      CORRECT_VERDICT="BLOCKED"
+      sed -i '/- Claude Code Review<\/summary>/ s/✅ APPROVE/❌ BLOCKED/' claude-output.md
+    else
+      CORRECT_VERDICT="APPROVE"
+      sed -i '/- Claude Code Review<\/summary>/ s/❌ BLOCKED/✅ APPROVE/' claude-output.md
+    fi
+  fi
+
   # Gitea rejects comment bodies over ~64 KB — truncate with a valid closing tag
   local OUTPUT_BYTES
   OUTPUT_BYTES=$(wc -c < claude-output.md | tr -d ' ')
@@ -275,18 +294,14 @@ post_review_and_set_status() {
   upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$PR_SHA" \
     || echo "::warning::Failed to post review comment"
 
-  # derive commit status from job result + review verdict
-  local VERDICT STATE DESC
-  if   grep -qF '✅ APPROVE' claude-output.md 2>/dev/null; then VERDICT="APPROVE"
-  elif grep -qF '❌ BLOCKED' claude-output.md 2>/dev/null; then VERDICT="BLOCKED"
-  else                                                          VERDICT=""
-  fi
-  if   [[ "$JOB_STATUS" != "success" ]];  then STATE="failure" DESC="Failed $DURATION"
-  elif [[ "$VERDICT"    == "APPROVE"  ]]; then STATE="success" DESC="Approved $DURATION"
-  elif [[ "$VERDICT"    == "BLOCKED"  ]]; then STATE="failure" DESC="Blocked $DURATION"
-  else                                         STATE="error"   DESC="Unknown $DURATION"
+  # derive commit status from job result + reconciled review verdict
+  local STATE DESC
+  if   [[ "$JOB_STATUS"       != "success" ]]; then STATE="failure" DESC="Failed $DURATION"
+  elif [[ "$CORRECT_VERDICT"  == "APPROVE" ]]; then STATE="success" DESC="Approved $DURATION"
+  elif [[ "$CORRECT_VERDICT"  == "BLOCKED" ]]; then STATE="failure" DESC="Blocked $DURATION"
+  else                                              STATE="error"   DESC="Unknown $DURATION"
   fi
 
-  echo "Job: $JOB_STATUS | Verdict: ${VERDICT:-none} | Status: $STATE $DURATION"
+  echo "Job: $JOB_STATUS | Verdict: ${CORRECT_VERDICT:-none} | Status: $STATE $DURATION"
   set_commit_status "$REPO_PATH" "$PR_SHA" "$STATE" "$DESC"
 }
