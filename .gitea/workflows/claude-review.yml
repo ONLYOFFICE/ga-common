@@ -33,11 +33,6 @@ on:
         required: false
         type: string
         default: claude-sonnet-5
-      force:
-        description: 'Force review even if the head SHA was already reviewed'
-        required: false
-        type: string
-        default: 'false'
       claude_code_version:
         description: 'Claude Code CLI version (npm dist-tag or exact version)'
         required: false
@@ -48,6 +43,11 @@ on:
         required: false
         type: string
         default: 'medium'
+      force:
+        description: 'Force review even if the head SHA was already reviewed'
+        required: false
+        type: boolean
+        default: false
 
 env:
   GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
