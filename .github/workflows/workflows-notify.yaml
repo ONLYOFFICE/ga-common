@@ -42,20 +42,7 @@ jobs:
             Docker-Docs               | build.yaml            | Build docker
             ga-common                 | keeplive              | Actions Keepalive
           WORKFLOWS_GITEA: |
-            DocSpace-buildtools       | claude-review         | DocSpace-buildtools
-            DocSpace-ui-kit-react     | claude-review         | DocSpace-ui-kit-react
-            DocSpace-client           | claude-review         | DocSpace-client
-            DocSpace-server           | claude-review         | DocSpace-server
-            Docker-Docs               | claude-review         | Docker-Docs
-            Docker-DocumentServer     | claude-review         | Docker-DocumentServer
-            document-server-package   | claude-review         | document-server-package
-            OneClickInstall-Docs      | claude-review         | OneClickInstall-Docs
-            OneClickInstall-Workspace | claude-review         | OneClickInstall-Workspace
-            Kubernetes-Docs           | claude-review         | Kubernetes-Docs
-            Kubernetes-Docs-Shards    | claude-review         | Kubernetes-Docs-Shards
-            Kubernetes-DocSpace       | claude-review         | Kubernetes-DocSpace
-            helm-charts               | claude-review         | helm-charts
-            office-js-api             | claude-review         | office-js-api
+            ga-common                 | claude-review         | Claude Review
         run: |
           T24="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
           T30="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
@@ -121,10 +108,12 @@ jobs:
             "https://${{ secrets.GITEA_HOST }}/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
             "https://${{ secrets.GITEA_HOST }}/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
 
-          MESSAGE=""; GITEA_BLOCK=""
-          for REPO in "${github_order[@]}"; do MESSAGE+="*$REPO*\n${github_status[$REPO]}\n"; done
-          for REPO in "${gitea_order[@]}"; do GITEA_BLOCK+="${gitea_status[$REPO]}"; done
-          [[ -n "$GITEA_BLOCK" ]] && MESSAGE+="*Claude Review*\n$GITEA_BLOCK"
+          MESSAGE=""; declare -A seen; ALL_ORDER=()
+          for REPO in "${github_order[@]}" "${gitea_order[@]}"; do
+            [[ -n "${seen[$REPO]}" ]] && continue
+            seen[$REPO]=1; ALL_ORDER+=("$REPO")
+          done
+          for REPO in "${ALL_ORDER[@]}"; do MESSAGE+="*$REPO*\n${github_status[$REPO]}${gitea_status[$REPO]}\n"; done
           [[ -z "$MESSAGE" ]] && exit 0
 
           echo -e "$MESSAGE"
