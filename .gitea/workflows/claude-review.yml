@@ -39,10 +39,16 @@ on:
         type: string
         default: 'latest'
       effort:
-        description: 'Reasoning effort level (low/medium/high/xhigh/max)'
+        description: 'Reasoning effort level'
         required: false
-        type: string
+        type: choice
         default: 'medium'
+        options:
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
       force:
         description: 'Force review even if the head SHA was already reviewed'
         required: false
