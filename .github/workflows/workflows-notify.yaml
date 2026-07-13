@@ -24,8 +24,8 @@ jobs:
 
       - name: Notify failed runs
         env:
-          PUBLISH_WORKFLOWS: ${{ inputs.publish_workflows }}
-          PUBLISH_CLAUDE_REVIEW: ${{ inputs.publish_claude_review }}
+          PUBLISH_WORKFLOWS: ${{ inputs.publish_workflows != false }}
+          PUBLISH_CLAUDE_REVIEW: ${{ inputs.publish_claude_review != false }}
           EVENT_NAME: ${{ github.event_name }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
