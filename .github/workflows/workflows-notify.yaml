@@ -20,6 +20,8 @@ jobs:
   check-workflows:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Notify failed runs
         env:
           PUBLISH_WORKFLOWS: ${{ inputs.publish_workflows }}
@@ -29,6 +31,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
           GITEA_HOST: ${{ secrets.GITEA_HOST }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ORG: ONLYOFFICE
           WORKFLOWS: |
             DocSpace                  | release               | Release
@@ -58,334 +61,23 @@ jobs:
           WORKFLOWS_GITEA: |
             ga-common                 | claude-review         | Claude Review
         run: |
-          T24="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
-          T30="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
-          BRANCH_PATTERN="^(master|main|release/.+|hotfix/.+|develop)$"
+          source .github/scripts/notify-workflows.sh
 
-          JQ_QUERY='(if type=="object" then .workflow_runs//[] else [] end|if type!="array" then [] else . end) as $r
-            |[$r[]?|select((.head_branch//"")|test($b))|select($wf==""
-            or(.path//""|split("@")[0]|(. == $wf or endswith("/"+$wf))))] as $all
-            |($all|map(select((.created_at//.started_at//.updated_at//"")>=$t))|if length>0 then . else $all[:1] end) as $runs
-            |[($runs|map(select(.status=="completed" and (.conclusion//""
-            |test("failure|failed|error|startup_failure|timed_out"))))|length),
-            ($runs[0]|.created_at//.started_at//.updated_at//"")] | @tsv'
-
-          fetch() {
-            local AUTH="Authorization: $1" URL=$2 CUTOFF="${3:-$T24}"
-            [[ ! "$URL" =~ ?page=[0-9]+ ]] && { curl -s --retry 3 --retry-delay 1 -H "$AUTH" "$URL"; return; }
-            local ORIG="${BASH_REMATCH[0]}" TMP="$(mktemp)" PAGE=1 OLDEST
-            while true; do
-              curl -s --retry 3 --retry-delay 1 -H "$AUTH" "${URL/$ORIG/page=$PAGE}" | jq -c '.workflow_runs[]?' 2>/dev/null >> "$TMP"
-              OLDEST="$(tail -1 "$TMP" | jq -r '.created_at//.started_at//.updated_at//""' 2>/dev/null)"
-              [[ -z "$OLDEST" || "$OLDEST" < "$CUTOFF" ]] && break; (( PAGE++ ))
-            done
-            jq -sc '{workflow_runs:.}' "$TMP"; rm -f "$TMP"
-          }
-
-          check_workflows() {
-            local -n _STATUS=$1 _ORDER=$2
-            local AUTH=$3 API_FMT=$4 LINK_FMT=$5 BRANCH="${6:-$BRANCH_PATTERN}" LAST_REPO=""
-            local -a PIDS=() REPOS=() WFS=() NAMES=() TMPS=() LINKS=()
-
-            while IFS='|' read -r REPO WF NAME; do
-              REPO="${REPO// }"; WF="${WF// }"; NAME="${NAME# }"; NAME="${NAME% }"
-              [[ -z "$WF" ]] && continue
-              [[ -n "$REPO" ]] && LAST_REPO="$REPO" || REPO="$LAST_REPO"; [[ -z "$REPO" ]] && continue
-              [[ ! " ${_ORDER[*]} " =~ " $REPO " ]] && _ORDER+=("$REPO")
-              [[ "$WF" != *.* ]] && WF="$WF.yml"
-              local API="${API_FMT//__REPO__/$REPO}"; API="${API//__WF__/$WF}"
-              local LINK="${LINK_FMT//__REPO__/$REPO}"; LINK="${LINK//__WF__/$WF}"
-              local TMP; TMP="$(mktemp)"
-              fetch "$AUTH" "$API" > "$TMP" &
-              PIDS+=($!); REPOS+=("$REPO"); WFS+=("$WF"); NAMES+=("$NAME"); TMPS+=("$TMP"); LINKS+=("$LINK")
-            done
-
-            for i in "${!PIDS[@]}"; do
-              wait "${PIDS[$i]}"
-              local RAW; RAW="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
-              local FAIL_COUNT LATEST_DATE
-              read -r FAIL_COUNT LATEST_DATE <<< "$(jq -re --arg t "$T24" --arg b "$BRANCH" --arg wf "${WFS[$i]}" "$JQ_QUERY" <<< "$RAW" 2>/dev/null||echo '')"
-              [[ -z "$FAIL_COUNT" ]] && continue
-              local ICON
-              if   [[ -z "$LATEST_DATE" || "$LATEST_DATE" < "$T30" ]]; then ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
-              elif (( FAIL_COUNT > 0 ));                                then ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
-              else                                                           ICON="🟢"; GREEN_COUNT=$((GREEN_COUNT + 1)); fi
-              _STATUS[${REPOS[$i]}]+="$ICON <a href=\"${LINKS[$i]}\">${NAMES[$i]}</a>\n"
-            done
-          }
-
+          # Workflows: daily, whenever enabled.
           FULL_MESSAGE=""
-          if [[ "$PUBLISH_WORKFLOWS" == "true" ]]; then
-            declare -A github_status gitea_status; github_order=(); gitea_order=()
-            RED_COUNT=0 WHITE_COUNT=0 GREEN_COUNT=0
-            check_workflows github_status github_order "Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__/runs?per_page=100" \
-              "https://github.com/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__" <<< "$WORKFLOWS"
-            check_workflows gitea_status gitea_order "token ${{ secrets.GITEA_TOKEN }}" \
-              "https://${{ secrets.GITEA_HOST }}/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
-              "https://${{ secrets.GITEA_HOST }}/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
+          [[ "$PUBLISH_WORKFLOWS" == "true" ]] && FULL_MESSAGE="$(build_workflows_report)"
 
-            MESSAGE=""; declare -A seen; ALL_ORDER=()
-            for REPO in "${github_order[@]}" "${gitea_order[@]}"; do
-              [[ -n "${seen[$REPO]}" ]] && continue
-              seen[$REPO]=1; ALL_ORDER+=("$REPO")
-            done
-            for REPO in "${ALL_ORDER[@]}"; do MESSAGE+="<b>$REPO</b>\n${github_status[$REPO]}${gitea_status[$REPO]}\n"; done
-
-            declare -a SUMMARY_PARTS=()
-            (( GREEN_COUNT > 0 )) && SUMMARY_PARTS+=("${GREEN_COUNT} 🟢")
-            (( WHITE_COUNT > 0 )) && SUMMARY_PARTS+=("${WHITE_COUNT} ⚪️")
-            (( RED_COUNT > 0 )) && SUMMARY_PARTS+=("${RED_COUNT} 🔴")
-            SUMMARY=""
-            for PART in "${SUMMARY_PARTS[@]}"; do
-              [[ -n "$SUMMARY" ]] && SUMMARY+=" · "
-              SUMMARY+="$PART"
-            done
-
-            if [[ -n "$MESSAGE" ]]; then
-              # printf %b turns the literal "\n" markers accumulated above (and in this
-              # template) into real newlines, needed because the payload below is
-              # JSON-encoded with jq instead of naive string interpolation.
-              FULL_MESSAGE="$(printf '%b' "<pre>Workflows\n\n${SUMMARY}</pre><blockquote expandable>\n\n\n${MESSAGE}</blockquote>")"
-            fi
-          fi
-
-          # ---- Claude Review stats ----
-          FULL_REVIEW_MESSAGE=""
-          if [[ "$PUBLISH_CLAUDE_REVIEW" == "true" ]]; then
-          T7="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          # Claude Review: weekly, Fridays only — or any day via manual dispatch (testing).
           IS_FRIDAY=false; [[ "$(date -u +%u)" == "5" ]] && IS_FRIDAY=true
-          AUTH="token ${{ secrets.GITEA_TOKEN }}"
-          API_BASE="https://${{ secrets.GITEA_HOST }}/api/v1/repos/${GITHUB_ORG}/ga-common"
-
-          # Always fetch a full 7-day window — cheap to filter a narrower "today" slice
-          # out of it in-memory below, versus fetching two separate windows on Fridays.
-          RUNS_RAW="$(fetch "$AUTH" "$API_BASE/actions/runs?page=1&limit=100" "$T7")"
-          RUNS_JSON="$(jq -c --arg t "$T7" --arg wf "claude-review.yml" '
-            (.workflow_runs // []) as $r
-            | [$r[] | select(.status=="completed")
-              | select((.path//"" | split("@")[0] | (. == $wf or endswith("/"+$wf))))
-              | select((.created_at//.started_at//.updated_at//"") >= $t)
-              | {id, display_title, html_url, ts: (.created_at//.started_at//.updated_at//"")}]
-          ' <<< "$RUNS_RAW" 2>/dev/null || echo '[]')"
-
-          declare -a PIDS=() TITLES=() URLS=() TMPS=() RUN_TIMESTAMPS=()
-          while IFS= read -r RUN; do
-            RUN_ID="$(jq -r '.id' <<< "$RUN")"
-            TITLE="$(jq -r '.display_title' <<< "$RUN")"
-            RUN_URL="$(jq -r '.html_url' <<< "$RUN")"
-            RUN_TS="$(jq -r '.ts' <<< "$RUN")"
-            TMP="$(mktemp)"
-            (
-              JOB_ID="$(fetch "$AUTH" "$API_BASE/actions/runs/$RUN_ID/jobs" 2>/dev/null | jq -r '.jobs[0].id // empty' 2>/dev/null || echo '')"
-              [[ -z "$JOB_ID" ]] && exit 0
-              fetch "$AUTH" "$API_BASE/actions/jobs/$JOB_ID/logs" 2>/dev/null
-            ) > "$TMP" &
-            PIDS+=($!); TITLES+=("$TITLE"); URLS+=("$RUN_URL"); TMPS+=("$TMP"); RUN_TIMESTAMPS+=("$RUN_TS")
-          done < <(jq -c '.[]' <<< "$RUNS_JSON")
-
-          # Runs are newest-first (fetch()/pagination assumes descending order), so the
-          # first run seen for a given PR key is its latest run — used as current state
-          # (verdict, severity counts, Fixed counts, PR_LATEST_TS). Older runs for the
-          # same PR only contribute to that PR's error counts/links, since a run's Fixed
-          # count is already a running total for the PR's whole lifetime, not one run.
-          # PR_ERRORS/PR_ERR_LINK cover the full 7-day window; the _TODAY variants are
-          # the same but restricted to runs within the last 24h, used for the daily report.
-          declare -A PR_SEEN PR_VERDICT PR_CRIT PR_MED PR_LOW PR_LEG PR_FIXED PR_LINK PR_LATEST_TS
-          declare -A PR_FIXED_CRIT PR_FIXED_MED PR_FIXED_LOW PR_FIXED_LEG
-          declare -A PR_ERRORS PR_ERR_LINK PR_ERRORS_TODAY PR_ERR_LINK_TODAY
-          PR_ORDER=()
-
-          for i in "${!PIDS[@]}"; do
-            wait "${PIDS[$i]}" || true
-            LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
-            TITLE="${TITLES[$i]}"; RUN_URL="${URLS[$i]}"; RUN_TS="${RUN_TIMESTAMPS[$i]}"
-            REPO="$(grep -oP "${GITHUB_ORG}/\K[^#]+" <<< "$TITLE" || true)"
-            PR="$(grep -oP '#\K[0-9]+' <<< "$TITLE" || true)"
-            [[ -z "$REPO" || -z "$PR" ]] && continue
-            KEY="${REPO}#${PR}"
-            IS_RECENT=false; [[ "$RUN_TS" > "$T24" ]] && IS_RECENT=true
-
-            if [[ -z "${PR_SEEN[$KEY]:-}" ]]; then
-              PR_SEEN[$KEY]=1; PR_ORDER+=("$KEY")
-              PR_FIXED[$KEY]=0; PR_ERRORS[$KEY]=0; PR_ERRORS_TODAY[$KEY]=0
-              PR_FIXED_CRIT[$KEY]=0; PR_FIXED_MED[$KEY]=0; PR_FIXED_LOW[$KEY]=0; PR_FIXED_LEG[$KEY]=0
-              PR_LINK[$KEY]="https://${{ secrets.GITEA_HOST }}/${GITHUB_ORG}/${REPO}/pulls/${PR}"
-            fi
-
-            VERDICT="$(grep -oP 'Verdict: \K\S+' <<< "$LOG" | head -1 || true)"
-            # No "Verdict:" line at all means the review was legitimately skipped
-            # (SHA already reviewed, base-branch sync merge, WIP title) — not an error.
-            [[ -z "$VERDICT" ]] && continue
-            if [[ "$VERDICT" == "none" ]]; then
-              PR_ERRORS[$KEY]=$((${PR_ERRORS[$KEY]} + 1))
-              [[ -z "${PR_ERR_LINK[$KEY]:-}" ]] && PR_ERR_LINK[$KEY]="$RUN_URL"
-              if $IS_RECENT; then
-                PR_ERRORS_TODAY[$KEY]=$((${PR_ERRORS_TODAY[$KEY]} + 1))
-                [[ -z "${PR_ERR_LINK_TODAY[$KEY]:-}" ]] && PR_ERR_LINK_TODAY[$KEY]="$RUN_URL"
-              fi
-              continue
-            fi
-
-            # Only the latest run's state is used (see comment above PR_ORDER) — Claude
-            # re-prints every previously-Fixed entry in each new review, so summing Fixed
-            # across a PR's runs would count the same fix multiple times. The latest run's
-            # Fixed count is a running total for the PR's whole lifetime, not one period.
-            if [[ -z "${PR_VERDICT[$KEY]:-}" ]]; then
-              C=0 M=0 L=0 G=0 P=0 F=0
-              COUNTS_LINE="$(grep -P 'Critical.*Fixed' <<< "$LOG" | head -1 || true)"
-              [[ -n "$COUNTS_LINE" ]] && read -r C M L G P F <<< "$(grep -oP '(?<=\*\*)\d+(?=\*\*)' <<< "$COUNTS_LINE" | tr '\n' ' ')"
-              PR_VERDICT[$KEY]="$VERDICT"
-              PR_CRIT[$KEY]="$C"; PR_MED[$KEY]="$M"; PR_LOW[$KEY]="$L"; PR_LEG[$KEY]="$G"
-              PR_FIXED[$KEY]="$F"
-              PR_LATEST_TS[$KEY]="$RUN_TS"
-
-              # Each ⚪️ Fixed entry's summary carries its original severity, e.g.
-              # "⚪️ Fixed [🔴 Critical]: Issue title" — count those to break Fixed down by severity.
-              PR_FIXED_CRIT[$KEY]="$(grep -c -F 'Fixed [🔴' <<< "$LOG" || true)"
-              PR_FIXED_MED[$KEY]="$(grep -c -F 'Fixed [🟡' <<< "$LOG" || true)"
-              PR_FIXED_LOW[$KEY]="$(grep -c -F 'Fixed [🔵' <<< "$LOG" || true)"
-              PR_FIXED_LEG[$KEY]="$(grep -c -F 'Fixed [🟣' <<< "$LOG" || true)"
-            fi
-          done
-
-          # Renders one report (daily or weekly slice of PR_ORDER) into global $RENDERED.
-          # RECENT_ONLY=true keeps only PRs whose latest state falls within the last 24h;
-          # RECENT_ONLY=false (Friday-only "This week" report) keeps the full 7-day set.
-          render_report() {
-            local HEADER="$1" RECENT_ONLY="$2"
-            local -a KEYS=()
-            local KEY
-            for KEY in "${PR_ORDER[@]}"; do
-              if [[ "$RECENT_ONLY" == "true" ]]; then
-                [[ -n "${PR_LATEST_TS[$KEY]:-}" && "${PR_LATEST_TS[$KEY]}" > "$T24" ]] || continue
-              fi
-              KEYS+=("$KEY")
-            done
-
-            local R_COUNT=0 R_APPROVE=0 R_BLOCKED=0
-            local R_CRIT=0 R_MED=0 R_LOW=0 R_LEG=0
-            local R_FCRIT=0 R_FMED=0 R_FLOW=0 R_FLEG=0
-            local -a R_ERRLIST=()
-            for KEY in "${KEYS[@]}"; do
-              local V="${PR_VERDICT[$KEY]:-}"
-              if [[ -n "$V" ]]; then
-                R_COUNT=$((R_COUNT + 1))
-                [[ "$V" == "APPROVE" ]] && R_APPROVE=$((R_APPROVE + 1))
-                [[ "$V" == "BLOCKED" ]] && R_BLOCKED=$((R_BLOCKED + 1))
-                R_CRIT=$((R_CRIT + ${PR_CRIT[$KEY]:-0})); R_MED=$((R_MED + ${PR_MED[$KEY]:-0}))
-                R_LOW=$((R_LOW + ${PR_LOW[$KEY]:-0})); R_LEG=$((R_LEG + ${PR_LEG[$KEY]:-0}))
-                R_FCRIT=$((R_FCRIT + ${PR_FIXED_CRIT[$KEY]:-0})); R_FMED=$((R_FMED + ${PR_FIXED_MED[$KEY]:-0}))
-                R_FLOW=$((R_FLOW + ${PR_FIXED_LOW[$KEY]:-0})); R_FLEG=$((R_FLEG + ${PR_FIXED_LEG[$KEY]:-0}))
-              fi
-              local ERR_N LINK
-              if [[ "$RECENT_ONLY" == "true" ]]; then ERR_N="${PR_ERRORS_TODAY[$KEY]:-0}"; LINK="${PR_ERR_LINK_TODAY[$KEY]:-}"
-              else ERR_N="${PR_ERRORS[$KEY]:-0}"; LINK="${PR_ERR_LINK[$KEY]:-}"; fi
-              if (( ERR_N > 0 )); then
-                local LABEL="$KEY"; [[ -n "$LINK" ]] && LABEL="<a href=\"${LINK}\">${KEY}</a>"
-                R_ERRLIST+=("$LABEL")
-              fi
-            done
-            local R_ERRCOUNT="${#R_ERRLIST[@]}"
-
-            local BLOCK="" STATS=""
-            if (( R_COUNT > 0 || R_ERRCOUNT > 0 )); then
-              STATS+="${HEADER}\n\n"
-            fi
-            if (( R_COUNT > 0 )); then
-              local BAR_LEN=10
-              local FILLED=$(( (BAR_LEN * R_APPROVE) / R_COUNT ))
-              local EMPT=$((BAR_LEN - FILLED))
-              local BAR="" BI
-              for ((BI = 0; BI < FILLED; BI++)); do BAR+="█"; done
-              for ((BI = 0; BI < EMPT; BI++)); do BAR+="░"; done
-              STATS+="${R_COUNT} PRs reviewed\n"
-              local APAD; APAD="$(printf '%-2s' "$R_APPROVE")"
-              STATS+="${BAR} ${APAD} ✔️ · ${R_BLOCKED}  ✖️\n"
-              STATS+="Bugs\n"
-
-              # One bar per severity: filled = fixed / (open + fixed). The severity emoji
-              # sits after the count (replacing the word "found") so every bar starts in
-              # the same column; rows with nothing open and nothing fixed are omitted.
-              r_sev_bar() {
-                local EMOJI="$1" FIXEDN="$3" TOTAL=$(($2 + $3))
-                (( TOTAL == 0 )) && return
-                local SL=10
-                local SF=$(( (SL * FIXEDN) / TOTAL ))
-                local SE=$((SL - SF))
-                local SB="" k
-                for ((k = 0; k < SF; k++)); do SB+="█"; done
-                for ((k = 0; k < SE; k++)); do SB+="░"; done
-                local TP; TP="$(printf '%-2s' "$TOTAL")"
-                STATS+="${SB} ${TP} ${EMOJI} ￫ ${FIXEDN} fixed\n"
-              }
-              r_sev_bar "🔴" "$R_CRIT" "$R_FCRIT"
-              r_sev_bar "🟡" "$R_MED" "$R_FMED"
-              r_sev_bar "🔵" "$R_LOW" "$R_FLOW"
-              r_sev_bar "🟣" "$R_LEG" "$R_FLEG"
-            fi
-            # The stats block is plain text with no nested HTML entities, so it can be
-            # wrapped in one <pre> block for a bordered, copyable, monospace-aligned box.
-            # The error list and PR list below contain <a href> links and must stay
-            # outside any code/pre tag, since Telegram doesn't allow nested entities there.
-            [[ -n "$STATS" ]] && BLOCK+="<pre>${STATS}</pre>"
-
-            if (( R_ERRCOUNT > 0 )); then
-              [[ "$R_COUNT" -gt 0 ]] && BLOCK+="\n"
-              BLOCK+="⚠️ ${R_ERRCOUNT} PR(s) with errors:\n"
-              local ENTRY
-              for ENTRY in "${R_ERRLIST[@]}"; do
-                BLOCK+="${ENTRY}\n"
-              done
-            fi
-
-            if (( R_COUNT > 0 )); then
-              local -a SKEYS=()
-              while IFS= read -r KEY; do
-                [[ -n "$KEY" ]] && SKEYS+=("$KEY")
-              done < <(printf '%s\n' "${KEYS[@]}" | sort -f)
-
-              local -a APL=()
-              for KEY in "${SKEYS[@]}"; do
-                local V="${PR_VERDICT[$KEY]:-}"
-                [[ -z "$V" ]] && continue
-                local ICN="✅"; [[ "$V" == "BLOCKED" ]] && ICN="❌"
-                APL+=("${ICN} <a href=\"${PR_LINK[$KEY]:-}\">${KEY}</a>")
-              done
-              BLOCK+="<blockquote expandable>\n\n\n"
-              for ENTRY in "${APL[@]}"; do
-                BLOCK+="${ENTRY}\n"
-              done
-              BLOCK+="</blockquote>"
-            fi
-
-            RENDERED="$BLOCK"
-          }
-
-          # No daily (24h) report — Claude Review only publishes on Fridays, with a
-          # rolling 7-day view (a 24h slice was too often empty on quiet days). Manual
-          # workflow_dispatch runs bypass the Friday check, so this can be tested any day.
-          REVIEW_MESSAGE=""
-          if $IS_FRIDAY || [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            render_report "Claude Review" "false"
-            REVIEW_MESSAGE="$RENDERED"
+          FULL_REVIEW_MESSAGE=""
+          if [[ "$PUBLISH_CLAUDE_REVIEW" == "true" ]] && { $IS_FRIDAY || [[ "$EVENT_NAME" == "workflow_dispatch" ]]; }; then
+            FULL_REVIEW_MESSAGE="$(render_claude_review)"
           fi
 
-          if [[ -n "$REVIEW_MESSAGE" ]]; then
-            # printf %b turns the literal "\n" markers accumulated above into real
-            # newlines, needed because the payload below is JSON-encoded with jq
-            # instead of naive string interpolation (required since <a href="..."> now
-            # contains double quotes that would otherwise break the JSON string).
-            FULL_REVIEW_MESSAGE="$(printf '%b' "$REVIEW_MESSAGE")"
-          fi
-          fi
-
-          # ---- Combine both sections into one message and send once ----
+          # Combine and send once.
           COMBINED_MESSAGE="$FULL_MESSAGE"
-          if [[ -n "$FULL_REVIEW_MESSAGE" ]]; then
-            [[ -n "$COMBINED_MESSAGE" ]] && COMBINED_MESSAGE+=$'\n\n'
-            COMBINED_MESSAGE+="$FULL_REVIEW_MESSAGE"
-          fi
+          [[ -n "$FULL_REVIEW_MESSAGE" && -n "$COMBINED_MESSAGE" ]] && COMBINED_MESSAGE+=$'\n\n'
+          COMBINED_MESSAGE+="$FULL_REVIEW_MESSAGE"
           [[ -z "$COMBINED_MESSAGE" ]] && exit 0
 
           echo "$COMBINED_MESSAGE"
