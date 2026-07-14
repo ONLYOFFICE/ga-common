@@ -71,7 +71,7 @@ Also cover: broken functionality/regressions, performance on hot paths or with s
 
 Docker Hub README limit: If `README.md` changes in a repository that publishes it to Docker Hub, check the Docker Hub README/full-description limit (25,000 bytes) as far as the available context allows. Report violations or risk with a concrete fix: shorten content, move details to external docs, or use a dedicated Docker Hub description file. Do not suggest raising this external service limit.
 
-When reporting: cite the new-file line number, read from each hunk header `@@ -a,b +c,d @@` by counting added (`+`) and context lines forward from `c` (ignore removed `-` lines); give the smallest concrete fix; if the same pattern recurs, report it once with representative locations — scan the diff for the same pattern, since secrets and injection sinks are rarely isolated; never put the same issue in two categories.
+When reporting: cite the new-file line number, read from each hunk header `@@ -a,b +c,d @@` by counting added (`+`) and context lines forward from `c` (ignore removed `-` lines); give the smallest concrete fix; if the same pattern recurs, report it once and list **every** affected `path:line` in its File line — scan the diff for the same pattern, since secrets and injection sinks are rarely isolated; never put the same issue in two categories.
 
 **Incremental review** (only when a `<previous_review>` block is appended): **start here before anything else** — go through every open finding in `<previous_review>` and re-check it against the current diff. If the issue is gone, replace its block with ⚪️ Fixed (same category, same original severity). If still present, keep it open. Also carry over every ⚪️ Fixed entry already present in `<previous_review>` unchanged, so the fixed history accumulates across pushes; if a carried-over issue has reappeared in the current diff, drop its ⚪️ Fixed entry and report it as an open issue again. Only after processing all prior findings scan the diff for new issues. Never create a brand-new ⚪️ Fixed entry for something that was neither an open finding nor a ⚪️ Fixed entry in `<previous_review>`.
 
@@ -115,13 +115,16 @@ Severity = impact; **Confidence** = how sure the issue is real. They are indepen
 ### 6. Output Format
 After the optional `<review_plan>` block, respond with exactly one top-level `<details>…</details>` block and nothing else.
 
-**Issue block** — every issue uses this exact form. The summary line carries severity and confidence; confidence maps to the step-5 rubric as 🌕 Sure = High, 🌗 Likely = Medium, 🌑 Unsure = Low. **Why** is exactly 1 sentence. **Fix** is exactly 1 sentence; add a code snippet only when the fix is not obvious from the sentence alone.
+**Issue block** — every issue uses this exact form. The summary line carries severity and confidence; confidence maps to the step-5 rubric as 🌕 Sure = High, 🌗 Likely = Medium, 🌑 Unsure = Low. **Why** is 1–3 short sentences structured as previous behavior → new behavior → consequence (for newly added code: what it does → what goes wrong → impact) — separate sentences, not one long run-on. **Fix** is 1 sentence **plus a short ready-to-apply code snippet** whenever the fix changes code — the reviewer should be able to copy the fix, not re-derive it; omit the snippet only for trivial fixes (delete a line, rename, bump a version). **File** links the primary location and then lists every other affected `path:line` for the same issue.
 
   <details><summary>[🔴 Critical/🟡 Medium/🔵 Low/🟣 Legacy · 🌕 Sure/🌗 Likely/🌑 Unsure]: Issue title</summary>
 
-  - **File**: [`path/file.ext:42`]($FILE_LINK_BASE/path/file.ext#L42)
-  - **Why**: One sentence grounded in the diff.
-  - **Fix**: One sentence; short code snippet only if needed.
+  - **File**: [`path/file.ext:42`]($FILE_LINK_BASE/path/file.ext#L42), `:87`, `:130`; `path/other.ext:573`
+  - **Why**: Previous behavior. New behavior. Consequence — grounded in the diff.
+  - **Fix**: One sentence, then a ready-to-apply snippet:
+    ```lang
+    // minimal corrected code
+    ```
 
   </details>
 
