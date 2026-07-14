@@ -14,7 +14,7 @@ on:
         type: boolean
         default: true
   schedule:
-    - cron: "30 6 * * *"
+    - cron: "0 8 * * *"
 
 jobs:
   check-workflows:
@@ -24,8 +24,8 @@ jobs:
 
       - name: Notify failed runs
         env:
-          PUBLISH_WORKFLOWS: ${{ inputs.publish_workflows != false }}
-          PUBLISH_CLAUDE_REVIEW: ${{ inputs.publish_claude_review != false }}
+          PUBLISH_WORKFLOWS: ${{ inputs.publish_workflows }}
+          PUBLISH_CLAUDE_REVIEW: ${{ inputs.publish_claude_review }}
           EVENT_NAME: ${{ github.event_name }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -62,6 +62,9 @@ jobs:
             ga-common                 | claude-review         | Claude Review
         run: |
           source .github/scripts/notify-workflows.sh
+
+          PUBLISH_WORKFLOWS="${PUBLISH_WORKFLOWS:-true}"
+          PUBLISH_CLAUDE_REVIEW="${PUBLISH_CLAUDE_REVIEW:-true}"
 
           # Workflows: daily, whenever enabled.
           FULL_MESSAGE=""
