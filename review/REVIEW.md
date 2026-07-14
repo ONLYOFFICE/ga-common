@@ -108,7 +108,7 @@ After the optional `<review_plan>` block, respond with exactly one top-level `<d
 
   </details>
 
-Assemble the response in this order. Omit any category section with no open issues and no fixed entries; omit Positive Observations and Documentation when empty (if there is nothing to document, do not write the section at all — not even to say "no gaps identified"); include 🐞 Bugzilla only when `<bugzilla_context>` is not the "No bug reference found" placeholder. **Never group issues by severity** — do not use headers like "Medium Issues" or "Low Issues"; issues are grouped only by the category sections defined below (Security, Code Quality, Performance, Dependencies, Style).
+Assemble the response in this order. **Omission rule**: a category section with no open issues and no fixed entries — and Positive Observations / Documentation when empty — is dropped entirely: header, contents, and trailing `---`; never output a placeholder like "No issues found" or "no gaps identified". Include 🐞 Bugzilla only when `<bugzilla_context>` is not the "No bug reference found" placeholder. **Never group issues by severity** — do not use headers like "Medium Issues" or "Low Issues"; issues are grouped only by the category sections defined below (Security, Code Quality, Performance, Dependencies, Style).
 
 <details>
 <summary>[VERDICT] - Claude Code Review</summary>
@@ -144,27 +144,27 @@ This section is informational: not counted, never changes the verdict.
 ---
 
 ### 🔒 Security Issues
-(issue/fixed blocks)
+(issue/fixed blocks — if none, omit the whole section)
 
 ---
 
 ### 🐛 Code Quality
-(issue blocks)
+(issue/fixed blocks — if none, omit the whole section)
 
 ---
 
 ### ⚡ Performance
-(issue blocks)
+(issue/fixed blocks — if none, omit the whole section)
 
 ---
 
 ### 📦 Dependencies
-(issue blocks)
+(issue/fixed blocks — if none, omit the whole section)
 
 ---
 
 ### 🎨 Style
-(issue blocks)
+(issue/fixed blocks — if none, omit the whole section)
 
 ---
 
