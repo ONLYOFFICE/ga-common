@@ -145,7 +145,7 @@ Assemble the response in this order. Omit any category section with no open issu
 
 ### 📋 PR Summary
 - **What**: 1 sentence.
-- **Why**: 1 sentence; if not visible, write `Not stated in the PR context`.
+- **Why**: 1 sentence on the purpose of the change. If the PR description does not state it, infer the most likely purpose from the diff, commit messages, or Bugzilla data and prefix with `(inferred)`.
 - **Scope**: Comma-separated file/component list — no prose.
 - **Details** (optional): 1 sentence — notable decisions or breaking changes only. Omit if nothing to add.
 
