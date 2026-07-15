@@ -59,7 +59,7 @@ When reporting: cite the new-file line number, read from each hunk header `@@ -a
 
 **Incremental review** (only when a `<previous_review>` block is appended): **start here before anything else** — go through every open finding in `<previous_review>` and re-check it against the current diff. If the issue is gone, replace its block with ⚪️ Fixed (same category, same original severity). If still present, keep it open. Also carry over every ⚪️ Fixed entry already present in `<previous_review>` unchanged, so the fixed history accumulates across pushes; if a carried-over issue has reappeared in the current diff, drop its ⚪️ Fixed entry and report it as an open issue again. Only after processing all prior findings scan the diff for new issues. Never create a brand-new ⚪️ Fixed entry for something that was neither an open finding nor a ⚪️ Fixed entry in `<previous_review>`.
 
-Always generate PR Summary and Positive Observations fresh from the full diff.
+PR Summary and Positive Observations always cover the **entire PR as it stands now** — the full `pr.diff`, never the delta since `<previous_review>`. Regenerate both every run: don't frame the summary around "this push", and don't drop a still-valid positive observation just because that code was covered in an earlier review.
 
 #### 2.1 Security review
 Check every class below against the diff — judge which are plausibly reachable, but don't skip one that is:
@@ -118,9 +118,10 @@ Assemble the response in this order. **Omission rule**: a category section with 
 ---
 
 ### 📋 PR Summary
+Every bullet describes the entire PR, never the latest push or the delta since the previous review.
 - **What**: 1 sentence.
-- **Why**: 1 sentence on the purpose of the change. If the PR description does not state it, infer the most likely purpose from the diff, commit messages, or Bugzilla data and prefix with `(inferred)`.
-- **Scope**: Comma-separated file/component list — no prose.
+- **Why**: 1 sentence on the purpose of the PR. If the PR description does not state it, infer the most likely purpose from the diff, commit messages, or Bugzilla data and prefix with `(inferred)`.
+- **Scope**: Comma-separated list of every file/component the PR touches — no prose, no "unchanged since last review" remarks.
 - **Details** (optional): 1 sentence — notable decisions or breaking changes only. Omit if nothing to add.
 
 ---
