@@ -54,7 +54,7 @@ When adding any new field to the prompt, sanitize it the same way and never `env
 | `helm-lint.yaml` | `workflow_call` | `ct lint` + kube-linter on Helm charts. Inputs: `ct_version`, `enable_yaml_lint`, `enable_kube_lint`. Pulls lint config from raw `master` URLs. |
 | `deprecated-recources.yaml` | `workflow_call` | Renders chart via `helm template`, runs Pluto + `kubectl --dry-run=server` against latest k8s to catch deprecated/removed APIs. Required input: `set_keys`. |
 | `snyk.yaml` | schedule (weekly) + dispatch | Runs `snyk-labs/github-actions-scanner` org-wide; `.github/scripts/snyk.sh` classifies findings into critical/warning. |
-| `workflows-notify.yaml` | schedule (daily) + dispatch | Polls GitHub **and** Gitea run histories for failures across many repos (lists embedded in the YAML), sends a Telegram digest. |
+| `workflows-notify.yaml` | schedule (daily) + dispatch | Polls GitHub/Gitea run histories and Jenkins buildserver jobs (lists embedded in the YAML), sends a Telegram digest. |
 | `keeplive.yml` | schedule (monthly) + dispatch | Empty commit to `feature/keeplive` so GitHub doesn't disable cron workflows for inactivity. |
 
 Downstream repos reference these as `uses: ONLYOFFICE/ga-common/.github/workflows/<name>@master`. Renaming a workflow input is a breaking change.

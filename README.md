@@ -46,7 +46,7 @@ Weekly scan of the organization's open repositories for incorrectly formatted Gi
 
 ### Workflows notification
 
-Scheduled job that monitors workflow failures across multiple repositories and sends Telegram notifications.
+Scheduled job that monitors workflow and buildserver failures across multiple repositories and sends Telegram notifications.
 
 ### Workflows keepalive
 

@@ -33,6 +33,9 @@ jobs:
           GITEA_HOST: ${{ secrets.GITEA_HOST }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ORG: ONLYOFFICE
+          TEAMLAB_URL: ${{ secrets.TEAMLAB_URL }}
+          BUILDSERVER_URL: ${{ secrets.BUILDSERVER_URL }}
+          BUILDSERVER_AUTH: ${{ secrets.BUILDSERVER_AUTH }}
           WORKFLOWS: |
             DocSpace                  | release               | Release
             DocSpace-buildtools       | oci-release           | Upload on S3
@@ -60,6 +63,15 @@ jobs:
             ga-common                 | keeplive              | Actions Keepalive
           WORKFLOWS_GITEA: |
             ga-common                 | claude-review         | Claude Review
+          BUILDSERVER_JOBS: |
+            Docs                      | release               | TEAMLAB_URL               | /view/OO/job/oo/ | ^release/v[0-9]+\.[0-9]+\.[0-9]+$
+            DocSpace                  | appserver rpm         | BUILDSERVER_URL           | /job/appserver.rpm/
+                                      | appserver deb         | BUILDSERVER_URL           | /job/appserver.deb/
+                                      | release deb           | BUILDSERVER_URL           | /job/release.deb/
+                                      | release rpm           | BUILDSERVER_URL           | /job/release.rpm/
+                                      | production deb        | BUILDSERVER_URL           | /job/production.deb.publish/
+                                      | production rpm        | BUILDSERVER_URL           | /job/production.rpm.publish/
+                                      | production exe        | BUILDSERVER_URL           | /job/production.docspace.exe.publish/
         run: |
           source .github/scripts/notify-workflows.sh
 

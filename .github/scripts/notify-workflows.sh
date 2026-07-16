@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Helpers for the "Workflows notify" pipeline (health digest + Claude Review
 # stats). Requires $GITEA_TOKEN, $GITEA_HOST, $GITHUB_TOKEN, $GITHUB_ORG,
-# $WORKFLOWS and $WORKFLOWS_GITEA to be set. Meant to be sourced from
-# workflows-notify.yaml, not run standalone.
+# $WORKFLOWS and $WORKFLOWS_GITEA to be set. Optional buildserver support reads
+# $BUILDSERVER_JOBS plus $BUILDSERVER_AUTH when authentication is required.
+# Meant to be sourced from workflows-notify.yaml, not run standalone.
 
 T24="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
 T30="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
@@ -65,9 +66,194 @@ check_workflows() {
   done
 }
 
-# Builds the "Workflows" health digest — a <pre> 🟢/⚪️/🔴 summary followed by a
-# collapsible per-repo breakdown, sourced from $WORKFLOWS/$WORKFLOWS_GITEA pipe
-# tables. Echoes the finished HTML message, or nothing if there's no data.
+# Helpers for parsing buildserver rows and rendering Telegram HTML safely.
+trim() {
+  local VALUE="$1"
+  VALUE="${VALUE#"${VALUE%%[![:space:]]*}"}"
+  VALUE="${VALUE%"${VALUE##*[![:space:]]}"}"
+  printf '%s' "$VALUE"
+}
+
+html_escape() {
+  local VALUE="${1:-}"
+  VALUE="${VALUE//&/&amp;}"
+  VALUE="${VALUE//</&lt;}"
+  VALUE="${VALUE//>/&gt;}"
+  VALUE="${VALUE//\"/&quot;}"
+  printf '%s' "$VALUE"
+}
+
+buildserver_url() {
+  local SERVER_VAR="$1" PATH_PART="${2:-}" BASE
+  [[ "$SERVER_VAR" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+  [[ -n "${!SERVER_VAR+x}" ]] || return 1
+  BASE="${!SERVER_VAR}"
+  [[ -z "$BASE" ]] && return 1
+  BASE="${BASE%/}"
+  [[ -z "$PATH_PART" ]] && { printf '%s' "$BASE"; return; }
+  PATH_PART="/${PATH_PART#/}"
+  printf '%s' "${BASE}${PATH_PART%/}"
+}
+
+jenkins_fetch() {
+  local URL="$1"
+  local -a CURL_ARGS=(-fsS --globoff --retry 3 --retry-delay 1)
+  local HOST USER TOKEN
+  HOST="$(sed -E 's#^https?://([^/:]+).*#\1#' <<< "$URL")"
+  if [[ -n "${BUILDSERVER_AUTH:-}" && -n "$HOST" ]]; then
+    USER="$(jq -r --arg host "$HOST" '.[$host].user // empty' <<< "$BUILDSERVER_AUTH" 2>/dev/null || true)"
+    TOKEN="$(jq -r --arg host "$HOST" '.[$host].token // empty' <<< "$BUILDSERVER_AUTH" 2>/dev/null || true)"
+    [[ -n "$USER" && -n "$TOKEN" ]] && CURL_ARGS+=(-u "${USER}:${TOKEN}")
+  fi
+  curl "${CURL_ARGS[@]}" "$URL"
+}
+
+# Checks Jenkins jobs listed as "group | name | server-url-env | path | optional-child-regex"
+# for recent failures; fills the _STATUS/_ORDER nameref arrays with status
+# lines. When optional-child-regex is set, host/path is treated as a multibranch
+# parent and the newest semantic-versioned matching child job is checked.
+# Jenkins API errors are rendered as no data, so one unreachable server does
+# not break the digest.
+check_jenkins_jobs() {
+  local -n _STATUS=$1 _ORDER=$2
+  [[ -z "${BUILDSERVER_JOBS:-}" ]] && return
+
+  local LAST_GROUP=""
+  local -a PIDS=() JOB_GROUPS=() NAMES=() URLS=() TMPS=()
+  local GROUP NAME HOST PATH_PART CHILD_REGEX URL
+  while IFS='|' read -r GROUP NAME HOST PATH_PART CHILD_REGEX; do
+    GROUP="$(trim "$GROUP")"; NAME="$(trim "$NAME")"; HOST="$(trim "$HOST")"
+    PATH_PART="$(trim "${PATH_PART:-}")"; CHILD_REGEX="$(trim "${CHILD_REGEX:-}")"
+    [[ -z "$NAME" || -z "$HOST" ]] && continue
+    [[ -n "$GROUP" ]] && LAST_GROUP="$GROUP" || GROUP="$LAST_GROUP"
+    [[ -z "$GROUP" ]] && continue
+    if ! URL="$(buildserver_url "$HOST" "$PATH_PART")"; then
+      WHITE_COUNT=$((WHITE_COUNT + 1))
+      _STATUS["$GROUP"]+="⚪️ $(html_escape "$NAME") (missing server URL: $(html_escape "$HOST"))\n"
+      continue
+    fi
+
+    local SEEN=0 ITEM
+    for ITEM in "${_ORDER[@]}"; do
+      [[ "$ITEM" == "$GROUP" ]] && SEEN=1 && break
+    done
+    [[ "$SEEN" -eq 0 ]] && _ORDER+=("$GROUP")
+
+    if [[ -n "$CHILD_REGEX" ]]; then
+      local CHILDREN CHILD_COUNT=0 CHILD CHILD_NAME CHILD_URL CHILD_LABEL
+      CHILDREN="$(jenkins_fetch "${URL%/}/api/json?tree=jobs[name,displayName,url]" 2>/dev/null || true)"
+      if ! jq -e 'type == "object" and (.jobs | type == "array")' <<< "$CHILDREN" > /dev/null 2>&1; then
+        WHITE_COUNT=$((WHITE_COUNT + 1))
+        _STATUS["$GROUP"]+="⚪️ <a href=\"$(html_escape "$URL")\">$(html_escape "$NAME")</a> (no data)\n"
+        continue
+      fi
+      while IFS= read -r CHILD; do
+        CHILD_NAME="$(jq -r '.name // empty' <<< "$CHILD" 2>/dev/null || true)"
+        CHILD_URL="$(jq -r '.url // empty' <<< "$CHILD" 2>/dev/null || true)"
+        [[ -z "$CHILD_NAME" || -z "$CHILD_URL" ]] && continue
+        CHILD_NAME="$(sed -E 's/%25/%/g; s/%2[Ff]/\//g' <<< "$CHILD_NAME")"
+        CHILD_LABEL="$NAME: $CHILD_NAME"
+        local TMP; TMP="$(mktemp)"
+        ( jenkins_fetch "${CHILD_URL%/}/api/json?tree=builds[number,result,building,timestamp,url,duration]{0,10}" || true ) > "$TMP" &
+        PIDS+=($!); JOB_GROUPS+=("$GROUP"); NAMES+=("$CHILD_LABEL"); URLS+=("$CHILD_URL"); TMPS+=("$TMP")
+        CHILD_COUNT=$((CHILD_COUNT + 1))
+      done < <(jq -c --arg pattern "$CHILD_REGEX" '
+        def norm: gsub("%25"; "%") | gsub("%2[Ff]"; "/");
+        def version_key:
+          ((.name // "") | norm | capture("v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)")? // {major:"0", minor:"0", patch:"0"})
+          | [.major, .minor, .patch] | map(tonumber);
+        [.jobs[]?
+          | {name:(.displayName // .name // ""), url:(.url // "")}
+          | select(.url != "")
+          | select((.name | norm) | test($pattern))]
+        | sort_by(version_key)
+        | reverse
+        | .[:1][]
+      ' <<< "$CHILDREN" 2>/dev/null || true)
+
+      if [[ "$CHILD_COUNT" -eq 0 ]]; then
+        WHITE_COUNT=$((WHITE_COUNT + 1))
+        _STATUS["$GROUP"]+="⚪️ <a href=\"$(html_escape "$URL")\">$(html_escape "$NAME")</a> (no matching jobs)\n"
+      fi
+      continue
+    fi
+
+    local TMP; TMP="$(mktemp)"
+    ( jenkins_fetch "${URL%/}/api/json?tree=builds[number,result,building,timestamp,url,duration]{0,10}" || true ) > "$TMP" &
+    PIDS+=($!); JOB_GROUPS+=("$GROUP"); NAMES+=("$NAME"); URLS+=("$URL"); TMPS+=("$TMP")
+  done <<< "$BUILDSERVER_JOBS"
+
+  local i RAW FAIL_COUNT LATEST_DATE ICON SAFE_NAME SAFE_URL
+  for i in "${!PIDS[@]}"; do
+    wait "${PIDS[$i]}" || true
+    RAW="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
+    GROUP="${JOB_GROUPS[$i]}"; NAME="${NAMES[$i]}"; URL="${URLS[$i]}"
+    SAFE_NAME="$(html_escape "$NAME")"; SAFE_URL="$(html_escape "$URL")"
+
+    FAIL_COUNT="$(jq -r --arg cutoff "$T24" '
+      [.builds[]?
+        | select(.building != true)
+        | select((((.timestamp // 0) / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ")) >= $cutoff)
+        | select((.result // "") | test("FAILURE|UNSTABLE|ABORTED|NOT_BUILT"))]
+      | length
+    ' <<< "$RAW" 2>/dev/null || echo '')"
+    LATEST_DATE="$(jq -r '
+      (.builds // [])
+      | map(select(.timestamp != null))
+      | .[0].timestamp // empty
+      | if . == "" then "" else ((. / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ")) end
+    ' <<< "$RAW" 2>/dev/null || echo '')"
+
+    if [[ -z "$FAIL_COUNT" || -z "$LATEST_DATE" ]]; then
+      ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
+      _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_URL\">$SAFE_NAME</a> (no data)\n"
+      continue
+    fi
+
+    if [[ "$LATEST_DATE" < "$T30" ]]; then
+      ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
+      _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_URL\">$SAFE_NAME</a>\n"
+    elif (( FAIL_COUNT > 0 )); then
+      ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
+      local FAILED_BUILD BUILD_NUM BUILD_URL SAFE_BUILD_URL
+      FAILED_BUILD="$(jq -c --arg cutoff "$T24" '
+        (.builds // [])
+        | map(select(.building != true)
+          | select((((.timestamp // 0) / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ")) >= $cutoff)
+          | select((.result // "") | test("FAILURE|UNSTABLE|ABORTED|NOT_BUILT")))
+        | .[0] // {}
+      ' <<< "$RAW" 2>/dev/null || echo '{}')"
+      BUILD_NUM="$(jq -r '.number // empty' <<< "$FAILED_BUILD" 2>/dev/null || true)"
+      BUILD_URL="$(jq -r '.url // empty' <<< "$FAILED_BUILD" 2>/dev/null || true)"
+      [[ -z "$BUILD_URL" ]] && BUILD_URL="$URL"
+      SAFE_BUILD_URL="$(html_escape "$BUILD_URL")"
+      _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_BUILD_URL\">$SAFE_NAME${BUILD_NUM:+ #$BUILD_NUM}</a>\n"
+    else
+      ICON="🟢"; GREEN_COUNT=$((GREEN_COUNT + 1))
+      _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_URL\">$SAFE_NAME</a>\n"
+    fi
+  done
+}
+
+render_health_block() {
+  local TITLE="$1" MESSAGE="$2"
+  [[ -z "$MESSAGE" ]] && return
+
+  local -a SUMMARY_PARTS=()
+  (( GREEN_COUNT > 0 )) && SUMMARY_PARTS+=("${GREEN_COUNT} 🟢")
+  (( WHITE_COUNT > 0 )) && SUMMARY_PARTS+=("${WHITE_COUNT} ⚪️")
+  (( RED_COUNT > 0 )) && SUMMARY_PARTS+=("${RED_COUNT} 🔴")
+  local SUMMARY="" PART
+  for PART in "${SUMMARY_PARTS[@]}"; do
+    [[ -n "$SUMMARY" ]] && SUMMARY+=" · "
+    SUMMARY+="$PART"
+  done
+
+  printf '%b' "<pre>${TITLE}\n\n${SUMMARY}</pre><blockquote expandable>\n\n\n${MESSAGE}</blockquote>"
+}
+
+# Builds the health digest as separate "Workflows" and "Buildservers" blocks so
+# GitHub/Gitea workflow status is not mixed with Jenkins job status.
 build_workflows_report() {
   declare -A github_status gitea_status
   local github_order=() gitea_order=()
@@ -86,23 +272,24 @@ build_workflows_report() {
     [[ -n "${seen[$REPO]:-}" ]] && continue
     seen[$REPO]=1; ALL_ORDER+=("$REPO")
   done
-  for REPO in "${ALL_ORDER[@]}"; do MESSAGE+="<b>$REPO</b>\n${github_status[$REPO]}${gitea_status[$REPO]}\n"; done
-  [[ -z "$MESSAGE" ]] && return
+  for REPO in "${ALL_ORDER[@]}"; do MESSAGE+="<b>$REPO</b>\n${github_status[$REPO]:-}${gitea_status[$REPO]:-}\n"; done
 
-  local -a SUMMARY_PARTS=()
-  (( GREEN_COUNT > 0 )) && SUMMARY_PARTS+=("${GREEN_COUNT} 🟢")
-  (( WHITE_COUNT > 0 )) && SUMMARY_PARTS+=("${WHITE_COUNT} ⚪️")
-  (( RED_COUNT > 0 )) && SUMMARY_PARTS+=("${RED_COUNT} 🔴")
-  local SUMMARY="" PART
-  for PART in "${SUMMARY_PARTS[@]}"; do
-    [[ -n "$SUMMARY" ]] && SUMMARY+=" · "
-    SUMMARY+="$PART"
-  done
+  local WORKFLOWS_BLOCK BUILDERS_BLOCK
+  WORKFLOWS_BLOCK="$(render_health_block "Workflows" "$MESSAGE")"
 
-  # printf %b turns the literal "\n" markers accumulated above into real
-  # newlines, needed because the caller JSON-encodes the result with jq
-  # instead of naive string interpolation.
-  printf '%b' "<pre>Workflows\n\n${SUMMARY}</pre><blockquote expandable>\n\n\n${MESSAGE}</blockquote>"
+  declare -A jenkins_status
+  local jenkins_order=()
+  RED_COUNT=0 WHITE_COUNT=0 GREEN_COUNT=0
+  check_jenkins_jobs jenkins_status jenkins_order
+
+  MESSAGE=""
+  for REPO in "${jenkins_order[@]}"; do MESSAGE+="<b>$REPO</b>\n${jenkins_status[$REPO]:-}\n"; done
+  BUILDERS_BLOCK="$(render_health_block "Buildservers" "$MESSAGE")"
+
+  [[ -z "$WORKFLOWS_BLOCK" && -z "$BUILDERS_BLOCK" ]] && return
+  [[ -n "$WORKFLOWS_BLOCK" ]] && printf '%s' "$WORKFLOWS_BLOCK"
+  [[ -n "$WORKFLOWS_BLOCK" && -n "$BUILDERS_BLOCK" ]] && printf '\n\n'
+  [[ -n "$BUILDERS_BLOCK" ]] && printf '%s' "$BUILDERS_BLOCK"
 }
 
 # Fetches claude-review.yml run history for the last 7 days, reduces it to one
