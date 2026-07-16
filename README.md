@@ -1,8 +1,8 @@
-# Reusable GitHub Actions for ONLYOFFICE
+# GitHub Actions for ONLYOFFICE
 
 Repository contains reusable workflow actions and configuration files used across ONLYOFFICE repositories.
 
-## Usage
+## Reusable actions usage
 
 Workflows are called from other ONLYOFFICE repositories. Example:
 
@@ -51,6 +51,10 @@ Scheduled job that monitors workflow and buildserver failures across multiple re
 ### Workflows keepalive
 
 Monthly empty commit to `feature/keeplive` to keep the repository active and prevent GitHub from disabling scheduled workflows.
+
+### Document Server / Desktop CI (install & test)
+
+Manually dispatched job that installs a given Document Server / Desktop Editors build across Windows and macOS runners for each edition and package type (inno-setup, MSI/advanced-installer, portable, DMG). The Windows Document Server job additionally waits for a healthcheck and runs the Puppeteer smoke-test suite; the Desktop Windows/macOS jobs verify the install/mount and report the installed version.
 
 ### Claude Code Review
 
