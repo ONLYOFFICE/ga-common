@@ -124,6 +124,7 @@ jobs:
          - Edition: $env:EDITION
          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
               Write-Error "App not installed!"
+              exit 1
          }
          Write-Host "== Running services =="
          Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Running" }
@@ -421,6 +422,7 @@ jobs:
          - Type: $env:TYPE
          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
                  Write-Error "Portable package not extracted!"
+                 exit 1
              }
              Write-Host "Files in portable directory:"
              ls $path
@@ -438,6 +440,7 @@ jobs:
              
              if (!(Test-Path $path)) {
                  Write-Error "App not installed at: $path"
+                 exit 1
              }
              Write-Host "Files in DesktopEditors ($path):"
              ls $path
@@ -465,6 +468,7 @@ jobs:
           
           if (!(Test-Path $exe)) {
             Write-Error "Executable not found at: $exe"
+            exit 1
           }
           
           Write-Host "=== Version Info ==="
