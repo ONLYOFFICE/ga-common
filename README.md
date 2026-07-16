@@ -54,7 +54,7 @@ Monthly empty commit to `feature/keeplive` to keep the repository active and pre
 
 ### Document Server / Desktop CI (install & test)
 
-Manually dispatched job that installs and smoke-tests a given build on Windows and macOS runners. It downloads the requested Document Server and Desktop Editors packages, installs each edition and package type (inno-setup, MSI, portable, DMG), verifies the installation and service health, runs the Puppeteer smoke-test suite against the running instance, and publishes a pass/fail summary.
+Manually dispatched job that installs a given Document Server / Desktop Editors build across Windows and macOS runners for each edition and package type (inno-setup, MSI/advanced-installer, portable, DMG). The Windows Document Server job additionally waits for a healthcheck and runs the Puppeteer smoke-test suite; the Desktop Windows/macOS jobs verify the install/mount and report the installed version.
 
 ### Claude Code Review
 
