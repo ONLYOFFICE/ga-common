@@ -1,5 +1,5 @@
 name: Claude Code Review
-run-name: "Review • ${{ inputs.org_name }}/${{ inputs.repo_name }}#${{ inputs.pr_number }}"
+run-name: "Review • ${{ inputs.org_name }}/${{ inputs.repo_name }}!${{ inputs.pr_number }}"
 
 on:
   workflow_dispatch:
