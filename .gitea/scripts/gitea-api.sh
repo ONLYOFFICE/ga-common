@@ -86,3 +86,63 @@ set_commit_status() {
     -d "$(jq -n --arg state "$state" --arg desc "$desc" --arg url "$(_run_url)" --arg ctx "$context" \
            '{state:$state,context:$ctx,description:$desc,target_url:$url}')" > /dev/null || true
 }
+
+# ---------------------------------------------------------------------------
+# Pull-request helpers (used by the Claude CVE pipeline).
+# ---------------------------------------------------------------------------
+
+# Paginate the pulls list for a repo. $2 = state (open|closed|all).
+fetch_all_pulls() {
+  local repo="$1" state="${2:-all}" all="[]" page=1
+  # Cap at 6 pages (300 PRs) - the marker dedup only needs recent history.
+  while [ "$page" -le 6 ]; do
+    local batch; batch=$(gitea_api "$repo/pulls?state=$state&limit=50&page=$page&sort=recentupdate") \
+      || { echo "Error fetching pulls page $page of $repo" >&2; return 1; }
+    local count; count=$(jq 'length' <<< "$batch") || return 1
+    [ "$count" -eq 0 ] && break
+    all=$(jq -n --argjson a "$all" --argjson b "$batch" '$a + $b') || return 1
+    [ "$count" -lt 50 ] && break
+    (( page++ ))
+  done
+  echo "$all"
+}
+
+# Print the number of an existing PR whose body carries $marker, else empty.
+# Used to avoid re-opening a PR for a CVE that was already handled (open or closed).
+pr_number_with_marker() {
+  local repo="$1" marker="$2"
+  fetch_all_pulls "$repo" "all" \
+    | jq -r --arg m "$marker" '[.[] | select((.body // "") | contains($m))] | first | .number // empty'
+}
+
+# Create a pull request. $5 is a path to a file holding the (markdown) body.
+# Prints the new PR number on success.
+create_pull_request() {
+  local repo="$1" base="$2" head="$3" title="$4" body_file="$5"
+  local payload
+  payload=$(jq -n --arg base "$base" --arg head "$head" --arg title "$title" \
+                  --rawfile body "$body_file" \
+                  '{base:$base, head:$head, title:$title, body:$body}')
+  gitea_api_json "$repo/pulls" -X POST -d "$payload" | jq -r '.number // empty'
+}
+
+# Request review from one or more space-separated Gitea logins on a PR.
+request_reviewers() {
+  local repo="$1" index="$2"; shift 2
+  local reviewers; reviewers=$(printf '%s\n' "$@" | jq -R . | jq -cs .)
+  gitea_api_json "$repo/pulls/$index/requested_reviewers" -X POST \
+    -d "{\"reviewers\": $reviewers}" > /dev/null \
+    || echo "::warning::Failed to request reviewers ($*) on $repo#$index" >&2
+}
+
+# Attach a label by name to a PR (best-effort). Resolves the label id first;
+# Gitea's issue-label endpoint takes ids, not names.
+add_labels() {
+  local repo="$1" index="$2" name="$3"
+  local label_id
+  label_id=$(gitea_api "$repo/labels?limit=100" \
+    | jq -r --arg n "$name" '[.[] | select(.name == $n)] | first | .id // empty') || true
+  [ -n "$label_id" ] || { echo "::warning::Label '$name' not found in $repo - skipping" >&2; return 0; }
+  gitea_api_json "$repo/issues/$index/labels" -X POST -d "{\"labels\": [$label_id]}" > /dev/null \
+    || echo "::warning::Failed to add label '$name' to $repo#$index" >&2
+}

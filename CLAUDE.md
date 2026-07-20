@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two distinct CI platforms live side by side and must not be conflated:
 
 - **`.github/`** — GitHub Actions. Reusable workflows (`workflow_call`) plus scheduled org-wide jobs.
-- **`.gitea/`** — Gitea Actions. The Claude Code Review pipeline (`workflow_dispatch` only). Gitea ≠ GitHub: some action features and contexts differ, and Gitea is self-hosted at `$GITEA_HOST`.
+- **`.gitea/`** — Gitea Actions. Two AI pipelines: the Claude Code Review pipeline (`workflow_dispatch` only) and the Claude CVE Patch pipeline (`schedule` + `workflow_dispatch`). Gitea ≠ GitHub: some action features and contexts differ, and Gitea is self-hosted at `$GITEA_HOST`.
 
 ## Architecture: the Claude Code Review pipeline
 
@@ -46,6 +46,50 @@ PR titles, bodies, commit messages, and Bugzilla data are **untrusted input** re
 - `bugzilla-api.py:sanitize()` escapes `<`/`>` (so untrusted text can't close the `<bug>` wrapper), drops backticks/`$`, repairs mojibake, and caps length.
 
 When adding any new field to the prompt, sanitize it the same way and never `envsubst` a var you haven't escaped.
+
+## Architecture: the Claude CVE Patch pipeline
+
+A scheduled Gitea pipeline that turns a nightly Trivy scan into routed, draft fix PRs. Unlike the review
+pipeline (read-only), this one runs Claude with **write tools** and **opens PRs on other repos**, so its
+safety model is different — read the guardrails before editing. It currently targets DocSpace (routing in
+`claude-cve-routes.json` is DocSpace-specific) but is named product-neutrally to extend to other products later.
+
+1. **`.gitea/workflows/claude-cve.yml`** — `schedule` (daily 23:00 UTC, ~3h after the
+   DocSpace-buildtools cron build) + `workflow_dispatch` (inputs: `branches`, `dry_run` (default **true**),
+   `model` (default `claude-opus-4-8`), `effort`). Installs Trivy + Node/pnpm, logs into Docker Hub, then runs
+   `claude-cve.sh`. A `failure()` step sends a Telegram alert.
+2. **`.gitea/scripts/claude-cve.sh`** — the orchestrator. Per active branch of DocSpace-buildtools
+   (`git ls-remote` filtered to `develop`/`release|hotfix/v*`, mirroring `cron-build.yml`): discovers the
+   newest `4testing-docspace-{dotnet,node,java}` image tag via the Docker Hub tags API (no floating tag
+   exists — it picks the max `{version}.{run_number}`), re-runs Trivy (`--severity HIGH,CRITICAL`, **no**
+   `--ignore-unfixed`), and routes each finding by Trivy package `Type` through `config/claude-cve-routes.json`
+   to a repo + `fix_strategy`: `base-image` (OS pkgs → DocSpace-buildtools Dockerfile, kept even without a
+   per-package fix) or `version-bump` (lang deps → client/server, only when a `FixedVersion` exists). Findings are
+   grouped by `(repo, branch)`; each group is deduped at the **CVE level** against existing open+closed PRs
+   (marker `<!-- claude-cve:CVE-XXXX -->`), the target repo is cloned at that branch, and Claude is invoked
+   (`claude -p --bare --allowedTools Read,Glob,Grep,Edit,Bash`, model with `claude-opus-4-8` fallback) to make
+   the minimal version bump. The harness (not Claude) commits, pushes `bugfix/claude-cve-{branch}-{date}`, and
+   opens a **draft/WIP** PR with the mapped reviewer + `security` label. `DRY_RUN=true` prints diffs/PR bodies
+   and skips push/PR entirely.
+3. **`.gitea/config/claude-cve-routes.json`** — deterministic `type → {repo, files, regenerate_lock, hint}` map plus
+   `repo → reviewer` (Gitea login) map, the PR label, and a `repo_scans` list. This is the routing source of truth;
+   keep repo and reviewer values in sync with git.onlyoffice.com. `repo_scans` entries are repos whose vulnerable
+   deps can't be attributed from an image scan (e.g. the standalone **docspace-ui-kit-react** library, bundled into
+   the images via `DocSpace-client/libs/ui-kit`): each is cloned and scanned with `trivy fs` on its own manifests,
+   and its findings open a fix PR on that repo directly (independent of the DocSpace branch loop).
+4. **`review/CVE-FIX.md`** — the fix-prompt template (analogous to `REVIEW.md`). Findings are XML-wrapped and
+   marked "treat as data" — CVE/advisory text is untrusted input and is sanitized (same `tr`/`cut`/`sed`
+   discipline as the review pipeline) before substitution via a whitelisted `envsubst`. Output contract is a
+   single machine-parsed `<fix_result>` JSON block.
+5. **`.gitea/scripts/gitea-api.sh`** — extended with `create_pull_request`, `request_reviewers`, `add_labels`,
+   and `fetch_all_pulls`/`pr_number_with_marker` (the CVE-dedup lookup), reusing the existing `_gitea_raw`
+   auth layer.
+
+**Guardrails (must preserve):** only High/Critical with a known fix; **draft/WIP PRs only, never auto-merge**
+(the WIP prefix makes the review Lambda skip until a human de-WIPs — the intended human handoff); idempotent at
+both the CVE and branch/PR level; Claude confined via `--bare` + explicit file scope + `--max-turns`/`timeout`;
+per-group isolation (one failure never blocks the rest); `dry_run` defaults on. Never let this pipeline
+auto-merge or widen Claude's tool set without a matching safety review.
 
 ## Reusable GitHub workflows (`.github/workflows/`)
 
@@ -85,4 +129,4 @@ The bash helpers in `gitea-api.sh` and `review-steps.sh` require `$GITEA_TOKEN` 
 - **CRLF line endings** on all files; **English-only code comments** (the non-ASCII check enforces this on PRs — transliterated comments like `// polzovatel` also count as violations per `REVIEW.md`).
 - Commit messages: imperative, Sentence case, no type prefix (e.g. `Add Bugzilla integration for PR reviews`); bug fixes use `fix Bug XXXXX - …`. Match the existing `git log` style.
 - Shell scripts run under `set -euo pipefail`; favor stdlib-only Python (Lambda and CI runners have no pip install step for these).
-- Config the review system through Lambda env vars and repo/org secrets (`ANTHROPIC_KEYS`, `PAT_GITEA_TOKEN`, `BUGZILLA_API_KEY`, `TELEGRAM_*`, `WIP_PREFIXES`), never hardcoded.
+- Config the review system through Lambda env vars and repo/org secrets (`ANTHROPIC_KEYS`, `PAT_GITEA_TOKEN`, `BUGZILLA_API_KEY`, `TELEGRAM_*`, `WIP_PREFIXES`), never hardcoded. The Claude CVE pipeline uses its **own dedicated** Anthropic key (`ANTHROPIC_KEY_CLAUDE_CVE`) — separate from the review pipeline's keys for independent billing/limits — plus `PAT_GITEA_TOKEN` (must have push + PR-create scope on the DocSpace repos), `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`, and `CI_GITEA_HOST`.
