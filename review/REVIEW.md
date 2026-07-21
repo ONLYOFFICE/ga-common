@@ -101,7 +101,7 @@ In the top-level summary line below, replace `VERDICT` (keeping the surrounding 
 
   </details>
 
-**Fixed block** (incremental reviews only):
+**Fixed block** (incremental reviews only). A ⚪️ Fixed block goes **inside the same category section as the original issue** (Security, Code Quality, Performance, Dependencies, or Style) — never in a section of its own. Do **not** add a top-level `⚪️ Fixed` section or any header not listed in the Output Format below; fixed entries are grouped by their original category exactly like open issues.
 
   <details><summary>⚪️ Fixed [🔴/🟡/🔵/🟣]: Issue title</summary>
 
@@ -110,7 +110,7 @@ In the top-level summary line below, replace `VERDICT` (keeping the surrounding 
 
   </details>
 
-Assemble the response in this order. **Omission rule**: a category section with no open issues and no fixed entries — and Positive Observations / Documentation when empty — is dropped entirely: header, contents, and trailing `---`; never output a placeholder like "No issues found" or "no gaps identified". Include 🐞 Bugzilla only when `<bugzilla_context>` is not the "No bug reference found" placeholder. **Never group issues by severity** — do not use headers like "Medium Issues" or "Low Issues"; issues are grouped only by the category sections defined below (Security, Code Quality, Performance, Dependencies, Style).
+Assemble the response in this order. **Omission rule**: a category section with no open issues and no fixed entries — and Positive Observations / Documentation when empty — is dropped entirely: header, contents, and trailing `---`; never output a placeholder like "No issues found" or "no gaps identified". Include 🐞 Bugzilla only when `<bugzilla_context>` is not the "No bug reference found" placeholder. **Never group issues by severity or by status** — do not use headers like "Medium Issues", "Low Issues", or "Fixed"; issues (open **and** ⚪️ Fixed) are grouped only by the category sections defined below (Security, Code Quality, Performance, Dependencies, Style), and only those sections may appear.
 
 <details>
 <summary>[VERDICT] - Claude Code Review</summary>
