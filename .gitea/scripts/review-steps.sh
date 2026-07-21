@@ -252,23 +252,28 @@ post_review_and_set_status() {
     } > claude-output.md
   fi
 
-  # Reconcile the [VERDICT] header with the actual findings. The model writes the
+  # Reconcile the verdict header with the actual findings. The model writes the
   # header and each issue's severity badge in the same freeform response, so
-  # nothing guarantees they agree — recompute from structural evidence (any open
-  # Critical/Medium issue, regardless of confidence — stricter than REVIEW.md §5's
-  # High-confidence-only rule, since the model's own confidence call isn't trusted
-  # here) and correct the header in place if it disagrees. Skipped for the fallback
-  # error text above (no header there), which keeps the review as an "Unknown"
-  # status, not auto-approved.
-  local CORRECT_VERDICT=""
+  # nothing guarantees they agree — and the model sometimes fills the verdict slot
+  # with a stray token (e.g. the severity "[MEDIUM]") that is neither the APPROVE
+  # nor the BLOCKED literal. Recompute the verdict from structural evidence (any
+  # open Critical/Medium issue, regardless of confidence — stricter than
+  # REVIEW.md §5's High-confidence-only rule, since the model's own confidence
+  # call isn't trusted here) and overwrite the whole slot in place, so any
+  # non-conforming token is repaired, not just an APPROVE/BLOCKED swap. Skipped
+  # for the fallback error text above (no header there), which keeps the review as
+  # an "Unknown" status, not auto-approved.
+  local CORRECT_VERDICT="" VERDICT_BADGE=""
   if grep -qF -- '- Claude Code Review</summary>' claude-output.md 2>/dev/null; then
     if grep -qE '\[(🔴 Critical|🟡 Medium) ·' claude-output.md 2>/dev/null; then
-      CORRECT_VERDICT="BLOCKED"
-      sed -i '/- Claude Code Review<\/summary>/ s/✅ APPROVE/❌ BLOCKED/' claude-output.md
+      CORRECT_VERDICT="BLOCKED" VERDICT_BADGE="[❌ BLOCKED]"
     else
-      CORRECT_VERDICT="APPROVE"
-      sed -i '/- Claude Code Review<\/summary>/ s/❌ BLOCKED/✅ APPROVE/' claude-output.md
+      CORRECT_VERDICT="APPROVE" VERDICT_BADGE="[✅ APPROVE]"
     fi
+    # Replace everything between <summary> and the fixed suffix, so a stray token
+    # in the verdict slot is corrected, not left verbatim. Any leading indent
+    # before <summary> is preserved (it is outside the match).
+    sed -i -E "s|<summary>.* - Claude Code Review</summary>|<summary>${VERDICT_BADGE} - Claude Code Review</summary>|" claude-output.md
   fi
 
   # Gitea rejects comment bodies over ~64 KB — truncate with a valid closing tag

@@ -86,6 +86,8 @@ Severity = impact; **Confidence** = how sure the issue is real — assign both i
 ### 4. Output Format
 After the optional `<review_plan>` block, respond with exactly one top-level `<details>…</details>` block and nothing else.
 
+In the top-level summary line below, replace `VERDICT` (keeping the surrounding brackets) with exactly `✅ APPROVE` or `❌ BLOCKED`, and keep the literal ` - Claude Code Review` suffix — so the slot reads `[✅ APPROVE]` or `[❌ BLOCKED]`. This is the verdict, not a per-issue severity badge: never put a severity word (`MEDIUM`, `Critical`, …) in it.
+
 **Issue block** — every issue uses this exact form. The summary line carries severity and confidence; confidence maps to the step-3 rubric as 🌕 Sure = High, 🌗 Likely = Medium, 🌑 Unsure = Low. **Why** is 1–3 short sentences structured as previous behavior → new behavior → consequence (for newly added code: what it does → what goes wrong → impact) — separate sentences, not one long run-on. **Fix** is 1 sentence **plus a short ready-to-apply code snippet** whenever the fix changes code — the reviewer should be able to copy the fix, not re-derive it; omit the snippet only for trivial fixes (delete a line, rename, bump a version). **File** links the primary location and then lists every other affected `path:line` for the same issue.
 
   <details><summary>[🔴 Critical/🟡 Medium/🔵 Low/🟣 Legacy · 🌕 Sure/🌗 Likely/🌑 Unsure]: Issue title</summary>
