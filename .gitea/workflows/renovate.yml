@@ -1,0 +1,47 @@
+name: Renovate
+run-name: "Renovate • ${{ inputs.dry_run && 'dry-run' || 'live' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — only log what would change, no PRs'
+        type: boolean
+        default: true
+  schedule:
+    - cron: '0 3 * * 1'   # Mondays 03:00 UTC (live run)
+
+jobs:
+  renovate:
+    name: Renovate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DRY: ${{ inputs.dry_run }}
+    steps:
+      - name: Run Renovate
+        env:
+          RENOVATE_PLATFORM: gitea
+          RENOVATE_ENDPOINT: https://${{ secrets.CI_GITEA_HOST }}/api/v1
+          RENOVATE_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+          RENOVATE_GIT_AUTHOR: 'Renovate Bot <renovate-bot@onlyoffice.com>'
+          # Optional: read-only github.com token to avoid rate limits on release notes.
+          GITHUB_COM_TOKEN: ${{ secrets.RENOVATE_GITHUB_COM_TOKEN }}
+          RENOVATE_AUTODISCOVER: 'true'
+          RENOVATE_AUTODISCOVER_FILTER: '/^onlyoffice\/docspace-/i'
+          # Process repos without a committed renovate.json (needed for the estimate).
+          RENOVATE_ONBOARDING: 'false'
+          RENOVATE_REQUIRE_CONFIG: 'optional'
+          RENOVATE_CONFIG: '{"extends":["config:recommended"],"osvVulnerabilityAlerts":true,"baseBranchPatterns":["develop"]}'
+          LOG_LEVEL: info
+        run: |
+          set -euo pipefail
+          DRY_ENV=""
+          [ "${DRY:-}" = "true" ] && DRY_ENV="-e RENOVATE_DRY_RUN=full"
+          docker run --rm \
+            -e RENOVATE_PLATFORM -e RENOVATE_ENDPOINT -e RENOVATE_TOKEN \
+            -e RENOVATE_GIT_AUTHOR -e GITHUB_COM_TOKEN -e LOG_LEVEL \
+            -e RENOVATE_AUTODISCOVER -e RENOVATE_AUTODISCOVER_FILTER \
+            -e RENOVATE_ONBOARDING -e RENOVATE_REQUIRE_CONFIG -e RENOVATE_CONFIG \
+            $DRY_ENV \
+            renovate/renovate:latest
