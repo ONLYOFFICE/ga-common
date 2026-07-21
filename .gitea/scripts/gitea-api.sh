@@ -86,3 +86,28 @@ set_commit_status() {
     -d "$(jq -n --arg state "$state" --arg desc "$desc" --arg url "$(_run_url)" --arg ctx "$context" \
            '{state:$state,context:$ctx,description:$desc,target_url:$url}')" > /dev/null || true
 }
+
+# Open a PR for $head into $base, or refresh the one already open from $head.
+# Body is read from $body_file (markdown). On success prints "<created|updated> <html_url>";
+# returns non-zero (and prints nothing) on failure.
+# Usage: open_pull_request <owner/repo> <head> <base> <title> <body_file>
+open_pull_request() {
+  local repo="$1" head="$2" base="$3" title="$4" body_file="$5"
+  local number out url
+  number=$(gitea_api "$repo/pulls?state=open&limit=50" 2>/dev/null \
+    | jq -r --arg h "$head" 'map(select(.head.ref == $h)) | first | .number // empty' 2>/dev/null || true)
+  if [ -n "$number" ]; then
+    # Branch was force-pushed with new fixes — refresh the open PR's title/body.
+    out=$(gitea_api_json "$repo/pulls/$number" -X PATCH \
+      -d "$(jq -n --arg title "$title" --rawfile body "$body_file" '{title:$title, body:$body}')") || return 1
+    url=$(printf '%s' "$out" | jq -r '.html_url // empty')
+    [ -n "$url" ] && { echo "updated $url"; return 0; }
+    return 1
+  fi
+  out=$(gitea_api_json "$repo/pulls" -X POST \
+    -d "$(jq -n --arg head "$head" --arg base "$base" --arg title "$title" --rawfile body "$body_file" \
+          '{head:$head, base:$base, title:$title, body:$body}')") || return 1
+  url=$(printf '%s' "$out" | jq -r '.html_url // empty')
+  [ -n "$url" ] && { echo "created $url"; return 0; }
+  return 1
+}

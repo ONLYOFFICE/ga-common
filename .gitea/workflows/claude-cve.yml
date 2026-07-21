@@ -1,0 +1,221 @@
+name: Claude CVE
+run-name: "Claude CVE • ${{ inputs.source_owner }}/${{ inputs.source_repo }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_owner:
+        description: 'Owner of the repo whose code scanning is read'
+        required: false
+        type: string
+        default: ONLYOFFICE
+      source_repo:
+        description: 'Repo whose code scanning alerts are read'
+        required: false
+        type: string
+        default: DocSpace-buildtools
+      source_ref:
+        description: 'Source repo branch/ref to read alerts from (empty = default branch)'
+        required: false
+        type: string
+        default: ''
+      base_branch:
+        description: 'Base branch of the target repos to fix on'
+        required: false
+        type: string
+        default: develop
+      model:
+        description: 'Claude model'
+        required: false
+        type: string
+        default: claude-sonnet-5
+      effort:
+        description: 'Reasoning effort level'
+        required: false
+        type: choice
+        default: medium
+        options:
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+      claude_code_version:
+        description: 'Claude Code CLI version (npm dist-tag or exact version)'
+        required: false
+        type: string
+        default: 'latest'
+
+env:
+  GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+  FIX_BRANCH: bugfix/claude-cve
+
+concurrency:
+  group: Claude-CVE-${{ inputs.source_owner }}-${{ inputs.source_repo }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Detect CVEs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      cves_found: ${{ steps.fetch.outputs.cves_found }}
+    env:
+      SOURCE_OWNER: ${{ inputs.source_owner }}
+      SOURCE_REPO: ${{ inputs.source_repo }}
+      SOURCE_REF: ${{ inputs.source_ref }}
+    steps:
+      - name: Checkout ga-common
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
+          git clone "https://$GITEA_HOST/$SOURCE_OWNER/ga-common" --depth=1 --branch "$REF_NAME" .
+
+      - name: Fetch code-scanning alerts
+        id: fetch
+        env:
+          GH_TOKEN: ${{ secrets.GH_CVE_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .gitea/scripts/cve-fetch.py
+          if [ -s cve-context/alerts.md ]; then
+            echo "cves_found=true" >> $GITHUB_OUTPUT
+          else
+            echo "cves_found=false" >> $GITHUB_OUTPUT
+          fi
+
+  fix:
+    name: "Claude CVE • ${{ matrix.repo }}"
+    needs: prepare
+    if: needs.prepare.outputs.cves_found == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - docspace-buildtools
+          - docspace-server
+          - docspace-client
+          - docspace-plugins
+          - docspace-mcp
+          - docspace-ui-kit-react
+    env:
+      SOURCE_OWNER: ${{ inputs.source_owner }}
+      SOURCE_REPO: ${{ inputs.source_repo }}
+      SOURCE_REF: ${{ inputs.source_ref }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
+      REPO: ${{ matrix.repo }}
+    steps:
+      - name: Select API key
+        id: select_key
+        env:
+          ANTHROPIC_KEY_CLAUDE_CVE: ${{ secrets.ANTHROPIC_KEY_CLAUDE_CVE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_KEY_CLAUDE_CVE:-}" ]; then
+            echo "::error::ANTHROPIC_KEY_CLAUDE_CVE is not set"
+            exit 1
+          fi
+          echo "::add-mask::$ANTHROPIC_KEY_CLAUDE_CVE"
+          echo "api_key=$ANTHROPIC_KEY_CLAUDE_CVE" >> $GITHUB_OUTPUT
+
+      - name: Checkout ga-common
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
+          git config --global user.name "claude-cve-bot"
+          git config --global user.email "claude-cve-bot@onlyoffice.com"
+          git clone "https://$GITEA_HOST/$SOURCE_OWNER/ga-common" --depth=1 --branch "$REF_NAME" .
+
+      - name: Fetch code-scanning alerts
+        env:
+          GH_TOKEN: ${{ secrets.GH_CVE_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .gitea/scripts/cve-fetch.py
+
+      - name: Clone target repo
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Always start from the current base branch so fixes land against up-to-date code,
+          # even when a stale PR from a previous run is still open.
+          mkdir -p repos
+          git clone "https://$GITEA_HOST/$SOURCE_OWNER/$REPO" --depth=1 --branch "$BASE_BRANCH" "repos/$REPO"
+          git -C "repos/$REPO" checkout -b "$FIX_BRANCH"
+
+      - name: Fix CVEs with Claude
+        working-directory: repos
+        env:
+          ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
+          CLAUDE_MODEL: ${{ inputs.model }}
+          CLAUDE_EFFORT: ${{ inputs.effort }}
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+        run: |
+          set -uo pipefail
+          npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
+          export PATH="$(npm config get prefix)/bin:$PATH"
+          echo "claude-code $(claude --version || echo unknown)"
+
+          # One repo per job — Claude fixes the vulnerable packages that live in it.
+          export CVE_TABLE="$(cat ../cve-context/alerts.md)"
+          export REPO_LIST="- $REPO"
+          envsubst '$CVE_TABLE $BASE_BRANCH $REPO_LIST' < ../cve/CVE.md > ../cve-prompt.txt
+
+          timeout -k 30 3000 claude -p \
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash" \
+            --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-turns 400 \
+            --output-format json < ../cve-prompt.txt > ../claude-output.json \
+            || echo "::warning::Claude run exited non-zero"
+          jq -r '.result // empty' ../claude-output.json 2>/dev/null || true
+          echo "Stats: $(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' ../claude-output.json 2>/dev/null || echo unknown)"
+
+      - name: Push fixed branch and open a draft PR
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          source .gitea/scripts/gitea-api.sh   # gitea_api / gitea_api_json (auth + error handling)
+          WORK="repos/$REPO"
+          [ -d "$WORK" ] || { echo "::notice::${REPO}: nothing cloned"; exit 0; }
+
+          # Commit whatever Claude left staged, then count commits ahead of the base branch.
+          if [ -n "$(git -C "$WORK" status --porcelain)" ]; then
+            git -C "$WORK" add -A
+            git -C "$WORK" commit -m "Fix Trivy-reported dependency CVEs" --quiet
+          fi
+          AHEAD=$(git -C "$WORK" rev-list --count "origin/$BASE_BRANCH..HEAD" 2>/dev/null || echo 0)
+          if [ "$AHEAD" -eq 0 ]; then
+            echo "::notice title=Claude CVE::${REPO}: no changes"
+            exit 0
+          fi
+
+          # The branch was rebuilt from the current base branch, so always force-push.
+          if ! git -C "$WORK" push --force origin "$FIX_BRANCH"; then
+            echo "::error::Push failed for $REPO"; exit 1
+          fi
+
+          # Render the PR body (the helper reads the context below from the environment).
+          export SOURCE_REF_LABEL="${SOURCE_REF:-default branch}"
+          export CLAUDE_SUMMARY="$(jq -r '.result // empty' claude-output.json 2>/dev/null | head -c 4000)"
+          export CVE_TABLE="$(head -c 8000 cve-context/alerts.md 2>/dev/null || true)"
+          bash .gitea/scripts/cve-pr-body.sh "$WORK" "$AHEAD" > /tmp/pr_body.md
+
+          # Open a draft PR, or refresh the one already open from this branch.
+          PR_TITLE="WIP: Fix Trivy-reported dependency CVEs"
+          if RESULT="$(open_pull_request "$SOURCE_OWNER/$REPO" "$FIX_BRANCH" "$BASE_BRANCH" "$PR_TITLE" /tmp/pr_body.md)"; then
+            echo "::notice title=Claude CVE::${REPO}: ${RESULT}"
+          else
+            echo "::warning::PR create/update failed for $REPO"
+          fi
