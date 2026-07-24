@@ -299,9 +299,9 @@ build_workflows_report() {
 
 # Fetches claude-review.yml run history for the last 7 days, reduces it to one
 # "latest state" row per PR (verdict, severity/fixed counts, open errors), and
-# renders the weekly stats digest — a <pre> block (PRs reviewed, pass/fail bar,
-# one bar per severity) plus an error list and a collapsible PR list, both
-# linking out. Echoes the finished HTML message, or nothing if there's no data.
+# renders the weekly stats digest — a <pre> block (run count, PRs reviewed,
+# pass/fail bar, one bar per severity) plus an error list and a collapsible PR
+# list, both linking out. Echoes the finished HTML message, or nothing if there's no data.
 render_claude_review() {
   local AUTH="token $GITEA_TOKEN"
   local API_BASE="https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/ga-common"
@@ -315,6 +315,7 @@ render_claude_review() {
       | select((.created_at//.started_at//.updated_at//"") >= $t)
       | {id, display_title, html_url}]
   ' <<< "$RUNS_RAW" 2>/dev/null || echo '[]')"
+  local RUN_COUNT; RUN_COUNT="$(jq 'length' <<< "$RUNS_JSON" 2>/dev/null || echo 0)"
 
   local -a PIDS=() TITLES=() URLS=() TMPS=()
   local RUN RUN_ID TITLE RUN_URL TMP
@@ -419,7 +420,7 @@ render_claude_review() {
     local BAR="" BI
     for ((BI = 0; BI < FILLED; BI++)); do BAR+="█"; done
     for ((BI = 0; BI < EMPT; BI++)); do BAR+="░"; done
-    STATS+="${R_COUNT} PRs reviewed\n"
+    STATS+="${R_COUNT} PRs · ${RUN_COUNT} runs\n"
     local APAD; APAD="$(printf '%-2s' "$R_APPROVE")"
     STATS+="${BAR} ${APAD} ✔️ · ${R_BLOCKED}  ✖️\n"
     STATS+="Bugs\n"
