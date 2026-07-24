@@ -341,8 +341,8 @@ render_claude_review() {
     wait "${PIDS[$i]}" || true
     LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
     TITLE="${TITLES[$i]}"; RUN_URL="${URLS[$i]}"
-    REPO="$(grep -oP "${GITHUB_ORG}/\K[^#]+" <<< "$TITLE" || true)"
-    PR="$(grep -oP '#\K[0-9]+' <<< "$TITLE" || true)"
+    REPO="$(grep -oP "${GITHUB_ORG}/\K[^!]+" <<< "$TITLE" || true)"
+    PR="$(grep -oP '!\K[0-9]+' <<< "$TITLE" || true)"
     [[ -z "$REPO" || -z "$PR" ]] && continue
     KEY="${REPO}#${PR}"
 
