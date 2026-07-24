@@ -297,18 +297,26 @@ build_workflows_report() {
   [[ -n "$BUILDERS_BLOCK" ]] && printf '%s' "$BUILDERS_BLOCK"
 }
 
-# Fetches claude-review.yml run history for the last 7 days, reduces it to one
-# "latest state" row per PR (verdict, severity/fixed counts, open errors), and
-# renders the weekly stats digest — a <pre> block (run count, PRs reviewed,
-# pass/fail bar, one bar per severity) plus an error list and a collapsible PR
-# list, both linking out. Echoes the finished HTML message, or nothing if there's no data.
+# Fetches claude-review.yml run history for the configured period (day/week/
+# month via $CLAUDE_REVIEW_PERIOD, default week), reduces it to one "latest
+# state" row per PR (verdict, severity/fixed counts, open errors), and renders
+# the stats digest — a <pre> block (run count, PRs reviewed, pass/fail bar,
+# one bar per severity) plus an error list and a collapsible PR list, both
+# linking out. Echoes the finished HTML message, or nothing if there's no data.
 render_claude_review() {
   local AUTH="token $GITEA_TOKEN"
   local API_BASE="https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/ga-common"
 
+  local CUTOFF
+  case "${CLAUDE_REVIEW_PERIOD:-week}" in
+    day)   CUTOFF="$T24" ;;
+    month) CUTOFF="$T30" ;;
+    *)     CUTOFF="$T7" ;;
+  esac
+
   local RUNS_RAW RUNS_JSON
-  RUNS_RAW="$(fetch "$AUTH" "$API_BASE/actions/runs?page=1&limit=100" "$T7")"
-  RUNS_JSON="$(jq -c --arg t "$T7" --arg wf "claude-review.yml" '
+  RUNS_RAW="$(fetch "$AUTH" "$API_BASE/actions/runs?page=1&limit=100" "$CUTOFF")"
+  RUNS_JSON="$(jq -c --arg t "$CUTOFF" --arg wf "claude-review.yml" '
     (.workflow_runs // []) as $r
     | [$r[] | select(.status=="completed")
       | select((.path//"" | split("@")[0] | (. == $wf or endswith("/"+$wf))))

@@ -18,6 +18,15 @@ on:
         required: false
         type: boolean
         default: true
+      claude_review_period:
+        description: 'Time window for the Claude Review stats digest'
+        required: false
+        type: choice
+        options:
+          - day
+          - week
+          - month
+        default: week
   schedule:
     - cron: "30 6 * * *"
 
@@ -32,6 +41,7 @@ jobs:
           PUBLISH_WORKFLOWS: ${{ inputs.publish_workflows }}
           PUBLISH_BUILDSERVERS: ${{ inputs.publish_buildservers }}
           PUBLISH_CLAUDE_REVIEW: ${{ inputs.publish_claude_review }}
+          CLAUDE_REVIEW_PERIOD: ${{ inputs.claude_review_period }}
           EVENT_NAME: ${{ github.event_name }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -84,6 +94,7 @@ jobs:
           PUBLISH_WORKFLOWS="${PUBLISH_WORKFLOWS:-true}"
           PUBLISH_BUILDSERVERS="${PUBLISH_BUILDSERVERS:-true}"
           PUBLISH_CLAUDE_REVIEW="${PUBLISH_CLAUDE_REVIEW:-true}"
+          CLAUDE_REVIEW_PERIOD="${CLAUDE_REVIEW_PERIOD:-week}"
 
           # Workflows/Buildservers: daily, whenever enabled.
           FULL_MESSAGE=""
