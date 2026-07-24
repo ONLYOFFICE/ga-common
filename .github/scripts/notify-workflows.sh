@@ -255,36 +255,41 @@ render_health_block() {
 # Builds the health digest as separate "Workflows" and "Buildservers" blocks so
 # GitHub/Gitea workflow status is not mixed with Jenkins job status.
 build_workflows_report() {
-  declare -A github_status gitea_status
-  local github_order=() gitea_order=()
-  RED_COUNT=0 WHITE_COUNT=0 GREEN_COUNT=0
-  check_workflows github_status github_order "Bearer $GITHUB_TOKEN" \
-    "https://api.github.com/repos/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__/runs?per_page=100" \
-    "https://github.com/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__" <<< "$WORKFLOWS"
-  check_workflows gitea_status gitea_order "token $GITEA_TOKEN" \
-    "https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
-    "https://$GITEA_HOST/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
+  local WORKFLOWS_BLOCK="" BUILDERS_BLOCK=""
 
-  local MESSAGE="" REPO
-  declare -A seen
-  local ALL_ORDER=()
-  for REPO in "${github_order[@]}" "${gitea_order[@]}"; do
-    [[ -n "${seen[$REPO]:-}" ]] && continue
-    seen[$REPO]=1; ALL_ORDER+=("$REPO")
-  done
-  for REPO in "${ALL_ORDER[@]}"; do MESSAGE+="<b>$REPO</b>\n${github_status[$REPO]:-}${gitea_status[$REPO]:-}\n"; done
+  if [[ "${PUBLISH_WORKFLOWS:-true}" == "true" ]]; then
+    declare -A github_status gitea_status
+    local github_order=() gitea_order=()
+    RED_COUNT=0 WHITE_COUNT=0 GREEN_COUNT=0
+    check_workflows github_status github_order "Bearer $GITHUB_TOKEN" \
+      "https://api.github.com/repos/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__/runs?per_page=100" \
+      "https://github.com/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__" <<< "$WORKFLOWS"
+    check_workflows gitea_status gitea_order "token $GITEA_TOKEN" \
+      "https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
+      "https://$GITEA_HOST/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
 
-  local WORKFLOWS_BLOCK BUILDERS_BLOCK
-  WORKFLOWS_BLOCK="$(render_health_block "Workflows" "$MESSAGE")"
+    local MESSAGE="" REPO
+    declare -A seen
+    local ALL_ORDER=()
+    for REPO in "${github_order[@]}" "${gitea_order[@]}"; do
+      [[ -n "${seen[$REPO]:-}" ]] && continue
+      seen[$REPO]=1; ALL_ORDER+=("$REPO")
+    done
+    for REPO in "${ALL_ORDER[@]}"; do MESSAGE+="<b>$REPO</b>\n${github_status[$REPO]:-}${gitea_status[$REPO]:-}\n"; done
 
-  declare -A jenkins_status
-  local jenkins_order=()
-  RED_COUNT=0 WHITE_COUNT=0 GREEN_COUNT=0
-  check_jenkins_jobs jenkins_status jenkins_order
+    WORKFLOWS_BLOCK="$(render_health_block "Workflows" "$MESSAGE")"
+  fi
 
-  MESSAGE=""
-  for REPO in "${jenkins_order[@]}"; do MESSAGE+="<b>$REPO</b>\n${jenkins_status[$REPO]:-}\n"; done
-  BUILDERS_BLOCK="$(render_health_block "Buildservers" "$MESSAGE")"
+  if [[ "${PUBLISH_BUILDSERVERS:-true}" == "true" ]]; then
+    declare -A jenkins_status
+    local jenkins_order=() REPO
+    RED_COUNT=0 WHITE_COUNT=0 GREEN_COUNT=0
+    check_jenkins_jobs jenkins_status jenkins_order
+
+    local MESSAGE=""
+    for REPO in "${jenkins_order[@]}"; do MESSAGE+="<b>$REPO</b>\n${jenkins_status[$REPO]:-}\n"; done
+    BUILDERS_BLOCK="$(render_health_block "Buildservers" "$MESSAGE")"
+  fi
 
   [[ -z "$WORKFLOWS_BLOCK" && -z "$BUILDERS_BLOCK" ]] && return
   [[ -n "$WORKFLOWS_BLOCK" ]] && printf '%s' "$WORKFLOWS_BLOCK"

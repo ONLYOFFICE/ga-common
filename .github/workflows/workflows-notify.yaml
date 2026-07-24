@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: true
+      publish_buildservers:
+        description: 'Publish the Buildservers health digest'
+        required: false
+        type: boolean
+        default: true
       publish_claude_review:
         description: 'Publish the Claude Review stats digest'
         required: false
@@ -25,6 +30,7 @@ jobs:
       - name: Notify failed runs
         env:
           PUBLISH_WORKFLOWS: ${{ inputs.publish_workflows }}
+          PUBLISH_BUILDSERVERS: ${{ inputs.publish_buildservers }}
           PUBLISH_CLAUDE_REVIEW: ${{ inputs.publish_claude_review }}
           EVENT_NAME: ${{ github.event_name }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -76,11 +82,12 @@ jobs:
           source .github/scripts/notify-workflows.sh
 
           PUBLISH_WORKFLOWS="${PUBLISH_WORKFLOWS:-true}"
+          PUBLISH_BUILDSERVERS="${PUBLISH_BUILDSERVERS:-true}"
           PUBLISH_CLAUDE_REVIEW="${PUBLISH_CLAUDE_REVIEW:-true}"
 
-          # Workflows: daily, whenever enabled.
+          # Workflows/Buildservers: daily, whenever enabled.
           FULL_MESSAGE=""
-          [[ "$PUBLISH_WORKFLOWS" == "true" ]] && FULL_MESSAGE="$(build_workflows_report)"
+          [[ "$PUBLISH_WORKFLOWS" == "true" || "$PUBLISH_BUILDSERVERS" == "true" ]] && FULL_MESSAGE="$(build_workflows_report)"
 
           # Claude Review: weekly, Fridays only — or any day via manual dispatch (testing).
           IS_FRIDAY=false; [[ "$(date -u +%u)" == "5" ]] && IS_FRIDAY=true
