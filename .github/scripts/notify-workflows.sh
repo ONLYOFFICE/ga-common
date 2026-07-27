@@ -109,9 +109,9 @@ jenkins_fetch() {
 }
 
 # Checks Jenkins jobs listed as "group | name | server-url-env | path | optional-child-regex"
-# for recent failures; fills the _STATUS/_ORDER nameref arrays with status
-# lines. When optional-child-regex is set, host/path is treated as a multibranch
-# parent and the newest semantic-versioned matching child job is checked.
+# for the latest completed build; fills the _STATUS/_ORDER nameref arrays with
+# status lines. When optional-child-regex is set, host/path is treated as a
+# multibranch parent and the newest semantic-versioned matching child job is checked.
 # Jenkins API errors are rendered as no data, so one unreachable server does
 # not break the digest.
 check_jenkins_jobs() {
@@ -183,55 +183,46 @@ check_jenkins_jobs() {
     PIDS+=($!); JOB_GROUPS+=("$GROUP"); NAMES+=("$NAME"); URLS+=("$URL"); TMPS+=("$TMP")
   done <<< "$BUILDSERVER_JOBS"
 
-  local i RAW FAIL_COUNT LATEST_DATE ICON SAFE_NAME SAFE_URL
+  local i RAW LATEST_BUILD LATEST_DATE BUILD_RESULT ICON SAFE_NAME SAFE_URL
   for i in "${!PIDS[@]}"; do
     wait "${PIDS[$i]}" || true
     RAW="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
     GROUP="${JOB_GROUPS[$i]}"; NAME="${NAMES[$i]}"; URL="${URLS[$i]}"
     SAFE_NAME="$(html_escape "$NAME")"; SAFE_URL="$(html_escape "$URL")"
 
-    FAIL_COUNT="$(jq -r --arg cutoff "$T24" '
-      [.builds[]?
-        | select(.building != true)
-        | select((((.timestamp // 0) / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ")) >= $cutoff)
-        | select((.result // "") | test("FAILURE|UNSTABLE|ABORTED|NOT_BUILT"))]
-      | length
-    ' <<< "$RAW" 2>/dev/null || echo '')"
-    LATEST_DATE="$(jq -r '
+    LATEST_BUILD="$(jq -c '
       (.builds // [])
-      | map(select(.timestamp != null))
-      | .[0].timestamp // empty
+      | map(select(.building != true and (.result // "") != ""))
+      | max_by([(.timestamp // 0), (.number // 0)]) // {}
+    ' <<< "$RAW" 2>/dev/null || echo '{}')"
+    LATEST_DATE="$(jq -r '
+      .timestamp // empty
       | if . == "" then "" else ((. / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ")) end
-    ' <<< "$RAW" 2>/dev/null || echo '')"
+    ' <<< "$LATEST_BUILD" 2>/dev/null || echo '')"
+    BUILD_RESULT="$(jq -r '.result // empty' <<< "$LATEST_BUILD" 2>/dev/null || true)"
 
-    if [[ -z "$FAIL_COUNT" || -z "$LATEST_DATE" ]]; then
+    if [[ -z "$LATEST_DATE" || -z "$BUILD_RESULT" ]]; then
       ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
       _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_URL\">$SAFE_NAME</a> (no data)\n"
       continue
     fi
 
+    local BUILD_NUM BUILD_URL SAFE_BUILD_URL
+    BUILD_NUM="$(jq -r '.number // empty' <<< "$LATEST_BUILD" 2>/dev/null || true)"
+    BUILD_URL="$(jq -r '.url // empty' <<< "$LATEST_BUILD" 2>/dev/null || true)"
+    [[ -z "$BUILD_URL" ]] && BUILD_URL="$URL"
+    SAFE_BUILD_URL="$(html_escape "$BUILD_URL")"
+
     if [[ "$LATEST_DATE" < "$T30" ]]; then
       ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
-      _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_URL\">$SAFE_NAME</a>\n"
-    elif (( FAIL_COUNT > 0 )); then
-      ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
-      local FAILED_BUILD BUILD_NUM BUILD_URL SAFE_BUILD_URL
-      FAILED_BUILD="$(jq -c --arg cutoff "$T24" '
-        (.builds // [])
-        | map(select(.building != true)
-          | select((((.timestamp // 0) / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ")) >= $cutoff)
-          | select((.result // "") | test("FAILURE|UNSTABLE|ABORTED|NOT_BUILT")))
-        | .[0] // {}
-      ' <<< "$RAW" 2>/dev/null || echo '{}')"
-      BUILD_NUM="$(jq -r '.number // empty' <<< "$FAILED_BUILD" 2>/dev/null || true)"
-      BUILD_URL="$(jq -r '.url // empty' <<< "$FAILED_BUILD" 2>/dev/null || true)"
-      [[ -z "$BUILD_URL" ]] && BUILD_URL="$URL"
-      SAFE_BUILD_URL="$(html_escape "$BUILD_URL")"
-      _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_BUILD_URL\">$SAFE_NAME${BUILD_NUM:+ #$BUILD_NUM}</a>\n"
-    else
+    elif [[ "$BUILD_RESULT" == "SUCCESS" ]]; then
       ICON="🟢"; GREEN_COUNT=$((GREEN_COUNT + 1))
-      _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_URL\">$SAFE_NAME</a>\n"
+    elif [[ "$BUILD_RESULT" =~ ^(FAILURE|UNSTABLE)$ ]]; then
+      ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
+    else
+      ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
     fi
+    _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_BUILD_URL\">$SAFE_NAME${BUILD_NUM:+ #$BUILD_NUM}</a>\n"
   done
 }
 
