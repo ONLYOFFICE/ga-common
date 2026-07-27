@@ -109,9 +109,10 @@ jenkins_fetch() {
 }
 
 # Checks Jenkins jobs listed as "group | name | server-url-env | path | optional-child-regex"
-# for the latest completed build; fills the _STATUS/_ORDER nameref arrays with
-# status lines. When optional-child-regex is set, host/path is treated as a
-# multibranch parent and the newest semantic-versioned matching child job is checked.
+# and fills the _STATUS/_ORDER nameref arrays with status lines. Direct jobs are
+# checked for recent failures. When optional-child-regex is set, host/path is
+# treated as a multibranch parent and the latest completed build of the newest
+# semantic-versioned matching child job is checked.
 # Jenkins API errors are rendered as no data, so one unreachable server does
 # not break the digest.
 check_jenkins_jobs() {
@@ -119,7 +120,7 @@ check_jenkins_jobs() {
   [[ -z "${BUILDSERVER_JOBS:-}" ]] && return
 
   local LAST_GROUP=""
-  local -a PIDS=() JOB_GROUPS=() NAMES=() URLS=() TMPS=()
+  local -a PIDS=() JOB_GROUPS=() NAMES=() URLS=() TMPS=() BRANCH_SCOPED=()
   local GROUP NAME HOST PATH_PART CHILD_REGEX URL
   while IFS='|' read -r GROUP NAME HOST PATH_PART CHILD_REGEX; do
     GROUP="$(trim "$GROUP")"; NAME="$(trim "$NAME")"; HOST="$(trim "$HOST")"
@@ -156,6 +157,7 @@ check_jenkins_jobs() {
         local TMP; TMP="$(mktemp)"
         ( jenkins_fetch "${CHILD_URL%/}/api/json?tree=builds[number,result,building,timestamp,url,duration]{0,10}" || true ) > "$TMP" &
         PIDS+=($!); JOB_GROUPS+=("$GROUP"); NAMES+=("$CHILD_LABEL"); URLS+=("$CHILD_URL"); TMPS+=("$TMP")
+        BRANCH_SCOPED+=("true")
         CHILD_COUNT=$((CHILD_COUNT + 1))
       done < <(jq -c --arg pattern "$CHILD_REGEX" '
         def norm: gsub("%25"; "%") | gsub("%2[Ff]"; "/");
@@ -181,43 +183,60 @@ check_jenkins_jobs() {
     local TMP; TMP="$(mktemp)"
     ( jenkins_fetch "${URL%/}/api/json?tree=builds[number,result,building,timestamp,url,duration]{0,10}" || true ) > "$TMP" &
     PIDS+=($!); JOB_GROUPS+=("$GROUP"); NAMES+=("$NAME"); URLS+=("$URL"); TMPS+=("$TMP")
+    BRANCH_SCOPED+=("false")
   done <<< "$BUILDSERVER_JOBS"
 
-  local i RAW LATEST_BUILD LATEST_DATE BUILD_RESULT ICON SAFE_NAME SAFE_URL
+  local i RAW BUILD_REPORT LATEST_DATE REPORT_STATUS ICON SAFE_NAME SAFE_URL
   for i in "${!PIDS[@]}"; do
     wait "${PIDS[$i]}" || true
     RAW="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
     GROUP="${JOB_GROUPS[$i]}"; NAME="${NAMES[$i]}"; URL="${URLS[$i]}"
     SAFE_NAME="$(html_escape "$NAME")"; SAFE_URL="$(html_escape "$URL")"
 
-    LATEST_BUILD="$(jq -c '
-      (.builds // [])
-      | map(select(.building != true and (.result // "") != ""))
-      | max_by([(.timestamp // 0), (.number // 0)]) // {}
+    BUILD_REPORT="$(jq -c --arg cutoff "$T24" --arg branch_scoped "${BRANCH_SCOPED[$i]}" '
+      def completed: select(.building != true and (.result // "") != "");
+      def iso_date: (((.timestamp // 0) / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ"));
+      if $branch_scoped == "true" then
+        ((.builds // []) | map(completed) | max_by([(.timestamp // 0), (.number // 0)])) as $build
+        | {timestamp:$build.timestamp, status:$build.result, build:$build}
+      else
+        ((.builds // []) | map(select(.timestamp != null)) | .[0]) as $latest
+        | ((.builds // []) | map(completed) | length > 0) as $has_completed
+        | ((.builds // [])
+          | map(completed
+            | select(iso_date >= $cutoff)
+            | select((.result // "") | test("FAILURE|UNSTABLE|ABORTED|NOT_BUILT")))
+          | .[0]) as $failed
+        | {
+            timestamp:$latest.timestamp,
+            status:(if $has_completed == false then null elif $failed == null then "SUCCESS" else "FAILURE" end),
+            build:$failed
+          }
+      end
     ' <<< "$RAW" 2>/dev/null || echo '{}')"
     LATEST_DATE="$(jq -r '
       .timestamp // empty
       | if . == "" then "" else ((. / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ")) end
-    ' <<< "$LATEST_BUILD" 2>/dev/null || echo '')"
-    BUILD_RESULT="$(jq -r '.result // empty' <<< "$LATEST_BUILD" 2>/dev/null || true)"
+    ' <<< "$BUILD_REPORT" 2>/dev/null || echo '')"
+    REPORT_STATUS="$(jq -r '.status // empty' <<< "$BUILD_REPORT" 2>/dev/null || true)"
 
-    if [[ -z "$LATEST_DATE" || -z "$BUILD_RESULT" ]]; then
+    if [[ -z "$LATEST_DATE" || -z "$REPORT_STATUS" ]]; then
       ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
       _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_URL\">$SAFE_NAME</a> (no data)\n"
       continue
     fi
 
     local BUILD_NUM BUILD_URL SAFE_BUILD_URL
-    BUILD_NUM="$(jq -r '.number // empty' <<< "$LATEST_BUILD" 2>/dev/null || true)"
-    BUILD_URL="$(jq -r '.url // empty' <<< "$LATEST_BUILD" 2>/dev/null || true)"
+    BUILD_NUM="$(jq -r '.build.number // empty' <<< "$BUILD_REPORT" 2>/dev/null || true)"
+    BUILD_URL="$(jq -r '.build.url // empty' <<< "$BUILD_REPORT" 2>/dev/null || true)"
     [[ -z "$BUILD_URL" ]] && BUILD_URL="$URL"
     SAFE_BUILD_URL="$(html_escape "$BUILD_URL")"
 
     if [[ "$LATEST_DATE" < "$T30" ]]; then
       ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
-    elif [[ "$BUILD_RESULT" == "SUCCESS" ]]; then
+    elif [[ "$REPORT_STATUS" == "SUCCESS" ]]; then
       ICON="🟢"; GREEN_COUNT=$((GREEN_COUNT + 1))
-    elif [[ "$BUILD_RESULT" =~ ^(FAILURE|UNSTABLE)$ ]]; then
+    elif [[ "$REPORT_STATUS" =~ ^(FAILURE|UNSTABLE)$ ]]; then
       ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
     else
       ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
