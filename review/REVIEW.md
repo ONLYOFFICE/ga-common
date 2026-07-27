@@ -124,8 +124,8 @@ Assemble the response in this order. **Omission rule**: a category section with 
 Every bullet describes the entire PR, never the latest push or the delta since the previous review.
 - **What**: 1 sentence.
 - **Why**: 1 sentence on the purpose of the PR. If the PR description does not state it, infer the most likely purpose from the diff, commit messages, or Bugzilla data and prefix with `(inferred)`.
-- **Scope**: Comma-separated list of every file/component the PR touches — no prose, no "unchanged since last review" remarks.
-- **Details** (optional): 1 sentence — notable decisions or breaking changes only. Omit if nothing to add.
+- **Scope**: Up to 8 files/components — comma-separated list of paths, grouping same-directory files by shared prefix (e.g. `common/ASC.Data.Storage/{Constants,IQuotaController}.cs`). Beyond 8, collapse to top-level directory/component with a file count instead of every path (e.g. `common/ASC.Core.Common, ASC.Data.Storage, ASC.AuditTrail (7 files) · products/ASC.Files/Core (5 files)`). No prose, no "unchanged since last review" remarks.
+- **Details** (optional): At most 2 short sentences — notable decisions or breaking changes only. Each sentence is one distinct fact; never string multiple facts together with semicolons or commas into a run-on. Omit if nothing to add.
 
 ---
 
