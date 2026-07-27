@@ -360,7 +360,11 @@ render_claude_review() {
   local -A PR_FIXED_CRIT PR_FIXED_MED PR_FIXED_LOW PR_FIXED_LEG
   local -a PR_ORDER=()
 
-  local i LOG REPO PR KEY VERDICT COUNTS_LINE C M L G F
+  # Duration is tracked per-run (not deduped by PR like the state above) —
+  # every executed run consumed real CI time, including reruns on the same PR.
+  local TOTAL_RUN_SECONDS=0 TOTAL_RUN_TIMED=0
+
+  local i LOG REPO PR KEY VERDICT COUNTS_LINE C M L G F JOB_LINE
   for i in "${!PIDS[@]}"; do
     wait "${PIDS[$i]}" || true
     LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
@@ -381,6 +385,16 @@ render_claude_review() {
     # No "Verdict:" line at all means the review was legitimately skipped
     # (SHA already reviewed, base-branch sync merge, WIP title) — not an error.
     [[ -z "$VERDICT" ]] && continue
+
+    # Wall-clock duration of this run (from post_review_and_set_status's
+    # "Job: ... [Xm Ys]" line), regardless of verdict — every executed run
+    # counts toward the average, including errored ones.
+    JOB_LINE="$(grep -P '^Job: ' <<< "$LOG" | tail -1 || true)"
+    if [[ "$JOB_LINE" =~ \[([0-9]+)m\ ([0-9]+)s\] ]]; then
+      TOTAL_RUN_SECONDS=$((TOTAL_RUN_SECONDS + 10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
+      TOTAL_RUN_TIMED=$((TOTAL_RUN_TIMED + 1))
+    fi
+
     if [[ "$VERDICT" == "none" ]]; then
       PR_ERRORS[$KEY]=$((${PR_ERRORS[$KEY]} + 1))
       [[ -z "${PR_ERR_LINK[$KEY]:-}" ]] && PR_ERR_LINK[$KEY]="$RUN_URL"
@@ -438,7 +452,9 @@ render_claude_review() {
     local BAR="" BI
     for ((BI = 0; BI < FILLED; BI++)); do BAR+="█"; done
     for ((BI = 0; BI < EMPT; BI++)); do BAR+="░"; done
-    STATS+="${R_COUNT} PRs · ${RUN_COUNT} runs\n"
+    local AVG_PART=""
+    (( TOTAL_RUN_TIMED > 0 )) && AVG_PART=" · $((TOTAL_RUN_SECONDS / TOTAL_RUN_TIMED))s"
+    STATS+="${R_COUNT} PRs · ${RUN_COUNT} runs${AVG_PART}\n"
     local APAD; APAD="$(printf '%-2s' "$R_APPROVE")"
     STATS+="${BAR} ${APAD} ✔️ · ${R_BLOCKED}  ✖️\n"
     STATS+="Bugs\n"
