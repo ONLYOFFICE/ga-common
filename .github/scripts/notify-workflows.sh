@@ -389,8 +389,8 @@ render_claude_review() {
     # Wall-clock duration of this run (from post_review_and_set_status's
     # "Job: ... [Xm Ys]" line), regardless of verdict — every executed run
     # counts toward the average, including errored ones.
-    JOB_LINE="$(grep -P '^Job: ' <<< "$LOG" | tail -1 || true)"
-    if [[ "$JOB_LINE" =~ \[([0-9]+)m\ ([0-9]+)s\] ]]; then
+    JOB_LINE="$(grep -P 'Job: ' <<< "$LOG" | tail -1 || true)"
+    if [[ "$JOB_LINE" =~ \[([0-9]+)m[[:space:]]([0-9]+)s\] ]]; then
       TOTAL_RUN_SECONDS=$((TOTAL_RUN_SECONDS + 10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
       TOTAL_RUN_TIMED=$((TOTAL_RUN_TIMED + 1))
     fi
