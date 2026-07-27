@@ -170,8 +170,12 @@ jobs:
             rc=0
             # Per-attempt timeout keeps a hung CLI from eating the whole job
             # budget; --max-turns is a runaway guard sized far above normal runs.
+            # git log/diff/show/blame are read-only — lets the model inspect
+            # per-commit history (e.g. a later commit reverting an earlier
+            # fix) and code age/authorship without opening up general
+            # command execution.
             timeout -k 30 600 claude -p \
-              --allowedTools "Read,Glob,Grep" --model "$CLAUDE_MODEL" \
+              --allowedTools "Read,Glob,Grep,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*)" --model "$CLAUDE_MODEL" \
               --effort "$CLAUDE_EFFORT" --max-turns 100 \
               --output-format json < claude-prompt.txt > ../claude-output.json || rc=$?
             if [ "$rc" -eq 0 ] && jq -e '.is_error == false and ((.result // "") | length > 0)' ../claude-output.json > /dev/null 2>&1; then
