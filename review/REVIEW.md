@@ -59,7 +59,7 @@ When reporting: cite the new-file line number, read from each hunk header `@@ -a
 
 **Incremental review** (only when a `<previous_review>` block is appended): **start here before anything else** — go through every open finding in `<previous_review>` and re-check it against the current diff. If the issue is gone, replace its block with ⚪️ Fixed (same category, same original severity). If still present, keep it open. **Carry over every ⚪️ Fixed entry already present in `<previous_review>` verbatim — same category, same title, same body. This is mandatory: never omit, merge, shorten, or drop a Fixed entry, so the fixed history only grows across pushes and never shrinks.** The one exception: if a carried-over issue has reappeared in the current diff, drop its ⚪️ Fixed entry and report it as an open issue again. Only after processing all prior findings scan the diff for new issues. Never create a brand-new ⚪️ Fixed entry for something that was neither an open finding nor a ⚪️ Fixed entry in `<previous_review>`.
 
-PR Summary and Positive Observations always cover the **entire PR as it stands now** — the full `pr.diff`, never the delta since `<previous_review>`. Regenerate both every run: don't frame the summary around "this push", and don't drop a still-valid positive observation just because that code was covered in an earlier review.
+PR Summary always covers the **entire PR as it stands now** — the full `pr.diff`, never the delta since `<previous_review>`. Regenerate it every run: don't frame the summary around "this push".
 
 #### 2.1 Security review
 Check every class below against the diff — judge which are plausibly reachable, but don't skip one that is:
@@ -110,12 +110,12 @@ In the top-level summary line below, replace `VERDICT` (keeping the surrounding 
 
   </details>
 
-Assemble the response in this order. **Omission rule**: a category section with no open issues and no fixed entries — and Positive Observations when empty — is dropped entirely: header, contents, and trailing `---`; never output a placeholder like "No issues found" or "no gaps identified". Include 🐞 Bugzilla only when `<bugzilla_context>` is not the "No bug reference found" placeholder. **Never group issues by severity or by status** — do not use headers like "Medium Issues", "Low Issues", or "Fixed"; issues (open **and** ⚪️ Fixed) are grouped only by the category sections defined below (Security, Code Quality, Performance, Dependencies, Style, Documentation), and only those sections may appear.
+Assemble the response in this order. **Omission rule**: a category section with no open issues and no fixed entries is dropped entirely: header, contents, and trailing `---`; never output a placeholder like "No issues found" or "no gaps identified". Include 🐞 Bugzilla only when `<bugzilla_context>` is not the "No bug reference found" placeholder. **Never group issues by severity or by status** — do not use headers like "Medium Issues", "Low Issues", or "Fixed"; issues (open **and** ⚪️ Fixed) are grouped only by the category sections defined below (Security, Code Quality, Performance, Dependencies, Style, Documentation), and only those sections may appear.
 
 <details>
 <summary>[VERDICT] - Claude Code Review</summary>
 
-  > 🔴 **X** Critical · 🟡 **X** Medium · 🔵 **X** Low · 🟣 **X** Legacy · ✅ **X** Positive · ⚪️ **X** Fixed
+  > 🔴 **X** Critical · 🟡 **X** Medium · 🔵 **X** Low · 🟣 **X** Legacy · ⚪️ **X** Fixed
 
 ---
 
@@ -171,11 +171,6 @@ This section is informational: not counted, never changes the verdict.
 
 ---
 
-### ✅ Positive Observations
-- One sentence per bullet — what is good and why it matters. No bold labels. At most 4 bullets — only genuinely notable strengths, never filler.
-
----
-
 ### 📝 Documentation
 (issue/fixed blocks — if none, omit the whole section)
 
@@ -184,6 +179,6 @@ This section is informational: not counted, never changes the verdict.
 </details>
 
 ### 5. Counting & Severity Rules
-- Replace every `X` in the counter line with the actual count. Critical/Medium/Low/Legacy counts include all currently open issues **regardless of confidence**. Positive = bullets in Positive Observations. Fixed = ⚪️ entries across all categories. Fixed entries and the 🐞 Bugzilla section never affect the verdict.
+- Replace every `X` in the counter line with the actual count. Critical/Medium/Low/Legacy counts include all currently open issues **regardless of confidence**. Fixed = ⚪️ entries across all categories. Fixed entries and the 🐞 Bugzilla section never affect the verdict.
 - 🔴 **Critical**: security breach, data loss, broken core functionality, release-blocking regression. 🟡 **Medium**: incorrect behavior, meaningful operational risk, realistic production failure. 🔵 **Low**: minor issue, local maintainability, style, nice-to-fix. 🟣 **Legacy**: pre-existing bug relevant because the PR touches the surrounding code.
 - Unpinned/unversioned dependencies are 🔵 Low at most, unless the diff adds a direct security or reproducibility risk. Non-English/transliterated comments are 🟡 Medium. Documentation gaps are always 🔵 Low.

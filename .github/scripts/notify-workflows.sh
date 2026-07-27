@@ -360,7 +360,7 @@ render_claude_review() {
   local -A PR_FIXED_CRIT PR_FIXED_MED PR_FIXED_LOW PR_FIXED_LEG
   local -a PR_ORDER=()
 
-  local i LOG REPO PR KEY VERDICT COUNTS_LINE C M L G P F
+  local i LOG REPO PR KEY VERDICT COUNTS_LINE C M L G F
   for i in "${!PIDS[@]}"; do
     wait "${PIDS[$i]}" || true
     LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
@@ -391,9 +391,9 @@ render_claude_review() {
     # every previously-Fixed entry in each new review, so summing Fixed across a
     # PR's runs would count the same fix multiple times.
     [[ -n "${PR_VERDICT[$KEY]:-}" ]] && continue
-    C=0 M=0 L=0 G=0 P=0 F=0
+    C=0 M=0 L=0 G=0 F=0
     COUNTS_LINE="$(grep -P 'Critical.*Fixed' <<< "$LOG" | head -1 || true)"
-    [[ -n "$COUNTS_LINE" ]] && read -r C M L G P F <<< "$(grep -oP '(?<=\*\*)\d+(?=\*\*)' <<< "$COUNTS_LINE" | tr '\n' ' ')"
+    [[ -n "$COUNTS_LINE" ]] && read -r C M L G F <<< "$(grep -oP '(?<=\*\*)\d+(?=\*\*)' <<< "$COUNTS_LINE" | tr '\n' ' ')"
     PR_VERDICT[$KEY]="$VERDICT"
     PR_CRIT[$KEY]="$C"; PR_MED[$KEY]="$M"; PR_LOW[$KEY]="$L"; PR_LEG[$KEY]="$G"
     PR_FIXED[$KEY]="$F"
