@@ -29,7 +29,7 @@ on:
         required: true
         type: string
       model:
-        description: 'Claude model'
+        description: 'Claude model (large diffs auto-escalate to claude-opus-5)'
         required: false
         type: string
         default: claude-sonnet-5
@@ -42,7 +42,7 @@ on:
         description: 'Reasoning effort level'
         required: false
         type: choice
-        default: 'medium'
+        default: 'high'
         options:
           - low
           - medium
@@ -153,7 +153,10 @@ jobs:
         working-directory: repo
         env:
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
-          CLAUDE_MODEL: ${{ inputs.model }}
+          # Escalate to claude-opus-5 for sizable diffs (see review-steps.sh's
+          # escalate_model output), but only when the caller left `model` at
+          # its default — an explicit model choice always wins.
+          CLAUDE_MODEL: ${{ (steps.prepare.outputs.escalate_model == 'true' && inputs.model == 'claude-sonnet-5') && 'claude-opus-5' || inputs.model }}
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
           CLAUDE_EFFORT: ${{ inputs.effort }}
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
