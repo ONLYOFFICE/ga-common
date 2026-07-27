@@ -101,7 +101,7 @@ In the top-level summary line below, replace `VERDICT` (keeping the surrounding 
 
   </details>
 
-**Fixed block** (incremental reviews only). A ⚪️ Fixed block goes **inside the same category section as the original issue** (Security, Code Quality, Performance, Dependencies, or Style) — never in a section of its own. Do **not** add a top-level `⚪️ Fixed` section or any header not listed in the Output Format below; fixed entries are grouped by their original category exactly like open issues.
+**Fixed block** (incremental reviews only). A ⚪️ Fixed block goes **inside the same category section as the original issue** (Security, Code Quality, Performance, Dependencies, Style, or Documentation) — never in a section of its own. Do **not** add a top-level `⚪️ Fixed` section or any header not listed in the Output Format below; fixed entries are grouped by their original category exactly like open issues.
 
   <details><summary>⚪️ Fixed [🔴/🟡/🔵/🟣]: Issue title</summary>
 
@@ -110,7 +110,7 @@ In the top-level summary line below, replace `VERDICT` (keeping the surrounding 
 
   </details>
 
-Assemble the response in this order. **Omission rule**: a category section with no open issues and no fixed entries — and Positive Observations / Documentation when empty — is dropped entirely: header, contents, and trailing `---`; never output a placeholder like "No issues found" or "no gaps identified". Include 🐞 Bugzilla only when `<bugzilla_context>` is not the "No bug reference found" placeholder. **Never group issues by severity or by status** — do not use headers like "Medium Issues", "Low Issues", or "Fixed"; issues (open **and** ⚪️ Fixed) are grouped only by the category sections defined below (Security, Code Quality, Performance, Dependencies, Style), and only those sections may appear.
+Assemble the response in this order. **Omission rule**: a category section with no open issues and no fixed entries — and Positive Observations when empty — is dropped entirely: header, contents, and trailing `---`; never output a placeholder like "No issues found" or "no gaps identified". Include 🐞 Bugzilla only when `<bugzilla_context>` is not the "No bug reference found" placeholder. **Never group issues by severity or by status** — do not use headers like "Medium Issues", "Low Issues", or "Fixed"; issues (open **and** ⚪️ Fixed) are grouped only by the category sections defined below (Security, Code Quality, Performance, Dependencies, Style, Documentation), and only those sections may appear.
 
 <details>
 <summary>[VERDICT] - Claude Code Review</summary>
@@ -176,8 +176,8 @@ This section is informational: not counted, never changes the verdict.
 
 ---
 
-### 📝 Documentation Updates Required
-- **README.md** / **CLAUDE.md**: What to document and why.
+### 📝 Documentation
+(issue/fixed blocks — if none, omit the whole section)
 
 ---
 
@@ -186,4 +186,4 @@ This section is informational: not counted, never changes the verdict.
 ### 5. Counting & Severity Rules
 - Replace every `X` in the counter line with the actual count. Critical/Medium/Low/Legacy counts include all currently open issues **regardless of confidence**. Positive = bullets in Positive Observations. Fixed = ⚪️ entries across all categories. Fixed entries and the 🐞 Bugzilla section never affect the verdict.
 - 🔴 **Critical**: security breach, data loss, broken core functionality, release-blocking regression. 🟡 **Medium**: incorrect behavior, meaningful operational risk, realistic production failure. 🔵 **Low**: minor issue, local maintainability, style, nice-to-fix. 🟣 **Legacy**: pre-existing bug relevant because the PR touches the surrounding code.
-- Unpinned/unversioned dependencies are 🔵 Low at most, unless the diff adds a direct security or reproducibility risk. PR title/commit violations are 🔵 Low. Non-English/transliterated comments are 🟡 Medium.
+- Unpinned/unversioned dependencies are 🔵 Low at most, unless the diff adds a direct security or reproducibility risk. Non-English/transliterated comments are 🟡 Medium. Documentation gaps are always 🔵 Low.
