@@ -110,7 +110,11 @@ jobs:
         run: |
           git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
           git clone "https://$GITEA_HOST/$ORG_NAME/ga-common" --depth=1 --branch "$REF_NAME" .
-          git clone "https://$GITEA_HOST/$ORG_NAME/$REPO_NAME" --depth=1 --branch "$PR_BRANCH" repo
+          # Full clone (no --depth) — the review prompt's git log/diff/show/blame
+          # access needs the complete history, and a non-shallow clone with
+          # --branch still fetches every remote branch ref (origin/$BASE_BRANCH
+          # included), so no separate unshallow/fetch step is needed later.
+          git clone "https://$GITEA_HOST/$ORG_NAME/$REPO_NAME" --branch "$PR_BRANCH" repo
           HEAD_SHA=$(git -C repo rev-parse HEAD)
           [ "$HEAD_SHA" = "$PR_SHA" ] || \
             echo "::warning::Branch tip $HEAD_SHA differs from dispatched SHA $PR_SHA (new push in flight) — benign: the superseding run will cancel this one"

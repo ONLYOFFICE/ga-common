@@ -93,10 +93,6 @@ prepare_review_context() {
     fi
   fi
 
-  # --- git history (needed for base-branch context) ---
-  git -C repo fetch --unshallow 2>/dev/null || true
-  git -C repo fetch origin "$BASE_BRANCH" --depth=1 2>/dev/null || true
-
   # --- sync-merge guard ---
   # Skip review when HEAD is a merge commit that only brings in the base branch
   # (e.g. "Merge branch 'develop' into feature/…") with no new feature commits.
