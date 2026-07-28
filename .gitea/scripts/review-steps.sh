@@ -51,16 +51,6 @@ prepare_review_context() {
   DIFF_FILES=$(grep -c '^diff --git' repo/pr.diff || true)
   echo "PR diff: ${DIFF_FILES} files / ${DIFF_LINES} lines / ${DIFF_BYTES} bytes"
 
-  # Lower bar than the summary-mode switch below — the workflow uses this to
-  # escalate the review model (see claude-review.yml's "Run review" step) as
-  # soon as the diff is "sizable", independent of when the prompt itself
-  # switches to summary/impact mode.
-  local ESCALATE_MODEL=false
-  if [ "$DIFF_LINES" -gt 2000 ] || [ "$DIFF_BYTES" -gt 300000 ]; then
-    ESCALATE_MODEL=true
-  fi
-  echo "escalate_model=$ESCALATE_MODEL" >> "${GITHUB_OUTPUT:-/dev/null}"
-
   if [ "$DIFF_LINES" -gt 6000 ] || [ "$DIFF_BYTES" -gt 1000000 ]; then
     echo "::warning::Large diff — switching to summary/impact review"
     printf '# Changed files (%s lines total) — diff too large for line-level review\n\n' "$DIFF_LINES" > repo/pr-files.md
