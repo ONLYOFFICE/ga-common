@@ -356,7 +356,7 @@ render_claude_review() {
   # (verdict, severity counts, Fixed counts). Older runs for the same PR only
   # contribute to that PR's error count/link, since a run's Fixed count is
   # already a running total for the PR's whole lifetime, not one run.
-  local -A PR_SEEN PR_VERDICT PR_CRIT PR_MED PR_LOW PR_LEG PR_FIXED PR_ERRORS PR_ERR_LINK PR_LINK
+  local -A PR_SEEN PR_VERDICT PR_CRIT PR_MED PR_LOW PR_LEG PR_FIXED PR_ERRORS PR_ERR_LINK
   local -A PR_FIXED_CRIT PR_FIXED_MED PR_FIXED_LOW PR_FIXED_LEG
   local -a PR_ORDER=()
 
@@ -378,7 +378,6 @@ render_claude_review() {
       PR_SEEN[$KEY]=1; PR_ORDER+=("$KEY")
       PR_FIXED[$KEY]=0; PR_ERRORS[$KEY]=0
       PR_FIXED_CRIT[$KEY]=0; PR_FIXED_MED[$KEY]=0; PR_FIXED_LOW[$KEY]=0; PR_FIXED_LEG[$KEY]=0
-      PR_LINK[$KEY]="https://$GITEA_HOST/${GITHUB_ORG}/${REPO}/pulls/${PR}"
     fi
 
     VERDICT="$(grep -oP 'Verdict: \K\S+' <<< "$LOG" | head -1 || true)"
@@ -496,22 +495,63 @@ render_claude_review() {
   fi
 
   if (( R_COUNT > 0 )); then
-    local -a SKEYS=()
-    while IFS= read -r KEY; do
-      [[ -n "$KEY" ]] && SKEYS+=("$KEY")
-    done < <(printf '%s\n' "${PR_ORDER[@]}" | sort -f)
-
-    local -a APL=()
-    local ICN
-    for KEY in "${SKEYS[@]}"; do
+    # Per-repo rollup instead of a flat PR list: strip "#PR" off each key
+    # (REPO#PR) to get the repo, tally approve/blocked and bug severity/fixed
+    # counts per repo (same fields as the global STATS bars above, just scoped).
+    local -A REPO_TOTAL REPO_APPROVE REPO_BLOCKED
+    local -A REPO_CRIT REPO_MED REPO_LOW REPO_LEG
+    local -A REPO_FCRIT REPO_FMED REPO_FLOW REPO_FLEG
+    local -a REPO_ORDER=()
+    local REPO
+    for KEY in "${PR_ORDER[@]}"; do
       V="${PR_VERDICT[$KEY]:-}"
       [[ -z "$V" ]] && continue
-      ICN="✅"; [[ "$V" == "BLOCKED" ]] && ICN="❌"
-      APL+=("${ICN} <a href=\"${PR_LINK[$KEY]:-}\">${KEY}</a>")
+      REPO="${KEY%%#*}"
+      [[ -z "${REPO_TOTAL[$REPO]:-}" ]] && REPO_ORDER+=("$REPO")
+      REPO_TOTAL[$REPO]=$(( ${REPO_TOTAL[$REPO]:-0} + 1 ))
+      [[ "$V" == "APPROVE" ]] && REPO_APPROVE[$REPO]=$(( ${REPO_APPROVE[$REPO]:-0} + 1 ))
+      [[ "$V" == "BLOCKED" ]] && REPO_BLOCKED[$REPO]=$(( ${REPO_BLOCKED[$REPO]:-0} + 1 ))
+      REPO_CRIT[$REPO]=$(( ${REPO_CRIT[$REPO]:-0} + ${PR_CRIT[$KEY]:-0} ))
+      REPO_MED[$REPO]=$(( ${REPO_MED[$REPO]:-0} + ${PR_MED[$KEY]:-0} ))
+      REPO_LOW[$REPO]=$(( ${REPO_LOW[$REPO]:-0} + ${PR_LOW[$KEY]:-0} ))
+      REPO_LEG[$REPO]=$(( ${REPO_LEG[$REPO]:-0} + ${PR_LEG[$KEY]:-0} ))
+      REPO_FCRIT[$REPO]=$(( ${REPO_FCRIT[$REPO]:-0} + ${PR_FIXED_CRIT[$KEY]:-0} ))
+      REPO_FMED[$REPO]=$(( ${REPO_FMED[$REPO]:-0} + ${PR_FIXED_MED[$KEY]:-0} ))
+      REPO_FLOW[$REPO]=$(( ${REPO_FLOW[$REPO]:-0} + ${PR_FIXED_LOW[$KEY]:-0} ))
+      REPO_FLEG[$REPO]=$(( ${REPO_FLEG[$REPO]:-0} + ${PR_FIXED_LEG[$KEY]:-0} ))
     done
+
+    local -a SREPOS=()
+    while IFS= read -r REPO; do
+      [[ -n "$REPO" ]] && SREPOS+=("$REPO")
+    done < <(printf '%s\n' "${REPO_ORDER[@]}" | sort -f)
+
+    # Compact one-severity-per-token bug summary; omits severities with
+    # nothing open and nothing fixed for that repo (mirrors r_sev_bar above).
+    repo_bug_summary() {
+      local EMOJI="$1" OPEN="$2" FIXEDN="$3" TOTAL
+      TOTAL=$((OPEN + FIXEDN))
+      (( TOTAL == 0 )) && return
+      printf '%s %s￫%s' "$EMOJI" "$TOTAL" "$FIXEDN"
+    }
+
     BLOCK+="<blockquote expandable>\n\n\n"
-    for ENTRY in "${APL[@]}"; do
-      BLOCK+="${ENTRY}\n"
+    for REPO in "${SREPOS[@]}"; do
+      BLOCK+="<b>${REPO}</b>: ${REPO_TOTAL[$REPO]} PRs · ${REPO_APPROVE[$REPO]:-0} ✅ · ${REPO_BLOCKED[$REPO]:-0} ❌\n"
+      local -a BUG_PARTS=()
+      local PART
+      PART="$(repo_bug_summary "🔴" "${REPO_CRIT[$REPO]:-0}" "${REPO_FCRIT[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
+      PART="$(repo_bug_summary "🟡" "${REPO_MED[$REPO]:-0}" "${REPO_FMED[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
+      PART="$(repo_bug_summary "🔵" "${REPO_LOW[$REPO]:-0}" "${REPO_FLOW[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
+      PART="$(repo_bug_summary "🟣" "${REPO_LEG[$REPO]:-0}" "${REPO_FLEG[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
+      if (( ${#BUG_PARTS[@]} > 0 )); then
+        local JOINED="" P
+        for P in "${BUG_PARTS[@]}"; do
+          [[ -n "$JOINED" ]] && JOINED+=" · "
+          JOINED+="$P"
+        done
+        BLOCK+="${JOINED}\n"
+      fi
     done
     BLOCK+="</blockquote>"
   fi
