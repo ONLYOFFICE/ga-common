@@ -138,6 +138,12 @@ prepare_review_context() {
     | python3 .gitea/scripts/bugzilla-api.py --from-text || true)
   grep -q '^<bug ' <<< "$BUGZILLA_CONTEXT" && echo "Bugzilla: referenced bug(s) attached" || true
 
+  # --- prior discussion & review comments (human context, this pipeline's own comments excluded) ---
+  local REVIEW_DISCUSSION
+  REVIEW_DISCUSSION=$(python3 .gitea/scripts/review-discussion.py 2>/dev/null | cut -c1-8000)
+  [ -n "$REVIEW_DISCUSSION" ] || REVIEW_DISCUSSION="No prior discussion or review comments found."
+  grep -q '^## ' <<< "$REVIEW_DISCUSSION" && echo "Review discussion: prior comments/review threads attached" || true
+
   # --- render prompt ---
   # Branch names come straight from the webhook and may legally contain
   # backticks, $, < and >. Sanitize the copies substituted into the prompt
@@ -146,9 +152,9 @@ prepare_review_context() {
   PR_BRANCH_SAFE=$(printf '%s' "$PR_BRANCH" | tr '`$' '  ' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-200)
   BASE_BRANCH_SAFE=$(printf '%s' "$BASE_BRANCH" | tr '`$' '  ' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-200)
   local FILE_LINK_BASE="https://$GITEA_HOST/$ORG_NAME/$REPO_NAME/src/commit/$PR_SHA"
-  export PR_TITLE PR_AUTHOR PR_BODY PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES PREVIOUS_SHA="${PREVIOUS_SHA:-unknown}" BUGZILLA_CONTEXT FILE_LINK_BASE
+  export PR_TITLE PR_AUTHOR PR_BODY PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES PREVIOUS_SHA="${PREVIOUS_SHA:-unknown}" BUGZILLA_CONTEXT REVIEW_DISCUSSION FILE_LINK_BASE
   PR_BRANCH="$PR_BRANCH_SAFE" BASE_BRANCH="$BASE_BRANCH_SAFE" \
-    envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_BODY $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $PREVIOUS_SHA $BUGZILLA_CONTEXT $FILE_LINK_BASE' \
+    envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_BODY $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $PREVIOUS_SHA $BUGZILLA_CONTEXT $REVIEW_DISCUSSION $FILE_LINK_BASE' \
     < review/REVIEW.md > repo/claude-prompt.txt
   echo "Prompt (pre-diff): $(wc -l < repo/claude-prompt.txt) lines / $(wc -c < repo/claude-prompt.txt) bytes"
 
