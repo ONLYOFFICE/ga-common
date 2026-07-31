@@ -544,8 +544,7 @@ render_claude_review() {
 
     BLOCK+="<blockquote expandable>\n\n\n"
     for REPO in "${SREPOS[@]}"; do
-      BLOCK+="<b>${REPO}</b>\n"
-      BLOCK+="<code>${REPO_TOTAL[$REPO]}</code> PRs · <code>${REPO_APPROVE[$REPO]:-0}/${REPO_BLOCKED[$REPO]:-0}</code>"
+      BLOCK+="<b><a href=\"https://${GITEA_HOST}/${GITHUB_ORG}/${REPO}\">${REPO}</a></b> · <code>${REPO_TOTAL[$REPO]}</code> PRs · <code>${REPO_APPROVE[$REPO]:-0}/${REPO_BLOCKED[$REPO]:-0}</code>\n"
       local -a BUG_PARTS=()
       local PART
       PART="$(repo_bug_summary "🔴" "${REPO_CRIT[$REPO]:-0}" "${REPO_FCRIT[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
@@ -555,12 +554,12 @@ render_claude_review() {
       if (( ${#BUG_PARTS[@]} > 0 )); then
         local JOINED="" P
         for P in "${BUG_PARTS[@]}"; do
-          [[ -n "$JOINED" ]] && JOINED+=" "
+          [[ -n "$JOINED" ]] && JOINED+=" · "
           JOINED+="$P"
         done
-        BLOCK+=" · ${JOINED}"
+        BLOCK+="${JOINED}\n"
       fi
-      BLOCK+="\n\n"
+      BLOCK+="\n"
     done
     BLOCK+="</blockquote>"
   fi
