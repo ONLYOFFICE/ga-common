@@ -521,23 +521,31 @@ render_claude_review() {
       REPO_FLEG[$REPO]=$(( ${REPO_FLEG[$REPO]:-0} + ${PR_FIXED_LEG[$KEY]:-0} ))
     done
 
+    # Busiest repos (by PR count) first, alphabetical among ties — surfaces the
+    # repos with the most review activity without needing to expand and scan.
     local -a SREPOS=()
     while IFS= read -r REPO; do
       [[ -n "$REPO" ]] && SREPOS+=("$REPO")
-    done < <(printf '%s\n' "${REPO_ORDER[@]}" | sort -f)
+    done < <(
+      for REPO in "${REPO_ORDER[@]}"; do
+        printf '%d\t%s\n' "${REPO_TOTAL[$REPO]}" "$REPO"
+      done | sort -t $'\t' -k1,1nr -k2,2f | cut -f2-
+    )
 
-    # Compact one-severity-per-token bug summary; omits severities with
-    # nothing open and nothing fixed for that repo (mirrors r_sev_bar above).
+    # Compact one-severity-per-token bug summary ("found/fixed" in a monospace
+    # pill); omits severities with nothing open and nothing fixed for that repo
+    # (mirrors r_sev_bar above).
     repo_bug_summary() {
       local EMOJI="$1" OPEN="$2" FIXEDN="$3" TOTAL
       TOTAL=$((OPEN + FIXEDN))
       (( TOTAL == 0 )) && return
-      printf '%s %s￫%s' "$EMOJI" "$TOTAL" "$FIXEDN"
+      printf '%s<code>%s/%s</code>' "$EMOJI" "$TOTAL" "$FIXEDN"
     }
 
     BLOCK+="<blockquote expandable>\n\n\n"
     for REPO in "${SREPOS[@]}"; do
-      BLOCK+="<b>${REPO}</b>: ${REPO_TOTAL[$REPO]} PRs · ${REPO_APPROVE[$REPO]:-0} ✅ · ${REPO_BLOCKED[$REPO]:-0} ❌\n"
+      BLOCK+="<b>${REPO}</b>\n"
+      BLOCK+="<code>${REPO_TOTAL[$REPO]}</code> PRs · <code>${REPO_APPROVE[$REPO]:-0}/${REPO_BLOCKED[$REPO]:-0}</code>"
       local -a BUG_PARTS=()
       local PART
       PART="$(repo_bug_summary "🔴" "${REPO_CRIT[$REPO]:-0}" "${REPO_FCRIT[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
@@ -547,11 +555,12 @@ render_claude_review() {
       if (( ${#BUG_PARTS[@]} > 0 )); then
         local JOINED="" P
         for P in "${BUG_PARTS[@]}"; do
-          [[ -n "$JOINED" ]] && JOINED+=" · "
+          [[ -n "$JOINED" ]] && JOINED+=" "
           JOINED+="$P"
         done
-        BLOCK+="${JOINED}\n"
+        BLOCK+=" · ${JOINED}"
       fi
+      BLOCK+="\n\n"
     done
     BLOCK+="</blockquote>"
   fi
