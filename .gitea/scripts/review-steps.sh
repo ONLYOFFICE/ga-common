@@ -95,16 +95,23 @@ prepare_review_context() {
 
   # --- sync-merge guard ---
   # Skip review when HEAD is a merge commit that only brings in the base branch
-  # (e.g. "Merge branch 'develop' into feature/…") with no new feature commits.
+  # (e.g. "Merge branch 'develop' into feature/…") with no new feature commits —
+  # but only if there is a previously reviewed SHA to carry the status over from.
+  # Without one there is nothing to fall back on, so a PR whose very first push
+  # is such a merge must still get a real review rather than being skipped outright.
   if git -C repo rev-parse --verify "HEAD^2" &>/dev/null; then
     local MERGE_P2 BASE_TIP
     MERGE_P2=$(git -C repo rev-parse HEAD^2 2>/dev/null || true)
     BASE_TIP=$(git -C repo rev-parse "origin/$BASE_BRANCH" 2>/dev/null || true)
     if [ -n "$MERGE_P2" ] && [ "$MERGE_P2" = "$BASE_TIP" ]; then
-      echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) — skipping review"
-      carry_over_statuses "$REPO_PATH" "$PREVIOUS_SHA" "$PR_SHA"
-      echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
-      return 0
+      if [ -n "$PREVIOUS_SHA" ]; then
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) — skipping review"
+        carry_over_statuses "$REPO_PATH" "$PREVIOUS_SHA" "$PR_SHA"
+        echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+        return 0
+      else
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but no previous reviewed SHA — running review anyway"
+      fi
     fi
   fi
 
