@@ -18,7 +18,7 @@ jobs:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN_PAT }}
       # Manual run -> use the input flag; scheduled run -> actually delete
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
-      MAX_AGE_DAYS: '365'
+      MAX_AGE_DAYS: '700'
       REPOS: |
         onlyoffice/4testing-documentserver
         onlyoffice/4testing-documentserver-ee
