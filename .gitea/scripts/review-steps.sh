@@ -99,18 +99,49 @@ prepare_review_context() {
   # but only if there is a previously reviewed SHA to carry the status over from.
   # Without one there is nothing to fall back on, so a PR whose very first push
   # is such a merge must still get a real review rather than being skipped outright.
+  #
+  # "HEAD^2 == base tip" alone is NOT enough — skipping on it alone leaves real
+  # changes unreviewed behind a carried-over status. Two more conditions must
+  # hold: no new feature commits since the last review (a push can carry both
+  # new commits and a sync merge on top of them), and the merge must not carry
+  # its own conflict resolution.
   if git -C repo rev-parse --verify "HEAD^2" &>/dev/null; then
     local MERGE_P2 BASE_TIP
     MERGE_P2=$(git -C repo rev-parse HEAD^2 2>/dev/null || true)
     BASE_TIP=$(git -C repo rev-parse "origin/$BASE_BRANCH" 2>/dev/null || true)
     if [ -n "$MERGE_P2" ] && [ "$MERGE_P2" = "$BASE_TIP" ]; then
-      if [ -n "$PREVIOUS_SHA" ]; then
-        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) — skipping review"
+      # Commits reachable from the feature-side parent that the last review did
+      # not see: --no-merges drops earlier sync merges, --not <base tip> drops
+      # everything the merges brought in from the base branch. A rev-list
+      # failure (e.g. the reviewed SHA was force-pushed away) must fail open, so
+      # errors surface as new work rather than as an empty "nothing new" result.
+      local NEW_COMMITS="" PREV_AVAILABLE=false
+      if [ -n "$PREVIOUS_SHA" ] && git -C repo rev-parse --verify --quiet "${PREVIOUS_SHA}^{commit}" > /dev/null; then
+        PREV_AVAILABLE=true
+        NEW_COMMITS=$(git -C repo rev-list --no-merges "HEAD^1" --not "$PREVIOUS_SHA" "$BASE_TIP" 2>/dev/null) \
+          || NEW_COMMITS="rev-list-failed"
+      fi
+      # A merge that resolved conflicts carries content present in neither
+      # parent (an "evil merge"): hand-written code that no review has ever
+      # seen. The combined diff (--cc) lists exactly those files, so a non-empty
+      # list means the merge commit itself needs a review.
+      local MERGE_OWN_FILES
+      MERGE_OWN_FILES=$(git -C repo show --cc --format= --name-only HEAD 2>/dev/null | grep -c . || true)
+      if [ -z "$PREVIOUS_SHA" ]; then
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but no previous reviewed SHA — running review anyway"
+      elif [ "$PREV_AVAILABLE" != true ]; then
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but the reviewed commit ${PREVIOUS_SHA:0:10} is not in this clone (force-push?) — running review anyway"
+      elif [ "$NEW_COMMITS" = "rev-list-failed" ]; then
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but the commits since ${PREVIOUS_SHA:0:10} could not be enumerated — running review anyway"
+      elif [ -n "$NEW_COMMITS" ]; then
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but $(grep -c . <<< "$NEW_COMMITS") new commit(s) landed on $PR_BRANCH since ${PREVIOUS_SHA:0:10} — running review"
+      elif [ "${MERGE_OWN_FILES:-0}" -gt 0 ]; then
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but it resolves conflicts in $MERGE_OWN_FILES file(s) — running review"
+      else
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) with no new commits since ${PREVIOUS_SHA:0:10} — skipping review"
         carry_over_statuses "$REPO_PATH" "$PREVIOUS_SHA" "$PR_SHA"
         echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
         return 0
-      else
-        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but no previous reviewed SHA — running review anyway"
       fi
     fi
   fi
