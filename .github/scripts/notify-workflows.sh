@@ -496,9 +496,11 @@ render_claude_review() {
 
   if (( R_COUNT > 0 )); then
     # Per-repo rollup instead of a flat PR list: strip "#PR" off each key
-    # (REPO#PR) to get the repo, tally approve/blocked and bug severity/fixed
-    # counts per repo (same fields as the global STATS bars above, just scoped).
-    local -A REPO_TOTAL REPO_APPROVE REPO_BLOCKED
+    # (REPO#PR) to get the repo, tally the PR count and bug severity/fixed counts
+    # per repo (same fields as the global STATS bars above, just scoped).
+    # Approve/blocked is deliberately not repeated here — the global bar already
+    # carries it, and per repo it only crowded the line.
+    local -A REPO_TOTAL
     local -A REPO_CRIT REPO_MED REPO_LOW REPO_LEG
     local -A REPO_FCRIT REPO_FMED REPO_FLOW REPO_FLEG
     local -a REPO_ORDER=()
@@ -509,8 +511,6 @@ render_claude_review() {
       REPO="${KEY%%#*}"
       [[ -z "${REPO_TOTAL[$REPO]:-}" ]] && REPO_ORDER+=("$REPO")
       REPO_TOTAL[$REPO]=$(( ${REPO_TOTAL[$REPO]:-0} + 1 ))
-      [[ "$V" == "APPROVE" ]] && REPO_APPROVE[$REPO]=$(( ${REPO_APPROVE[$REPO]:-0} + 1 ))
-      [[ "$V" == "BLOCKED" ]] && REPO_BLOCKED[$REPO]=$(( ${REPO_BLOCKED[$REPO]:-0} + 1 ))
       REPO_CRIT[$REPO]=$(( ${REPO_CRIT[$REPO]:-0} + ${PR_CRIT[$KEY]:-0} ))
       REPO_MED[$REPO]=$(( ${REPO_MED[$REPO]:-0} + ${PR_MED[$KEY]:-0} ))
       REPO_LOW[$REPO]=$(( ${REPO_LOW[$REPO]:-0} + ${PR_LOW[$KEY]:-0} ))
@@ -532,34 +532,36 @@ render_claude_review() {
       done | sort -t $'\t' -k1,1nr -k2,2f | cut -f2-
     )
 
-    # Compact one-severity-per-token bug summary ("found/fixed" in a monospace
-    # pill); omits severities with nothing open and nothing fixed for that repo
-    # (mirrors r_sev_bar above).
-    repo_bug_summary() {
+    # One fixed-width slot per severity, appended to BUG_ROW in the caller's
+    # scope. Every repo prints all four slots — "-" where nothing was found — so
+    # the counts stay in the same column from row to row; dropping empty
+    # severities is what made the list ragged. Padding is applied with ASCII
+    # only: bash printf field widths count bytes, so a multibyte placeholder
+    # would be padded short.
+    repo_bug_slot() {
       local EMOJI="$1" OPEN="$2" FIXEDN="$3" TOTAL
       TOTAL=$((OPEN + FIXEDN))
-      (( TOTAL == 0 )) && return
-      printf '%s<code>%s/%s</code>' "$EMOJI" "$TOTAL" "$FIXEDN"
+      if (( TOTAL == 0 )); then
+        BUG_ROW+="$(printf '%s %-6s' "$EMOJI" "-")"
+      else
+        BUG_ROW+="$(printf '%s %-6s' "$EMOJI" "${TOTAL}/${FIXEDN}")"
+      fi
     }
 
-    BLOCK+="<blockquote expandable>\n\n\n"
+    BLOCK+="<blockquote expandable>\n"
+    BLOCK+="<i>reviewed PRs · bugs found/fixed</i>\n\n"
     for REPO in "${SREPOS[@]}"; do
-      BLOCK+="<b><a href=\"https://${GITEA_HOST}/${GITHUB_ORG}/${REPO}\">${REPO}</a></b> · <code>${REPO_TOTAL[$REPO]}</code> PRs · <code>${REPO_APPROVE[$REPO]:-0}/${REPO_BLOCKED[$REPO]:-0}</code>\n"
-      local -a BUG_PARTS=()
-      local PART
-      PART="$(repo_bug_summary "🔴" "${REPO_CRIT[$REPO]:-0}" "${REPO_FCRIT[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
-      PART="$(repo_bug_summary "🟡" "${REPO_MED[$REPO]:-0}" "${REPO_FMED[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
-      PART="$(repo_bug_summary "🔵" "${REPO_LOW[$REPO]:-0}" "${REPO_FLOW[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
-      PART="$(repo_bug_summary "🟣" "${REPO_LEG[$REPO]:-0}" "${REPO_FLEG[$REPO]:-0}")"; [[ -n "$PART" ]] && BUG_PARTS+=("$PART")
-      if (( ${#BUG_PARTS[@]} > 0 )); then
-        local JOINED="" P
-        for P in "${BUG_PARTS[@]}"; do
-          [[ -n "$JOINED" ]] && JOINED+=" · "
-          JOINED+="$P"
-        done
-        BLOCK+="${JOINED}\n"
-      fi
-      BLOCK+="\n"
+      BLOCK+="<b><a href=\"https://${GITEA_HOST}/${GITHUB_ORG}/${REPO}\">${REPO}</a></b> · <code>${REPO_TOTAL[$REPO]}</code>\n"
+      # The whole severity row is a single <code> span: the padding only lines
+      # up if it sits inside one monospace entity, not per-severity pills.
+      local BUG_ROW=""
+      repo_bug_slot "🔴" "${REPO_CRIT[$REPO]:-0}" "${REPO_FCRIT[$REPO]:-0}"
+      repo_bug_slot "🟡" "${REPO_MED[$REPO]:-0}" "${REPO_FMED[$REPO]:-0}"
+      repo_bug_slot "🔵" "${REPO_LOW[$REPO]:-0}" "${REPO_FLOW[$REPO]:-0}"
+      repo_bug_slot "🟣" "${REPO_LEG[$REPO]:-0}" "${REPO_FLEG[$REPO]:-0}"
+      # Drop the padding of the last slot so the <code> background ends on a digit.
+      if [[ "$BUG_ROW" =~ ^(.*[^[:space:]]) ]]; then BUG_ROW="${BASH_REMATCH[1]}"; fi
+      BLOCK+="<code>${BUG_ROW}</code>\n\n"
     done
     BLOCK+="</blockquote>"
   fi
