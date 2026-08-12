@@ -165,6 +165,14 @@ jobs:
           set -euo pipefail
           npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
           export PATH="$(npm config get prefix)/bin:$PATH"
+
+          CONFIG_FILE="$HOME/.claude.json"
+          (
+            flock -x 200
+            EXISTING=$(cat "$CONFIG_FILE" 2>/dev/null || echo '{}')
+            jq --arg p "$(pwd)" '.projects[$p].hasTrustDialogAccepted = true' <<< "$EXISTING" > "$CONFIG_FILE.tmp"
+            mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+          ) 200>"$CONFIG_FILE.lock"
           date +%s > ../review-start.txt
           echo "Running review with model: $CLAUDE_MODEL, effort: $CLAUDE_EFFORT (claude-code $(claude --version || echo unknown))"
           for attempt in 1 2; do
