@@ -1,5 +1,5 @@
 name: Claude Code Review
-run-name: "Review • ${{ inputs.display_name != '' && inputs.display_name || inputs.pr_url }}"
+run-name: "Review • ${{ inputs.pr_url }}"
 
 on:
   workflow_dispatch:
@@ -8,11 +8,6 @@ on:
         description: 'PR URL (e.g. https://HOST/ORG/REPO/pulls/123)'
         required: true
         type: string
-      display_name:
-        description: 'Cosmetic label for the run list, e.g. ORG/REPO!123 (optional - defaults to pr_url)'
-        required: false
-        type: string
-        default: ''
       model:
         description: 'Claude model'
         required: false
