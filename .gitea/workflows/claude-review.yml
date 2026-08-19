@@ -197,10 +197,14 @@ jobs:
           # Best-effort: extract+validate the trailing ```json block from the free-text
           # result. Failure here is not fatal - post_review_and_set_status already falls
           # back gracefully when claude-structured.json is missing/invalid.
-          jq -r '.result' ../claude-output.json | python3 ../.gitea/scripts/extract-json.py > ../claude-structured.json \
-            || echo "::warning::Could not extract a valid review JSON from the model's response — posting fallback"
+          jq -r '.result' ../claude-output.json | python3 ../.gitea/scripts/extract-json.py > ../claude-structured.json || {
+            echo "::warning::Could not extract a valid review JSON from the model's response — posting fallback"
+            # claude-output.json never leaves this container, so this tail is the only
+            # trace of what the model actually returned once the job finishes.
+            echo "Result tail: $(jq -r '.result // empty' ../claude-output.json 2>/dev/null | tail -c 500 || true)"
+          }
           echo "Review stats: $(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' ../claude-output.json)"
-          echo "Review findings: $(jq '.findings | length' ../claude-structured.json 2>/dev/null || echo '?')"
+          echo "Review findings: $([ -s ../claude-structured.json ] && jq '.findings | length' ../claude-structured.json 2>/dev/null || echo '?')"
           echo "Review cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' ../claude-output.json) ($(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' ../claude-output.json 2>/dev/null || echo "n/a"))"
 
       - name: Post review and set status
