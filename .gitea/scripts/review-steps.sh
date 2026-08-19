@@ -64,7 +64,7 @@ prepare_review_context() {
   fi
 
   # --- previous review --- (two jq calls: @tsv would escape the multi-line body)
-  local ALL_COMMENTS PREVIOUS_REVIEW REVIEW_COMMENT_ID
+  local ALL_COMMENTS PREVIOUS_REVIEW PREVIOUS_REVIEW_ANY REVIEW_COMMENT_ID
   ALL_COMMENTS=$(fetch_all_comments "$REPO_PATH/issues/$PR_NUMBER/comments")
   local _any='[.[] | select(.body | contains("<!-- Claude-Review:"))] | last'
   # A "Review error" fallback (post_review_and_set_status's missing/invalid-output path) quotes
@@ -73,11 +73,18 @@ prepare_review_context() {
   # else a cancelled/failed run's own SHA gets treated as "already reviewed" by the next push.
   local _done='[.[] | select(.body | (contains("<!-- Claude-Review:") and (contains("APPROVE") or contains("BLOCKED")) and (contains("**Review error**") | not)))] | last'
   REVIEW_COMMENT_ID=$(jq -r "${_any}  | .id   // empty" <<< "$ALL_COMMENTS")
-  PREVIOUS_REVIEW=$(  jq -r "${_done} | .body // empty" <<< "$ALL_COMMENTS")
+  PREVIOUS_REVIEW_ANY=$(jq -r "${_any}  | .body // empty" <<< "$ALL_COMMENTS")
+  PREVIOUS_REVIEW=$(     jq -r "${_done} | .body // empty" <<< "$ALL_COMMENTS")
+
+  # Cosmetic only, independent of the strict _done gate below: whatever the tracked
+  # comment currently shows - even a stale "Review error" fallback - gets quoted under
+  # the working spinner so the PR never goes from "has content" to blank while this run
+  # is in flight, regardless of whether that content is trustworthy enough to drive the
+  # skip/state logic below.
+  [ -n "$PREVIOUS_REVIEW_ANY" ] && sed '/^<!-- Claude-Review:/d' <<< "$PREVIOUS_REVIEW_ANY" > repo/previous-claude-output.md
 
   if [[ "$PREVIOUS_REVIEW" == *"✅ APPROVE"* || "$PREVIOUS_REVIEW" == *"❌ BLOCKED"* ]]; then
     echo "Previous review found (#$REVIEW_COMMENT_ID)"
-    sed '/^<!-- Claude-Review:/d' <<< "$PREVIOUS_REVIEW" > repo/previous-claude-output.md
     PREVIOUS_SHA=$(grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' <<< "$PREVIOUS_REVIEW" || true)
 
     # Decode the persisted open/fixed state (base64 JSON, see render-review.py) so
