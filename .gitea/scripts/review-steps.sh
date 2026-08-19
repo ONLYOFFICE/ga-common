@@ -67,7 +67,11 @@ prepare_review_context() {
   local ALL_COMMENTS PREVIOUS_REVIEW REVIEW_COMMENT_ID
   ALL_COMMENTS=$(fetch_all_comments "$REPO_PATH/issues/$PR_NUMBER/comments")
   local _any='[.[] | select(.body | contains("<!-- Claude-Review:"))] | last'
-  local _done='[.[] | select(.body | (contains("<!-- Claude-Review:") and (contains("APPROVE") or contains("BLOCKED"))))] | last'
+  # A "Review error" fallback (post_review_and_set_status's missing/invalid-output path) quotes
+  # the last genuine review inside a nested <details>, so its APPROVE/BLOCKED badge alone isn't
+  # enough to prove *this* comment reflects a completed review - exclude the fallback explicitly,
+  # else a cancelled/failed run's own SHA gets treated as "already reviewed" by the next push.
+  local _done='[.[] | select(.body | (contains("<!-- Claude-Review:") and (contains("APPROVE") or contains("BLOCKED")) and (contains("**Review error**") | not)))] | last'
   REVIEW_COMMENT_ID=$(jq -r "${_any}  | .id   // empty" <<< "$ALL_COMMENTS")
   PREVIOUS_REVIEW=$(  jq -r "${_done} | .body // empty" <<< "$ALL_COMMENTS")
 
