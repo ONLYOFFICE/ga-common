@@ -357,7 +357,7 @@ render_claude_review() {
   # contribute to that PR's error count/link, since a run's Fixed count is
   # already a running total for the PR's whole lifetime, not one run.
   local -A PR_SEEN PR_VERDICT PR_CRIT PR_MED PR_LOW PR_LEG PR_FIXED PR_ERRORS PR_ERR_LINK
-  local -A PR_FIXED_CRIT PR_FIXED_MED PR_FIXED_LOW PR_FIXED_LEG
+  local -A PR_FIXED_CRIT PR_FIXED_MED PR_FIXED_LOW PR_FIXED_LEG PR_DISPLAY_REPO
   local -a PR_ORDER=()
 
   # Duration is tracked per-run (not deduped by PR like the state above) —
@@ -369,10 +369,23 @@ render_claude_review() {
     wait "${PIDS[$i]}" || true
     LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
     TITLE="${TITLES[$i]}"; RUN_URL="${URLS[$i]}"
-    REPO="$(grep -oP "${GITHUB_ORG}/\K[^!#]+" <<< "$TITLE" || true)"
-    PR="$(grep -oP '[!#]\K[0-9]+' <<< "$TITLE" || true)"
+    # Title is the run-name, i.e. the raw pr_url ("https://HOST/ORG/REPO/pulls/N") since
+    # display_name was dropped - match that first. Runs dispatched before that change (or
+    # still in this window) may carry the legacy "ORG/REPO!N" / "ORG/REPO#N" label instead -
+    # keep matching both shapes case-insensitively so historical and current runs both count.
+    if [[ "$TITLE" =~ /([^/]+)/pulls/([0-9]+) ]]; then
+      REPO="${BASH_REMATCH[1]}"; PR="${BASH_REMATCH[2]}"
+    else
+      REPO="$(grep -oiP "${GITHUB_ORG}/\K[^!#/]+" <<< "$TITLE" || true)"
+      PR="$(grep -oP '[!#]\K[0-9]+' <<< "$TITLE" || true)"
+    fi
     [[ -z "$REPO" || -z "$PR" ]] && continue
-    KEY="${REPO}#${PR}"
+    # Same PR can show different repo casing across runs (Lambda-built URL vs. a
+    # manually typed dispatch) - key on lowercase so they aggregate into one row,
+    # but remember the first-seen casing (runs are processed newest-first, so
+    # that's the latest run's casing) for display.
+    KEY="$(tr '[:upper:]' '[:lower:]' <<< "$REPO")#${PR}"
+    [[ -z "${PR_DISPLAY_REPO[$KEY]:-}" ]] && PR_DISPLAY_REPO[$KEY]="$REPO"
 
     if [[ -z "${PR_SEEN[$KEY]:-}" ]]; then
       PR_SEEN[$KEY]=1; PR_ORDER+=("$KEY")
@@ -422,7 +435,7 @@ render_claude_review() {
   local R_CRIT=0 R_MED=0 R_LOW=0 R_LEG=0
   local R_FCRIT=0 R_FMED=0 R_FLOW=0 R_FLEG=0
   local -a R_ERRLIST=()
-  local V ERR_N LINK LABEL
+  local V ERR_N LINK LABEL DKEY
   for KEY in "${PR_ORDER[@]}"; do
     V="${PR_VERDICT[$KEY]:-}"
     if [[ -n "$V" ]]; then
@@ -436,7 +449,8 @@ render_claude_review() {
     fi
     ERR_N="${PR_ERRORS[$KEY]:-0}"; LINK="${PR_ERR_LINK[$KEY]:-}"
     if (( ERR_N > 0 )); then
-      LABEL="$KEY"; [[ -n "$LINK" ]] && LABEL="<a href=\"${LINK}\">${KEY}</a>"
+      DKEY="${PR_DISPLAY_REPO[$KEY]}#${KEY##*#}"
+      LABEL="$DKEY"; [[ -n "$LINK" ]] && LABEL="<a href=\"${LINK}\">${DKEY}</a>"
       R_ERRLIST+=("$LABEL")
     fi
   done
@@ -508,7 +522,7 @@ render_claude_review() {
     for KEY in "${PR_ORDER[@]}"; do
       V="${PR_VERDICT[$KEY]:-}"
       [[ -z "$V" ]] && continue
-      REPO="${KEY%%#*}"
+      REPO="${PR_DISPLAY_REPO[$KEY]}"
       [[ -z "${REPO_TOTAL[$REPO]:-}" ]] && REPO_ORDER+=("$REPO")
       REPO_TOTAL[$REPO]=$(( ${REPO_TOTAL[$REPO]:-0} + 1 ))
       REPO_CRIT[$REPO]=$(( ${REPO_CRIT[$REPO]:-0} + ${PR_CRIT[$KEY]:-0} ))
