@@ -97,7 +97,11 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$ANTHROPIC_KEYS" | jq '.' > /dev/null 2>&1 || echo "::warning::ANTHROPIC_KEYS is not valid JSON"
-          ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_KEYS" | jq -r --arg repo "$REPO_NAME" '.[$repo] // empty' 2>/dev/null || true)
+          # Repo name comes verbatim from pr_url's path segment (Resolve inputs), but Gitea
+          # resolves repo paths case-insensitively - match ANTHROPIC_KEYS the same way so a
+          # differently-cased dispatch URL doesn't miss a key that actually exists.
+          ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_KEYS" | jq -r --arg repo "$REPO_NAME" \
+            'to_entries | map(select(.key | ascii_downcase == ($repo | ascii_downcase))) | (.[0].value // empty)' 2>/dev/null || true)
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             ANTHROPIC_API_KEY="$ANTHROPIC_KEY_DEFAULT"
             echo "::warning::No dedicated API key for $ORG_NAME/$REPO_NAME - using default key"
