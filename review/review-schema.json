@@ -1,0 +1,88 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings", "resolved"],
+  "properties": {
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["what", "why", "scope"],
+      "properties": {
+        "what": { "type": "string", "description": "One sentence: what the PR does." },
+        "why": { "type": "string", "description": "One sentence: purpose of the PR. Prefix with '(inferred) ' if not stated by the PR description." },
+        "scope": { "type": "string", "description": "Comma-separated file/component paths, up to 8 entries; beyond that collapse to top-level directory/component plus a file count." },
+        "details": { "type": "string", "description": "At most 2 short sentences on notable decisions or breaking changes only, each a distinct fact. Omit this field entirely if there is nothing to add." },
+        "coverage_note": { "type": "string", "description": "Large-diff summary-mode reviews only: which files were not line-reviewed. Omit otherwise." }
+      }
+    },
+    "bugs": {
+      "type": "array",
+      "description": "One entry per bug referenced in <bugzilla_context>. Omit this array entirely if <bugzilla_context> has no referenced bug.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "integer", "description": "Bugzilla bug number." },
+          "data_not_retrieved_reason": { "type": "string", "description": "Set only when this bug's data could not be fetched; leave every other field below empty in that case." },
+          "title": { "type": "string", "description": "Short English title; translate if the Bugzilla data is not in English." },
+          "status": { "type": "string", "description": "Bugzilla status, e.g. NEW, RESOLVED/FIXED." },
+          "url": { "type": "string" },
+          "severity_priority": { "type": "string", "description": "e.g. 'Major/P2'." },
+          "product_component": { "type": "string" },
+          "what_reported": { "type": "string", "description": "1-2 sentences on symptom and reproduction." },
+          "root_cause": { "type": "string", "description": "The underlying cause per the Bugzilla data." },
+          "fixed_by_pr": { "type": "string", "enum": ["yes", "no", "partially", "cannot_determine"] },
+          "fixed_by_pr_detail": { "type": "string", "description": "Required when fixed_by_pr is 'no' or 'partially': state plainly what the bug needs that the PR omits, and whether the PR follows a fix a bug comment proposed." },
+          "note": { "type": "string", "description": "Only if relevant: a status/verdict mismatch (e.g. bug already RESOLVED/FIXED) or the diff fixing a different root cause than reported." }
+        }
+      }
+    },
+    "resolved": {
+      "type": "array",
+      "description": "Findings from <previous_review>'s numbered list whose underlying problem is fixed in the current diff. Empty if there is no <previous_review> or nothing was resolved this push. Never include a finding here unless it was actually open in <previous_review>.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "fix_applied"],
+        "properties": {
+          "id": { "type": "integer", "description": "The finding's number as shown in <previous_review>." },
+          "fix_applied": { "type": "string", "description": "One sentence: what changed and where (path:line)." }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Every currently-open issue: newly found in this diff, AND previously-open issues from <previous_review> that are still present unresolved. Do not duplicate anything listed in 'resolved'.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "severity", "confidence", "title", "locations", "why", "fix_summary"],
+        "properties": {
+          "category": { "type": "string", "enum": ["security", "code-quality", "performance", "dependencies", "style", "documentation"] },
+          "severity": { "type": "string", "enum": ["critical", "medium", "low", "legacy"], "description": "critical/medium: see verdict rules. low: minor/nice-to-fix. legacy: pre-existing, relevant only because this PR touches the surrounding code." },
+          "confidence": { "type": "string", "enum": ["sure", "likely", "unsure"], "description": "sure = provable from the diff alone. likely = depends on code/runtime behavior outside the diff. unsure = plausible, needs human judgment. Never inflate severity just because confidence is low." },
+          "title": { "type": "string", "description": "Short issue title." },
+          "locations": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Every affected path:line for this exact issue - scan the diff for the same pattern and list every occurrence, not just the first.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "line"],
+              "properties": {
+                "path": { "type": "string" },
+                "line": { "type": "integer", "description": "New-file line number, counted from the hunk header." }
+              }
+            }
+          },
+          "why": { "type": "string", "description": "1-3 short separate sentences: previous behavior, then new behavior, then consequence - grounded in the diff, never fabricated." },
+          "fix_summary": { "type": "string", "description": "One sentence describing the smallest fix that resolves the finding, within the PR's existing scope." },
+          "fix_code": { "type": "string", "description": "Ready-to-apply minimal corrected code the reviewer can copy. Omit only for trivial fixes (delete a line, rename, bump a version)." },
+          "fix_lang": { "type": "string", "description": "Code-fence language tag for fix_code, e.g. 'python', 'csharp', 'bash', 'yaml'." }
+        }
+      }
+    }
+  }
+}

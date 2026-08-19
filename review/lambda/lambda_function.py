@@ -289,7 +289,9 @@ def lambda_handler(event, context):
     if not is_branch_allowed(inputs["base_branch"], config["allowed_base_branch_patterns"]):
         return response(200, {"ok": True, "ignored": True, "reason": "base branch not allowed"})
 
-    status, body = dispatch_workflow(config, inputs)
+    pr_url = f"{config['gitea_url']}/{full_name}/pulls/{inputs['pr_number']}"
+    display_name = f"{full_name}!{inputs['pr_number']}"
+    status, body = dispatch_workflow(config, {"pr_url": pr_url, "display_name": display_name})
     if status < 200 or status >= 300:
         return response(
             502,
