@@ -288,7 +288,7 @@ post_review_and_set_status() {
   # without ever echoing it. Printing it here is what the digest depends on.
   cat claude-output.md
   echo "Posting review ($(wc -l < claude-output.md) lines)"
-  upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$PR_SHA" \
+  upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$PR_SHA" "" "true" \
     || echo "::warning::Failed to post review comment"
 
   # derive commit status from job result + review verdict

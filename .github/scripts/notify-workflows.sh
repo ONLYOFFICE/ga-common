@@ -457,6 +457,49 @@ render_claude_review() {
   local R_ERRCOUNT="${#R_ERRLIST[@]}"
   (( R_COUNT == 0 && R_ERRCOUNT == 0 )) && return
 
+  # 👍/👎 reactions on each PR's latest Claude Review comment (Gitea reaction
+  # content is "+1"/"-1", same convention as GitHub). claude-review.yml now
+  # seeds one +1 and one -1 on that comment from the bot account itself so
+  # both buttons are visibly present - exclude reactions from that same
+  # account (the comment's own author, whoever that is) so the seed doesn't
+  # get counted as real feedback. Only PRs with a real verdict ever got a
+  # comment; network-bound, so fetched in parallel like the run logs above.
+  local -a REACT_PIDS=() REACT_KEYS=() REACT_TMPS=()
+  for KEY in "${PR_ORDER[@]}"; do
+    [[ -z "${PR_VERDICT[$KEY]:-}" ]] && continue
+    REPO="${PR_DISPLAY_REPO[$KEY]}"; PR="${KEY##*#}"
+    TMP="$(mktemp)"
+    (
+      local COMMENTS COMMENT COMMENT_ID AUTHOR_LOGIN REACTIONS_RAW
+      COMMENTS="$(fetch "$AUTH" "https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/${REPO}/issues/${PR}/comments?limit=100" 2>/dev/null || echo '[]')"
+      COMMENT="$(jq -c '[.[]? | select((.body//"") | test("<!-- Claude-Review:"))] | last' <<< "$COMMENTS" 2>/dev/null || true)"
+      [[ -z "$COMMENT" || "$COMMENT" == "null" ]] && { echo '[]'; exit 0; }
+      COMMENT_ID="$(jq -r '.id // empty' <<< "$COMMENT")"
+      AUTHOR_LOGIN="$(jq -r '.user.login // empty' <<< "$COMMENT")"
+      [[ -z "$COMMENT_ID" ]] && { echo '[]'; exit 0; }
+      REACTIONS_RAW="$(fetch "$AUTH" "https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/${REPO}/issues/comments/${COMMENT_ID}/reactions?limit=100" 2>/dev/null || echo '[]')"
+      jq -c --arg me "$AUTHOR_LOGIN" '[.[]? | select((.user.login // "") != $me)]' <<< "$REACTIONS_RAW" 2>/dev/null || echo '[]'
+    ) > "$TMP" &
+    REACT_PIDS+=($!); REACT_KEYS+=("$KEY"); REACT_TMPS+=("$TMP")
+  done
+
+  local R_LIKE=0 R_DISLIKE=0
+  local -a R_DISLIKE_LIST=()
+  for i in "${!REACT_PIDS[@]}"; do
+    wait "${REACT_PIDS[$i]}" || true
+    local REACTIONS; REACTIONS="$(cat "${REACT_TMPS[$i]}")"; rm -f "${REACT_TMPS[$i]}"
+    KEY="${REACT_KEYS[$i]}"
+    local LIKE_N DISLIKE_N
+    LIKE_N="$(jq -r '[.[]? | select(.content=="+1")] | length' <<< "$REACTIONS" 2>/dev/null || echo 0)"
+    DISLIKE_N="$(jq -r '[.[]? | select(.content=="-1")] | length' <<< "$REACTIONS" 2>/dev/null || echo 0)"
+    R_LIKE=$((R_LIKE + LIKE_N)); R_DISLIKE=$((R_DISLIKE + DISLIKE_N))
+    if (( DISLIKE_N > 0 )); then
+      local DUSERS; DUSERS="$(jq -r '[.[]? | select(.content=="-1") | (.user.login // "unknown")] | join(", ")' <<< "$REACTIONS" 2>/dev/null || echo "unknown")"
+      local DREPO="${PR_DISPLAY_REPO[$KEY]}" DPR="${KEY##*#}"
+      R_DISLIKE_LIST+=("<a href=\"https://${GITEA_HOST}/${GITHUB_ORG}/${DREPO}/pulls/${DPR}\">${DREPO}#${DPR}</a>: $(html_escape "$DUSERS")")
+    fi
+  done
+
   local BLOCK="" STATS="Claude Review\n\n"
   if (( R_COUNT > 0 )); then
     local BAR_LEN=10
@@ -470,6 +513,7 @@ render_claude_review() {
     STATS+="${R_COUNT} PRs · ${RUN_COUNT} runs${AVG_PART}\n"
     local APAD; APAD="$(printf '%-2s' "$R_APPROVE")"
     STATS+="${BAR} ${APAD} ✔️ · ${R_BLOCKED}  ✖️\n"
+    (( R_LIKE > 0 || R_DISLIKE > 0 )) && STATS+="👍 ${R_LIKE} · 👎 ${R_DISLIKE}\n"
     STATS+="Bugs\n"
 
     # One bar per severity: filled = fixed / (open + fixed). The severity emoji
@@ -504,6 +548,15 @@ render_claude_review() {
     BLOCK+="⚠️ ${R_ERRCOUNT} PR(s) with errors:\n"
     local ENTRY
     for ENTRY in "${R_ERRLIST[@]}"; do
+      BLOCK+="${ENTRY}\n"
+    done
+  fi
+
+  if (( ${#R_DISLIKE_LIST[@]} > 0 )); then
+    { (( R_COUNT > 0 )) || (( R_ERRCOUNT > 0 )); } && BLOCK+="\n"
+    BLOCK+="👎 ${#R_DISLIKE_LIST[@]} dislike(s):\n"
+    local ENTRY
+    for ENTRY in "${R_DISLIKE_LIST[@]}"; do
       BLOCK+="${ENTRY}\n"
     done
   fi

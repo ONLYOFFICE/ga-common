@@ -64,19 +64,36 @@ $(cat "$previous_review_file")
 }
 
 upsert_review_comment() {
-  local repo="$1" pr="$2" file="$3" comment_id="${4:-}" sha="${5:-}" marker="${6:-}"
+  local repo="$1" pr="$2" file="$3" comment_id="${4:-}" sha="${5:-}" marker="${6:-}" seed_reactions="${7:-false}"
   local end_marker="${marker:-<!-- Claude-Review:${sha} -->}"
   local body; body="$(printf '%s\n\n%s' "$(cat "$file")" "$end_marker")"
   local payload; payload="{\"body\": $(echo "$body" | jq -Rs .)}"
+  local final_id="$comment_id" rc=0
   if [ -n "$comment_id" ]; then
     # Fall back to POST when the tracked comment was deleted mid-run (stale id)
     # so the finished review is never silently dropped.
-    gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "$payload" > /dev/null \
-      || { echo "PATCH of comment #$comment_id failed — posting a new comment" >&2
-           gitea_api_json "$repo/issues/$pr/comments" -X POST -d "$payload" > /dev/null; }
+    if ! gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "$payload" > /dev/null; then
+      echo "PATCH of comment #$comment_id failed — posting a new comment" >&2
+      final_id=$(gitea_api_json "$repo/issues/$pr/comments" -X POST -d "$payload" | jq -r '.id') || rc=1
+    fi
   else
-    gitea_api_json "$repo/issues/$pr/comments" -X POST -d "$payload" > /dev/null
+    final_id=$(gitea_api_json "$repo/issues/$pr/comments" -X POST -d "$payload" | jq -r '.id') || rc=1
   fi
+  [ "$seed_reactions" = "true" ] && seed_review_reactions "$repo" "$final_id"
+  return "$rc"
+}
+
+# Seeds a 👍 and a 👎 reaction on the review comment from the bot account
+# itself, so both reaction buttons are visibly present (and obviously
+# clickable) from the moment the comment is posted, instead of only
+# appearing once a human reacts first. Idempotent - Gitea dedupes a user's
+# reaction by content, so re-running this on every push to the same comment
+# id never creates duplicates. Best-effort: never fails the calling step.
+seed_review_reactions() {
+  local repo="$1" comment_id="$2"
+  [ -n "$comment_id" ] && [ "$comment_id" != "null" ] || return 0
+  gitea_api_json "$repo/issues/comments/$comment_id/reactions" -X POST -d '{"content":"+1"}' > /dev/null || true
+  gitea_api_json "$repo/issues/comments/$comment_id/reactions" -X POST -d '{"content":"-1"}' > /dev/null || true
 }
 
 set_commit_status() {
