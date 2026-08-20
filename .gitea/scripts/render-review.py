@@ -220,11 +220,6 @@ def build(structured, prev_state, max_state_bytes=None):
                f"⚪️ **{len(new_fixed)}** Fixed")
 
     new_state = cap_state_size({"open": [slim(f) for f in new_open], "fixed": new_fixed}, max_state_bytes)
-    # Round-tripped verbatim, not read/written by this script otherwise - the dislike-alert
-    # workflow persists how far it's scanned this comment's 👎 reactions here so a re-review
-    # (which regenerates this whole state blob) doesn't reset it and cause a duplicate alert.
-    if "dislike_watermark" in prev_state:
-        new_state["dislike_watermark"] = prev_state["dislike_watermark"]
     state_b64 = base64.b64encode(json.dumps(new_state, ensure_ascii=False).encode("utf-8")).decode("ascii")
 
     parts = [
