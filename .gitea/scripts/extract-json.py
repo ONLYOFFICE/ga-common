@@ -4,8 +4,10 @@
 --json-schema-forced tool call (see REVIEW.md). Finds the ```json fenced
 block(s) in the text that match review-schema.json's top-level shape, then
 does a light structural check against its required fields/enums before
-handing the result to render-review.py. Prints the JSON compact on success;
-exits 1 with a warning on stderr otherwise.
+handing the result to render-review.py. A malformed individual findings/bugs/
+resolved entry is dropped (not fatal) - only a broken top-level shape or
+summary object fails the whole extraction; see validate()'s docstring for why.
+Prints the JSON compact on success; exits 1 with a warning on stderr otherwise.
 """
 import json
 import re
@@ -44,14 +46,38 @@ def extract_candidate(text, required_keys):
     return blocks[-1]
 
 
+def _validate_object(item, item_schema, path):
+    """Required-key/enum check for a single object against a JSON-Schema-shaped
+    dict (one level, no further recursion - same shallow scope as before).
+    Returns None on success, or a short error string."""
+    if not isinstance(item, dict):
+        return f"{path}: expected an object, got {type(item).__name__}"
+    missing = [req for req in item_schema.get("required", []) if req not in item]
+    if missing:
+        return f"{path}: missing required key(s) {missing}"
+    item_props = item_schema.get("properties", {})
+    for ikey, ival in item.items():
+        ischema = item_props.get(ikey)
+        if ischema and "enum" in ischema and ival not in ischema["enum"]:
+            return f"{path}.{ikey}: invalid value {ival!r}, expected one of {ischema['enum']}"
+    return None
+
+
 def validate(data, schema, path="root"):
-    """Checks required keys/enums against a JSON-Schema-shaped dict, recursing into
-    object properties (e.g. summary) the same way as the top level, and into array
-    items (e.g. findings[]) for their own required keys/enums. A required array
-    explicitly set to null is rejected rather than silently treated as empty.
-    Returns None on success, or a short string pinpointing the first mismatch -
-    the caller has nowhere else to see the model's raw output, so this string is
-    the only diagnostic that survives into the run log."""
+    """Checks the top-level required keys and the (load-bearing, so still fatal
+    if broken) 'summary' object, then per-item-filters the findings/bugs/resolved
+    arrays *in place* - an individual array entry that fails its required-key/enum
+    check is dropped (with a stderr warning) rather than failing the whole
+    extraction. A single model slip on one minor finding, deep in a long response,
+    otherwise used to discard the entire review (verdict, every other finding,
+    Bugzilla data) after a real, possibly multi-dollar run - dropping just that
+    one entry is strictly better than an all-or-nothing fallback that loses
+    everything the run actually produced. A required array explicitly set to
+    null is still rejected outright (nothing to filter).
+    Returns None on success (data may have been mutated), or a short string
+    pinpointing a FATAL mismatch - the caller has nowhere else to see the
+    model's raw output, so this string is the only diagnostic that survives
+    into the run log."""
     if not isinstance(data, dict):
         return f"{path}: expected an object, got {type(data).__name__}"
     missing = [key for key in schema.get("required", []) if key not in data]
@@ -59,36 +85,31 @@ def validate(data, schema, path="root"):
         return f"{path}: missing required key(s) {missing}"
     required = set(schema.get("required", []))
     props = schema.get("properties", {})
-    for key, value in data.items():
-        prop_schema = props.get(key)
-        if not prop_schema:
+
+    summary_schema = props.get("summary")
+    if summary_schema and data.get("summary") is not None:
+        error = _validate_object(data["summary"], summary_schema, f"{path}.summary")
+        if error:
+            return error
+
+    for key in ("bugs", "findings", "resolved"):
+        arr_schema = props.get(key)
+        if not arr_schema:
             continue
-        prop_type = prop_schema.get("type")
-        if prop_type == "object":
-            if value is not None:
-                error = validate(value, prop_schema, f"{path}.{key}")
-                if error:
-                    return error
-        elif prop_type == "array":
-            if value is None:
-                if key in required:
-                    return f"{path}.{key}: required array is null"
+        value = data.get(key)
+        if value is None:
+            if key in required:
+                return f"{path}.{key}: required array is null"
+            continue
+        item_schema = arr_schema.get("items", {})
+        kept = []
+        for i, item in enumerate(value):
+            error = _validate_object(item, item_schema, f"{path}.{key}[{i}]")
+            if error:
+                print(f"::warning::extract-json: dropping invalid {key} entry ({error})", file=sys.stderr)
                 continue
-            if not value:
-                continue
-            item_schema = prop_schema.get("items", {})
-            item_props = item_schema.get("properties", {})
-            for i, item in enumerate(value):
-                item_path = f"{path}.{key}[{i}]"
-                if not isinstance(item, dict):
-                    return f"{item_path}: expected an object, got {type(item).__name__}"
-                item_missing = [req for req in item_schema.get("required", []) if req not in item]
-                if item_missing:
-                    return f"{item_path}: missing required key(s) {item_missing}"
-                for ikey, ival in item.items():
-                    ischema = item_props.get(ikey)
-                    if ischema and "enum" in ischema and ival not in ischema["enum"]:
-                        return f"{item_path}.{ikey}: invalid value {ival!r}, expected one of {ischema['enum']}"
+            kept.append(item)
+        data[key] = kept
     return None
 
 
