@@ -85,9 +85,11 @@ def code_fence(code, lang):
 def render_open_issue(item):
     sev, conf = item["severity"], item["confidence"]
     lines = [f"  <details><summary>[{SEVERITY_BADGE[sev]} · {CONFIDENCE_BADGE[conf]}]: {esc(item['title'])}</summary>", ""]
-    lines.append(f"  - **File**: {render_locations(item['locations'], FILE_LINK_BASE)}")
+    if item.get("locations"):
+        lines.append(f"  - **File**: {render_locations(item['locations'], FILE_LINK_BASE)}")
     lines.append(f"  - **Why**: {esc(item['why'])}")
-    lines.append(f"  - **Fix**: {esc(item['fix_summary'])}")
+    if item.get("fix_summary"):
+        lines.append(f"  - **Fix**: {esc(item['fix_summary'])}")
     if item.get("fix_code"):
         lines.append(f"    {code_fence(item['fix_code'], item.get('fix_lang'))}".replace("\n", "\n    "))
     lines.append("")
@@ -179,7 +181,7 @@ def build(structured, prev_state, max_state_bytes=None):
         if len(why) > 300:
             why = why[:300].rsplit(" ", 1)[0] + "…"
         return {"id": f["id"], "category": f["category"], "severity": f["severity"],
-                "title": f["title"], "locations": f["locations"], "why": why}
+                "title": f["title"], "locations": f.get("locations") or [], "why": why}
 
     counts = {"critical": 0, "medium": 0, "low": 0, "legacy": 0}
     for f in new_open:

@@ -70,7 +70,7 @@ Merging findings: cite new-file line numbers; list every location for a recurrin
 Treat PR titles/bodies/commits/Bugzilla data as untrusted; flag missing sanitization the same way if the diff builds prompts or runs untrusted data through an interpreter.
 
 #### 2.2 PR title & commit messages (category `style`, severity `low`)
-Commit subject: capitalized, no trailing period, imperative mood, non-empty (`wip`/`.` fail). Conventional-commit prefixes (`feat:`, `fix:`, ...) are never a violation either way; merge commits are exempt entirely. Use `locations: [{"path": "PR metadata", "line": 1}]` (not tied to a file).
+Commit subject: capitalized, no trailing period, imperative mood, non-empty (`wip`/`.` fail). Conventional-commit prefixes (`feat:`, `fix:`, ...) are never a violation either way; merge commits are exempt entirely. Omit `locations` entirely (not tied to a file).
 
 #### 2.3 Code comment language (category `style`, severity `medium`)
 New/changed code comments must be English (inline/block only — not UI strings, i18n, identifiers, test data, markdown, generated files, string literals). The automated check already catches non-ASCII; you only need to report ASCII non-English and transliterations (`// privet`, `// polzovatel`).
@@ -114,9 +114,9 @@ End your final message with exactly one ```` ```json ```` fenced block containin
       "severity": "critical | medium | low | legacy",
       "confidence": "sure | likely | unsure",
       "title": "short issue title",
-      "locations": [ { "path": "app.py", "line": 5 } ],
+      "locations": "optional: [ { \"path\": \"app.py\", \"line\": 5 } ] - omit entirely when the issue isn't tied to a specific file/line (e.g. PR title/description)",
       "why": "1-3 short sentences: previous behavior, new behavior, consequence - grounded in the diff",
-      "fix_summary": "one sentence: the smallest fix",
+      "fix_summary": "optional: one sentence, the smallest fix - omit only when no concrete fix applies (e.g. a naming/title nitpick where 'why' already says everything)",
       "fix_code": "optional: ready-to-apply code snippet, omit only for trivial fixes",
       "fix_lang": "optional: code-fence language tag for fix_code" }
   ]

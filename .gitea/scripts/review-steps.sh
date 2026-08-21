@@ -209,7 +209,12 @@ prepare_review_context() {
         # title/path/why are decoded from a PR comment matched by a substring search, not
         # verified as bot-authored - escape < / > before inlining, same as PR_TITLE/PR_BODY,
         # so a forged state blob can't break out of the <previous_review> tag boundary.
-        jq -r '.open[] | "\(.id). [\(.category)/\(.severity)] \(.title | gsub("<";"&lt;") | gsub(">";"&gt;"))\n   Locations: \(.locations | map("\(.path | gsub("<";"&lt;") | gsub(">";"&gt;")):\(.line)") | join(", "))\n   Why: \(.why | gsub("<";"&lt;") | gsub(">";"&gt;"))"' repo/previous-state.json
+        # locations is optional (e.g. PR title/description findings) - omit the
+        # "Locations:" line entirely rather than printing it empty.
+        jq -r '.open[] |
+          "\(.id). [\(.category)/\(.severity)] \(.title | gsub("<";"&lt;") | gsub(">";"&gt;"))" +
+          (if ((.locations // []) | length) > 0 then "\n   Locations: \((.locations // []) | map("\(.path | gsub("<";"&lt;") | gsub(">";"&gt;")):\(.line)") | join(", "))" else "" end) +
+          "\n   Why: \(.why | gsub("<";"&lt;") | gsub(">";"&gt;"))"' repo/previous-state.json
         printf '\n</previous_review>\n'
       } >> repo/claude-prompt.txt
       echo "Inlined previous review ($PREV_OPEN_COUNT open findings)"
