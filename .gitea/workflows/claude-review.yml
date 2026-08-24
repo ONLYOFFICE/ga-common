@@ -117,9 +117,19 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
+          set -euo pipefail
           git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
           git clone "https://$GITEA_HOST/$ORG_NAME/ga-common" --depth=1 --branch "$REF_NAME" .
-          git clone "https://$GITEA_HOST/$ORG_NAME/$REPO_NAME" --branch "$PR_BRANCH" repo
+          git clone "https://$GITEA_HOST/$ORG_NAME/$REPO_NAME" repo
+          # Fetch by PR number, not by $PR_BRANCH: head.ref is unreliable for fork PRs
+          # (the branch lives in the fork, not this repo) and for PRs whose head branch
+          # was deleted/renamed - pull/<N>/head always exists in the base repo, even after
+          # the PR is merged and the branch is gone.
+          if ! git -C repo fetch origin "pull/$PR_NUMBER/head"; then
+            echo "::error::Could not fetch pull/$PR_NUMBER/head from $ORG_NAME/$REPO_NAME - the PR ref no longer exists on the remote"
+            exit 1
+          fi
+          git -C repo checkout --detach FETCH_HEAD
           HEAD_SHA=$(git -C repo rev-parse HEAD)
           [ "$HEAD_SHA" = "$PR_SHA" ] || \
             echo "::warning::Branch tip $HEAD_SHA differs from dispatched SHA $PR_SHA (new push in flight) — benign: the superseding run will cancel this one"
