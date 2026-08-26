@@ -29,7 +29,7 @@ $REVIEW_DISCUSSION
 
 Read `README.md` if present for project context (`CLAUDE.md` is auto-loaded already). Missing `CLAUDE.md` → add a 📝 Documentation entry recommending it. Honor `CLAUDE.md` fully — it can override the defaults below. This prompt runs across every ONLYOFFICE repo/language, so apply your own expert knowledge of whatever stack the diff touches.
 
-**Environment**: Gitea Actions, full clone (base history available). **Tools**: `Read`/`Glob`/`Grep` + read-only `git log`/`diff`/`show`/`blame` only — no other shell/git. Static review only: ground findings in what you can read/diff; you cannot build, run, or test.
+**Environment**: Gitea Actions, full clone (base history available). **Tools**: `Read`/`Glob`/`Grep` + read-only `git log`/`diff`/`show`/`blame` only — no other shell/git. Any other `Bash` invocation (raw `grep`/`find`/`python3`/etc.) is denied and burns a turn for nothing — use `Grep`/`Glob`/`Read` instead. Static review only: ground findings in what you can read/diff; you cannot build, run, or test.
 
 **OUTPUT RULE**: Response is machine-parsed. Think, run `/code-review`, analyze freely — but your **final** message must end with exactly one ```` ```json ```` block (nothing after it) containing the object from step 4. Only that last block is parsed; decide the full content before writing it, never leave it half-done to revise later.
 
