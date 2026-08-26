@@ -180,13 +180,18 @@ jobs:
           npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
           export PATH="$(npm config get prefix)/bin:$PATH"
 
+          # Our own lock file is deliberately NOT $CONFIG_FILE.lock: the CLI uses that exact
+          # path for its own internal locking (a mkdir/rmdir lockdir, going by the ENOTDIR
+          # errors observed when it collides with a plain file left there), so reusing it here
+          # left a stray plain file that raced the CLI's main process against its own
+          # forked-skill subagent for the same path.
           CONFIG_FILE="$HOME/.claude.json"
           (
             flock -x 200
             EXISTING=$(cat "$CONFIG_FILE" 2>/dev/null || echo '{}')
             jq --arg p "$(pwd)" '.projects[$p].hasTrustDialogAccepted = true' <<< "$EXISTING" > "$CONFIG_FILE.tmp"
             mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-          ) 200>"$CONFIG_FILE.lock"
+          ) 200>"$HOME/.claude-review-pretrust.lock"
           date +%s > ../review-start.txt
           echo "Running review with model: $CLAUDE_MODEL, effort: $CLAUDE_EFFORT (claude-code $(claude --version || echo unknown))"
           # /code-review is invoked as a slash command inside the prompt, and that ends
