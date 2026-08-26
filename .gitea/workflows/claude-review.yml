@@ -50,7 +50,7 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       PR_URL: ${{ inputs.pr_url }}
       FORCE_REVIEW: ${{ inputs.force }}
@@ -194,9 +194,13 @@ jobs:
           # kicks in when a skill is invoked, so this step no longer passes it.
           rc=0
           # Single attempt, no CLI timeout: --max-budget-usd bounds cost; job timeout-minutes is the backstop.
+          # --debug-file is uploaded as a short-lived artifact by the next step - it's the only way
+          # to tell after the fact whether a slow/hung run was stuck waiting on the API vs. churning
+          # through tool calls.
           claude -p \
             --allowedTools "Read,Glob,Grep,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*)" --model "$CLAUDE_MODEL" \
             --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
+            --debug-file ../claude-debug.log \
             --output-format json < claude-prompt.txt > ../claude-output.json || rc=$?
           if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' ../claude-output.json > /dev/null 2>&1; then
             subtype=$(jq -r '.subtype // "unknown"' ../claude-output.json 2>/dev/null || echo "unparsable")
@@ -216,6 +220,15 @@ jobs:
           echo "Review stats: $(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' ../claude-output.json)"
           echo "Review findings: $([ -s ../claude-structured.json ] && jq '.findings | length' ../claude-structured.json 2>/dev/null || echo '?')"
           echo "Review cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' ../claude-output.json) ($(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' ../claude-output.json 2>/dev/null || echo "n/a"))"
+
+      - name: Upload debug log
+        uses: actions/upload-artifact@@v7
+        if: always() && steps.prepare.outcome != 'skipped' && steps.prepare.outputs.skip != 'true'
+        with:
+          name: claude-debug-log
+          path: claude-debug.log
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Post review and set status
         if: always() && steps.prepare.outcome != 'skipped' && steps.prepare.outputs.skip != 'true'
