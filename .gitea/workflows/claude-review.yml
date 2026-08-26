@@ -227,7 +227,12 @@ jobs:
           echo "Review cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' ../claude-output.json) ($(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' ../claude-output.json 2>/dev/null || echo "n/a"))"
 
       - name: Upload debug log
-        uses: actions/upload-artifact@v7.0.1
+        # v4/v7 (@actions/artifact v2+) failed here with GHESNotSupportedError - that check just
+        # means "API host isn't github.com" (GHES was the only such case when it was written),
+        # and Gitea trips it too; the detection isn't fully reliable, so v4/v7 may intermittently
+        # pass, but v3 predates that check entirely and uses the protocol Gitea's artifact
+        # backend actually implements. Pinned to the exact version per the action's own README.
+        uses: actions/upload-artifact@v3.2.2
         if: always() && steps.prepare.outcome != 'skipped' && steps.prepare.outputs.skip != 'true'
         with:
           name: claude-debug-log
