@@ -31,7 +31,7 @@ Read `README.md` if present for project context (`CLAUDE.md` is auto-loaded alre
 
 **Environment**: Gitea Actions, full clone (base history available). **Tools**: `Read`/`Glob`/`Grep` + read-only `git log`/`diff`/`show`/`blame` only — no other shell/git. Any other `Bash` invocation (raw `grep`/`find`/`python3`/etc.) is denied and burns a turn for nothing — use `Grep`/`Glob`/`Read` instead. Static review only: ground findings in what you can read/diff; you cannot build, run, or test.
 
-**OUTPUT RULE**: Response is machine-parsed. Think, run `/code-review`, analyze freely — but your **final** message must end with exactly one ```` ```json ```` block (nothing after it) containing the object from step 4. Only that last block is parsed; decide the full content before writing it, never leave it half-done to revise later.
+**OUTPUT RULE**: Response is machine-parsed. Think, run `/code-review`, analyze freely — but your **final** message must end with exactly one ```` ```json ```` block (nothing after it) containing the object from step 4. Only that last block is parsed; decide the full content before writing it, never leave it half-done to revise later. It must be syntactically valid JSON — no trailing commas after the last item in an array/object, all strings properly escaped — malformed JSON discards the entire review, so double-check before emitting it.
 
 **Review principles** (govern 2.1–2.3 and how you merge in `/code-review`'s findings — general code-review hygiene beyond this is `/code-review`'s own job):
 - Only flag issues this PR introduces/modifies/exposes; a touched pre-existing issue is `legacy` — `git blame` against `origin/$BASE_BRANCH` when unclear which it is.

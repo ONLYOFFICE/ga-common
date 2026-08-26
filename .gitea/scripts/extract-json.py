@@ -16,6 +16,19 @@ from pathlib import Path
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent.parent / "review" / "review-schema.json"
 
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def loads_lenient(text):
+    """json.loads with one fallback: strip trailing commas before a closing
+    brace/bracket. That's the single most common LLM JSON-formatting slip, and
+    exactly what produces json.JSONDecodeError's "Expecting property name
+    enclosed in double quotes" at the comma's position."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(_TRAILING_COMMA_RE.sub(r"\1", text))
+
 
 def extract_candidate(text, required_keys):
     """Picks the fenced ```json block that looks like our review object. A
@@ -32,7 +45,7 @@ def extract_candidate(text, required_keys):
     candidates = []
     for block in blocks:
         try:
-            obj = json.loads(block)
+            obj = loads_lenient(block)
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and all(k in obj for k in required_keys):
@@ -122,7 +135,7 @@ def main():
         sys.exit(1)
 
     try:
-        data = json.loads(candidate)
+        data = loads_lenient(candidate)
     except json.JSONDecodeError as e:
         print(f"::warning::extract-json: could not parse JSON from model response: {e}", file=sys.stderr)
         sys.exit(1)
