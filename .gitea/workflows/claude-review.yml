@@ -226,15 +226,17 @@ jobs:
           echo "Review findings: $([ -s ../claude-structured.json ] && jq '.findings | length' ../claude-structured.json 2>/dev/null || echo '?')"
           echo "Review cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' ../claude-output.json) ($(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' ../claude-output.json 2>/dev/null || echo "n/a"))"
 
-      - name: Upload debug log
+      - name: Upload review artifacts
         # v4/v7 (@actions/artifact v2+) intermittently failed here with GHESNotSupportedError -
         # its non-github.com host detection also trips on Gitea. v3 predates that check.
         uses: actions/upload-artifact@v3.2.2
         if: always() && steps.prepare.outcome != 'skipped' && steps.prepare.outputs.skip != 'true'
         continue-on-error: true
         with:
-          name: claude-debug-log
-          path: claude-debug.log
+          name: claude-review-artifacts
+          path: |
+            claude-debug.log
+            claude-output.json
           retention-days: 1
           if-no-files-found: ignore
 
