@@ -22,7 +22,7 @@ on:
         description: 'Reasoning effort level'
         required: false
         type: choice
-        default: 'high'
+        default: 'medium'
         options:
           - low
           - medium
