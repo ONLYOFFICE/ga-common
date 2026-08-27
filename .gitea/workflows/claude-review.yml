@@ -92,9 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$ANTHROPIC_KEYS" | jq '.' > /dev/null 2>&1 || echo "::warning::ANTHROPIC_KEYS is not valid JSON"
-          # Repo name comes verbatim from pr_url's path segment (Resolve inputs), but Gitea
-          # resolves repo paths case-insensitively - match ANTHROPIC_KEYS the same way so a
-          # differently-cased dispatch URL doesn't miss a key that actually exists.
+          # Repo name is case-sensitive from pr_url, but Gitea resolves repos case-insensitively - match ANTHROPIC_KEYS the same way.
           ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_KEYS" | jq -r --arg repo "$REPO_NAME" \
             'to_entries | map(select(.key | ascii_downcase == ($repo | ascii_downcase))) | (.[0].value // empty)' 2>/dev/null || true)
           if [ -z "$ANTHROPIC_API_KEY" ]; then
@@ -121,10 +119,7 @@ jobs:
           git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
           git clone "https://$GITEA_HOST/$ORG_NAME/ga-common" --depth=1 --branch "$REF_NAME" .
           git clone "https://$GITEA_HOST/$ORG_NAME/$REPO_NAME" repo
-          # Fetch by PR number, not by $PR_BRANCH: head.ref is unreliable for fork PRs
-          # (the branch lives in the fork, not this repo) and for PRs whose head branch
-          # was deleted/renamed - pull/<N>/head always exists in the base repo, even after
-          # the PR is merged and the branch is gone.
+          # Fetch by PR number, not $PR_BRANCH: head.ref is unreliable for fork PRs and deleted/renamed branches - pull/<N>/head always exists.
           if ! git -C repo fetch origin "pull/$PR_NUMBER/head"; then
             echo "::error::Could not fetch pull/$PR_NUMBER/head from $ORG_NAME/$REPO_NAME - the PR ref no longer exists on the remote"
             exit 1
@@ -165,78 +160,131 @@ jobs:
             set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "failure" "Failed: $count violation(s)" "Non-ASCII Check"
           fi
 
-      - name: Run review
+      - name: Run review (isolated container)
         if: steps.prepare.outputs.skip != 'true'
-        working-directory: repo
         env:
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
           CLAUDE_MODEL: ${{ inputs.model }}
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
           CLAUDE_EFFORT: ${{ inputs.effort }}
           CLAUDE_MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
         run: |
           set -euo pipefail
-          npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
-          export PATH="$(npm config get prefix)/bin:$PATH"
+          echo "::add-mask::$ANTHROPIC_API_KEY"
 
-          # Our own lock file is deliberately NOT $CONFIG_FILE.lock: the CLI uses that exact
-          # path for its own internal locking (a mkdir/rmdir lockdir, going by the ENOTDIR
-          # errors observed when it collides with a plain file left there), so reusing it here
-          # left a stray plain file that raced the CLI's main process against its own
-          # forked-skill subagent for the same path.
-          CONFIG_FILE="$HOME/.claude.json"
-          (
-            flock -x 200
-            EXISTING=$(cat "$CONFIG_FILE" 2>/dev/null || echo '{}')
-            jq --arg p "$(pwd)" '.projects[$p].hasTrustDialogAccepted = true' <<< "$EXISTING" > "$CONFIG_FILE.tmp"
-            mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-          ) 200>"$HOME/.claude-review-pretrust.lock"
-          date +%s > ../review-start.txt
-          echo "Running review with model: $CLAUDE_MODEL, effort: $CLAUDE_EFFORT (claude-code $(claude --version || echo unknown))"
-          # /code-review is invoked as a slash command inside the prompt, and that ends
-          # the turn as plain text (verified live) - --json-schema's tool-forcing never
-          # kicks in when a skill is invoked, so this step no longer passes it.
-          rc=0
-          # Single attempt, no CLI timeout: --max-budget-usd bounds cost; job timeout-minutes is the backstop.
-          # --debug-file is uploaded as a short-lived artifact by the next step - it's the only way
-          # to tell after the fact whether a slow/hung run was stuck waiting on the API vs. churning
-          # through tool calls.
-          claude -p \
-            --allowedTools "Read,Glob,Grep,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*)" --model "$CLAUDE_MODEL" \
-            --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
-            --debug-file ../claude-debug.log \
-            --output-format json < claude-prompt.txt > ../claude-output.json || rc=$?
-          if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' ../claude-output.json > /dev/null 2>&1; then
-            subtype=$(jq -r '.subtype // "unknown"' ../claude-output.json 2>/dev/null || echo "unparsable")
-            echo "::error::Review failed (exit $rc, subtype: $subtype)"
-            echo "Result excerpt: $(jq -r '.result // empty' ../claude-output.json 2>/dev/null | head -c 300 || true)"
+          # DooD: claude CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY and egress restricted to npm + Anthropic via a Squid proxy - that containment is what lets --allowedTools be dropped entirely below (full tool access).
+          # claude-review/egress-proxy are sibling containers on the HOST daemon, not child processes of this job, so cancelling the job doesn't stop them by itself - clean up on any exit path, signalled or not.
+          cleanup_sandbox() {
+            docker rm -f egress-proxy claude-review > /dev/null 2>&1 || true
+            docker network rm claude-internal > /dev/null 2>&1 || true
+          }
+          trap cleanup_sandbox EXIT INT TERM
+
+          echo "=== 0. defensive cleanup: DooD resources persist on the HOST daemon ==="
+          docker rm -f egress-proxy claude-review > /dev/null 2>&1 || true
+          docker network rm claude-internal > /dev/null 2>&1 || true
+
+          echo "=== 0.5 resolve the host path backing this job's workspace ==="
+          # `docker run -v` resolves host paths via the HOST daemon under DooD, so self-inspect this job container's own Mounts to recover the host-side equivalent of $PWD.
+          mkdir -p claude-output
+          # Pre-create both files before anything below can fail and exit early under `set -e`, so Upload/Post always find real (if empty) files instead of none at all.
+          touch claude-output/claude-output.json claude-output/claude-debug.log
+          HOST_PWD=$(docker inspect "$(hostname)" --format '{{json .Mounts}}' 2>/dev/null | jq -r --arg pwd "$PWD" '
+            [.[] | select(.Destination as $d | $pwd == $d or ($pwd | startswith($d + "/")))]
+            | sort_by(-(.Destination | length)) | .[0]
+            | if . then .Source + ($pwd | ltrimstr(.Destination)) else empty end
+          ')
+          if [ -z "$HOST_PWD" ]; then
+            echo "::error::Could not resolve the host path backing $PWD via docker inspect - cannot bind-mount an output dir into the sandbox"
             exit 1
           fi
-          # Best-effort: extract+validate the trailing ```json block from the free-text
-          # result. Failure here is not fatal - post_review_and_set_status already falls
-          # back gracefully when claude-structured.json is missing/invalid.
-          jq -r '.result' ../claude-output.json | python3 ../.gitea/scripts/extract-json.py > ../claude-structured.json || {
+          HOST_OUTPUT_DIR="$HOST_PWD/claude-output"
+
+          echo "=== 1. isolated network + egress-restricted proxy (npm + Anthropic only) ==="
+          docker network create --internal claude-internal
+          mkdir -p /tmp/squid
+          cat > /tmp/squid/squid.conf << 'EOF'
+          http_port 3128
+          acl allowed_dst dstdomain .npmjs.org api.anthropic.com
+          http_access allow allowed_dst
+          http_access deny all
+          EOF
+          docker create --name egress-proxy --network claude-internal ubuntu/squid:latest
+          # `docker cp` streams content over the API, so it works under DooD regardless of whose filesystem the source is on, unlike `-v`.
+          docker cp /tmp/squid/squid.conf egress-proxy:/etc/squid/squid.conf
+          docker start egress-proxy
+          docker network connect bridge egress-proxy
+          sleep 2
+
+          echo "=== 2. claude container: only ANTHROPIC_API_KEY, no docker.sock, egress-restricted ==="
+          # /output is the ONLY bind mount into the sandbox, a dedicated empty dir (not the job's real workspace) - writes land in ./claude-output immediately, surviving the container being lost.
+          docker run -d --name claude-review --network claude-internal \
+            -v "$HOST_OUTPUT_DIR:/output" \
+            -e ANTHROPIC_API_KEY \
+            -e CLAUDE_CODE_VERSION \
+            -e CLAUDE_MODEL \
+            -e CLAUDE_EFFORT \
+            -e CLAUDE_MAX_BUDGET_USD \
+            -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+            -e HTTP_PROXY=http://egress-proxy:3128 \
+            -e HTTPS_PROXY=http://egress-proxy:3128 \
+            -e http_proxy=http://egress-proxy:3128 \
+            -e https_proxy=http://egress-proxy:3128 \
+            -e NO_PROXY=localhost,127.0.0.1 \
+            -w /workspace \
+            node:20-slim sleep infinity
+
+          docker exec claude-review mkdir -p /workspace
+          docker cp repo/. claude-review:/workspace/
+          # REVIEW.md does `Read ../review/UNCOVERED-REVIEW.md` relative to /workspace, so review/ has to be copied in too, as a sibling, or that Read fails.
+          docker cp review/. claude-review:/review/
+          echo "Files inside container: $(docker exec claude-review sh -c 'find /workspace -type f | wc -l')"
+
+          echo "=== 3. npm install as root (privileged, not exposed to untrusted PR content) ==="
+          docker exec claude-review npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
+          docker exec claude-review sh -c 'echo "claude version: $(claude --version || echo unknown)"'
+          # --dangerously-skip-permissions refuses to run as root, and docker cp leaves files root-owned - hand them to the built-in unprivileged "node" user.
+          docker exec claude-review chown -R node:node /workspace /output
+
+          echo "=== 4. run claude unprivileged, full tool access (sandbox replaces --allowedTools) ==="
+          rc=0
+          # Single attempt, no CLI timeout: --max-budget-usd bounds cost, job timeout-minutes is the backstop, --debug-file is uploaded next step for post-mortem.
+          docker exec --user node -w /workspace claude-review bash -c '
+            set -euo pipefail
+            claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
+              --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions \
+              < claude-prompt.txt > /output/claude-output.json
+          ' || rc=$?
+          # No docker cp needed - /output is bind-mounted from $HOST_OUTPUT_DIR (./claude-output here) so both sides already see the same files.
+          [ -s claude-output/claude-output.json ] || echo '{}' > claude-output/claude-output.json
+
+          # cleanup_sandbox runs automatically here too, via the EXIT trap above.
+
+          if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' claude-output/claude-output.json > /dev/null 2>&1; then
+            subtype=$(jq -r '.subtype // "unknown"' claude-output/claude-output.json 2>/dev/null || echo "unparsable")
+            echo "::error::Review failed (exit $rc, subtype: $subtype)"
+            echo "Result excerpt: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | head -c 300 || true)"
+            exit 1
+          fi
+          # Best-effort: extract+validate the trailing ```json block - failure isn't fatal, post_review_and_set_status already has a fallback.
+          jq -r '.result' claude-output/claude-output.json | python3 .gitea/scripts/extract-json.py > claude-structured.json || {
             echo "::warning::Could not extract a valid review JSON from the model's response — posting fallback"
-            # claude-output.json never leaves this container, so this tail is the only
-            # trace of what the model actually returned once the job finishes.
-            echo "Result tail: $(jq -r '.result // empty' ../claude-output.json 2>/dev/null | tail -c 500 || true)"
+            echo "Result tail: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | tail -c 500 || true)"
           }
-          echo "Review stats: $(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' ../claude-output.json)"
-          echo "Review findings: $([ -s ../claude-structured.json ] && jq '.findings | length' ../claude-structured.json 2>/dev/null || echo '?')"
-          echo "Review cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' ../claude-output.json) ($(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' ../claude-output.json 2>/dev/null || echo "n/a"))"
+          echo "Review stats: $(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' claude-output/claude-output.json)"
+          echo "Review findings: $([ -s claude-structured.json ] && jq '.findings | length' claude-structured.json 2>/dev/null || echo '?')"
+          echo "Review cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' claude-output/claude-output.json) ($(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' claude-output/claude-output.json 2>/dev/null || echo "n/a"))"
 
       - name: Upload review artifacts
-        # v4/v7 (@actions/artifact v2+) intermittently failed here with GHESNotSupportedError -
-        # its non-github.com host detection also trips on Gitea. v3 predates that check.
+        # v4/v7 (@actions/artifact v2+) intermittently failed here with GHESNotSupportedError - v3 predates that non-github.com host check.
         uses: actions/upload-artifact@v3.2.2
         if: always() && steps.prepare.outcome != 'skipped' && steps.prepare.outputs.skip != 'true'
         continue-on-error: true
         with:
           name: claude-review-artifacts
           path: |
-            claude-debug.log
-            claude-output.json
+            claude-output/claude-debug.log
+            claude-output/claude-output.json
           retention-days: 1
           if-no-files-found: ignore
 
