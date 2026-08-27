@@ -49,6 +49,8 @@ prepare_review_context() {
   if [ "$DIFF_LINES" -gt 6000 ] || [ "$DIFF_BYTES" -gt 1000000 ]; then
     echo "::warning::Large diff — switching to summary/impact review"
     printf '# Changed files (%s lines total) — diff too large for line-level review\n\n' "$DIFF_LINES" > repo/pr-files.md
+    local ALL_FILES
+    ALL_FILES=$(mktemp)
     ( set +o pipefail
       awk '/^diff --git / { if (cur!="") print add+del"\t"add"\t"del"\t"cur
                             cur=$0; sub(/.* b\//,"",cur); add=0; del=0; next }
@@ -56,9 +58,25 @@ prepare_review_context() {
            /^\+/ { add++; next }
            /^-/  { del++; next }
            END   { if (cur!="") print add+del"\t"add"\t"del"\t"cur }
-          ' repo/pr.diff | sort -rn | head -300 \
-        | awk -F'\t' '{printf "- +%d / -%d  `%s`\n",$2,$3,$4}' >> repo/pr-files.md )
-    echo "Summary: $(grep -c '^- ' repo/pr-files.md || true) files"
+          ' repo/pr.diff | sort -rn ) > "$ALL_FILES"
+    # Production files are never capped/dropped by churn - only test/generated
+    # files are. Sorting everything by churn and hard-capping at N (the old
+    # behavior) let a bulk test-file rewrite push real production files off
+    # the list entirely, which then drove the model into denied raw-Bash
+    # workarounds (grep/comm/sort against pr.diff) to reconstruct it itself.
+    local TEST_AWK='$4 !~ /(^|\/)([Tt]ests?|__tests__|[Ss]pecs?)(\/|$)/ && $4 !~ /(^|\/)[Tt]ests?\.[^\/]+$/ && $4 !~ /[a-z]Tests?\.[^\/]+$/ && $4 !~ /\.[Tt]ests?\.[^\/]+$/ && $4 !~ /\.[Ss]pec\.[^\/]+$/'
+    local PROD_LIST TEST_LIST PROD_N TEST_N
+    PROD_LIST=$(awk -F'\t' "$TEST_AWK" "$ALL_FILES")
+    TEST_LIST=$(awk -F'\t' "!($TEST_AWK)" "$ALL_FILES")
+    PROD_N=$(grep -c . <<< "$PROD_LIST" || true)
+    TEST_N=$(grep -c . <<< "$TEST_LIST" || true)
+    { printf '## Production files (%s)\n' "$PROD_N"
+      head -500 <<< "$PROD_LIST" | awk -F'\t' '{printf "- +%d / -%d  `%s`\n",$2,$3,$4}'
+      printf '\n## Test/generated files (%s, churn-sorted, capped at 200)\n' "$TEST_N"
+      head -200 <<< "$TEST_LIST" | awk -F'\t' '{printf "- +%d / -%d  `%s`\n",$2,$3,$4}'
+    } >> repo/pr-files.md
+    rm -f "$ALL_FILES"
+    echo "Summary: ${PROD_N} production + ${TEST_N} test/generated files (${DIFF_FILES} total)"
   elif [ "$DIFF_LINES" -gt 2000 ]; then
     echo "::warning::Sizable diff (${DIFF_LINES} lines) — review may be slower"
   fi
