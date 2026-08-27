@@ -20,7 +20,7 @@ Usage:
 Environment:
   BUGZILLA_API_KEY        required for REST fetch
   BUGZILLA_HOST           required: Bugzilla host name (provided via secret)
-  BUGZILLA_MAX_IDS        default: 5  (cap on referenced bugs per PR)
+  BUGZILLA_MAX_IDS        default: 15 (cap on referenced bugs per PR)
   BUGZILLA_COMMENT_MAXLEN default: 2000 (per-comment text cap)
 """
 import json
@@ -33,28 +33,35 @@ import urllib.request
 
 HOST = os.environ.get("BUGZILLA_HOST", "")
 API_KEY = os.environ.get("BUGZILLA_API_KEY", "")
-MAX_IDS = int(os.environ.get("BUGZILLA_MAX_IDS", "5"))
+# fetch_block() calls are sequential (20s timeout each, see fetch()) - a much
+# higher cap risks eating into the job's overall timeout on a slow Bugzilla.
+MAX_IDS = int(os.environ.get("BUGZILLA_MAX_IDS", "15"))
 MAXLEN = int(os.environ.get("BUGZILLA_COMMENT_MAXLEN", "2000"))
 
 NO_BUG = "No bug reference found in PR title or description."
 
-# Match "bug" next to a number in any order. The digits are captured:
+# Match "bug" next to a number, plus any comma/semicolon-separated numbers that
+# immediately follow it (this org's commit convention is "fix Bug 1, 2, 3, ..."
+# for multi-bug commits - a single "bug" keyword covers the whole list). Digits
+# are captured as one blob and split out below.
 #   "fix Bug 81502", "Bug fix 81502", "Bug 81502", "Bug #81502",
-#   "bugfix 81502", "Bug81502".
+#   "bugfix 81502", "Bug81502", "fix bug 81502, 81503, 81504".
 _BUG_RE = re.compile(
-    r"(?:bug[\s_#:-]*(?:fix)?|fix[\s_#:-]*bug)[\s_#:-]*([0-9]{3,7})",
+    r"(?:bug[\s_#:-]*(?:fix)?|fix[\s_#:-]*bug)[\s_#:-]*"
+    r"([0-9]{3,7}(?:\s*[,;]\s*[0-9]{3,7})*)",
     re.IGNORECASE,
 )
+_ID_RE = re.compile(r"[0-9]{3,7}")
 
 
 def extract_bug_ids(text):
     """Return unique referenced bug IDs, in order, capped at MAX_IDS."""
     ids, seen = [], set()
     for m in _BUG_RE.finditer(text or ""):
-        bid = m.group(1)
-        if bid not in seen:
-            seen.add(bid)
-            ids.append(bid)
+        for bid in _ID_RE.findall(m.group(1)):
+            if bid not in seen:
+                seen.add(bid)
+                ids.append(bid)
     return ids[:MAX_IDS]
 
 

@@ -172,15 +172,22 @@ prepare_review_context() {
   PR_BODY=$(   jq -r '.body // empty' <<< "$PR_INFO" | tr '\n\r`$' '    ' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-4000)
   read -r PR_ADDITIONS PR_DELETIONS < <(jq -r '[.additions // 0, .deletions // 0] | @tsv' <<< "$PR_INFO" || echo "0	0")
   PR_ADDITIONS=${PR_ADDITIONS:-0}; PR_DELETIONS=${PR_DELETIONS:-0}
-  COMMIT_MESSAGES=$(gitea_api "$REPO_PATH/pulls/$PR_NUMBER/commits" \
-    | jq -r '.[].commit.message | split("\n")[0]' | head -20 | cut -c1-120 \
+  local COMMIT_SUBJECTS_RAW
+  COMMIT_SUBJECTS_RAW=$(gitea_api "$REPO_PATH/pulls/$PR_NUMBER/commits" \
+    | jq -r '.[].commit.message | split("\n")[0]' | head -20)
+  # cut -c1-120 below is display-only: this org's multi-bug commits ("fix Bug 1,
+  # 2, 3, ...") can run well past 120 chars, so Bugzilla extraction below uses
+  # the untruncated $COMMIT_SUBJECTS_RAW instead, not this sanitized copy.
+  COMMIT_MESSAGES=$(cut -c1-120 <<< "$COMMIT_SUBJECTS_RAW" \
     | sed 's/[`$]/./g; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/^/  - /' | tr '\r' ' ' || echo "  (none)")
   echo "PR: #$PR_NUMBER '$PR_TITLE_RAW' by $PR_AUTHOR ($PR_BRANCH → $BASE_BRANCH) [+$PR_ADDITIONS/-$PR_DELETIONS]"
 
   # --- Bugzilla: keep newlines for regex, strip backticks/$ like other fields ---
   local BUGZILLA_CONTEXT PR_BODY_RAW
   PR_BODY_RAW=$(jq -r '.body // empty' <<< "$PR_INFO" | tr '\r`$' '   ')
-  BUGZILLA_CONTEXT=$(printf '%s\n%s' "$PR_TITLE_RAW" "$PR_BODY_RAW" \
+  # Bug refs on this org's PRs often live only in commit subjects ("fix Bug 1,
+  # 2, 3"), not the PR title/body - scan all three.
+  BUGZILLA_CONTEXT=$(printf '%s\n%s\n%s' "$PR_TITLE_RAW" "$PR_BODY_RAW" "$COMMIT_SUBJECTS_RAW" \
     | python3 .gitea/scripts/bugzilla-api.py --from-text || true)
   grep -q '^<bug ' <<< "$BUGZILLA_CONTEXT" && echo "Bugzilla: referenced bug(s) attached" || true
 
