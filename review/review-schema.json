@@ -12,7 +12,7 @@
         "why": { "type": "string", "description": "One sentence: purpose of the PR. Prefix with '(inferred) ' if not stated by the PR description." },
         "scope": { "type": "string", "description": "Comma-separated file/component paths, up to 8 entries; beyond that collapse to top-level directory/component plus a file count." },
         "details": { "type": "string", "description": "At most 2 short sentences on notable decisions or breaking changes only, each a distinct fact. Omit this field entirely if there is nothing to add." },
-        "coverage_note": { "type": "string", "description": "Large-diff summary-mode reviews only: which files were not line-reviewed. Omit otherwise." }
+        "coverage_note": { "type": "string", "description": "Large-diff summary-mode reviews only: how many of the changed files were actually read vs. the total, and which highest-risk ones were skipped - never a blanket 'all files reviewed' claim. Omit otherwise." }
       }
     },
     "bugs": {

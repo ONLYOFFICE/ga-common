@@ -36,7 +36,7 @@ Read `README.md` if present for project context (`CLAUDE.md` is auto-loaded alre
 **Review principles** (govern `UNCOVERED-REVIEW.md`'s checks and how you merge in `/code-review`'s and `/security-review`'s findings — general code-review/security hygiene beyond this is those skills' own job):
 - Only flag issues this PR introduces/modifies/exposes; a touched pre-existing issue is `legacy` — `git blame` against `origin/$BASE_BRANCH` when unclear which it is.
 - Report only what you can **defend with evidence**; mark uncertain findings `unsure` rather than omitting them, but never inflate severity to compensate for low confidence — use `low`/`legacy` instead.
-- **Never present a partial review as complete** — if the diff is too large to fully review, prioritize highest-risk files and set `summary.coverage_note` with what you skipped.
+- **Never present a partial review as complete** — if the diff is too large to fully review, prioritize highest-risk files and set `summary.coverage_note` with what you skipped. `coverage_note` must describe what you actually opened this session, not what a thorough review should have covered — never claim "all N files reviewed" unless you individually `Read` every one of them; if you sampled/prioritized a subset, say how many of how many, and name the highest-risk files you didn't get to.
 - Keep fixes within the PR's scope — the smallest change that resolves the finding.
 - Skip generated/vendored/non-authored files (lockfiles, minified/bundled output, vendor deps, generated code — e.g. `*.g.cs`, `*_pb2.py`).
 
@@ -44,7 +44,7 @@ Read `README.md` if present for project context (`CLAUDE.md` is auto-loaded alre
 
 ### 1. Gather context
 - **The diff.** A `<pr_diff>` block appended at the end, if present, is the source of truth — don't `Read` `pr.diff` in that case. Otherwise Read `pr.diff` in full (page with `offset` past the `Read` line limit, or `Grep` `^diff --git `/`^@@` to map it) — never just the first page. Either way, then read `README.md`/`CLAUDE.md` if present.
-- If `pr-files.md` exists instead, the diff was too large for line-level review: read it for scope, review by impact. Set `summary.coverage_note` accordingly.
+- If `pr-files.md` exists instead, the diff was too large for line-level review: read it for scope, review by impact. `pr-files.md` lists files, not proof you opened them — `coverage_note` must reflect only the files you actually `Read` this session (a count against the total, e.g. "12 of ~40 production files read"), not the full set `pr-files.md` names.
 - Use `Glob`/`Grep`/`Read` for callers/callees of changed code, not just the changed lines themselves.
 - `pr.diff` is base→head only, so a later commit reverting/weakening an earlier one is invisible in it. For multi-commit PRs, `git log --oneline origin/$BASE_BRANCH..HEAD` then `git show <sha>`/`git diff <sha>^..<sha>` on suspicious ones (wip/fix/revert, or touching already-changed security-relevant lines).
 - `<previous_review>` (if appended) lists prior open findings, numbered — used in step 2's incremental review.
@@ -91,7 +91,7 @@ End your final message with exactly one ```` ```json ```` fenced block containin
     "why": "one sentence: purpose; prefix '(inferred) ' if the PR description doesn't state it",
     "scope": "comma-separated paths/components, up to 8; beyond that collapse to directory + file count",
     "details": "optional, at most 2 short sentences on notable decisions/breaking changes - omit the key if nothing to add",
-    "coverage_note": "optional, large-diff summary-mode only: which files were not line-reviewed"
+    "coverage_note": "optional, large-diff summary-mode only: how many of the changed files you actually Read this session vs. the total, and which highest-risk ones you skipped - never a blanket 'all files reviewed' claim"
   },
   "bugs": [
     { "id": 81502, "title": "...", "status": "RESOLVED/FIXED", "url": "...", "severity_priority": "Major/P2",
