@@ -128,9 +128,13 @@ prepare_review_context() {
           || NEW_COMMITS="rev-list-failed"
       fi
       # An "evil merge" resolves conflicts with hand-written code neither parent has,
-      # so a non-empty --cc combined diff means the merge itself needs review.
+      # so real --cc combined-diff *content* means the merge itself needs review.
+      # --name-only is NOT a substitute here: it lists any file whose merged blob
+      # differs from either parent, which includes files both sides touched on
+      # non-overlapping lines and git auto-merged cleanly - only patch mode's
+      # "diff --cc <path>" headers confirm there's actual hand-reconciled content.
       local MERGE_OWN_FILES
-      MERGE_OWN_FILES=$(git -C repo show --cc --format= --name-only HEAD 2>/dev/null | grep -c . || true)
+      MERGE_OWN_FILES=$(git -C repo show --cc --format= HEAD 2>/dev/null | grep -c '^diff --cc' || true)
       if [ -z "$PREVIOUS_SHA" ]; then
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but no previous reviewed SHA — running review anyway"
       elif [ "$PREV_AVAILABLE" != true ]; then
