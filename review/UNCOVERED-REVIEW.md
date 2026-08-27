@@ -3,7 +3,7 @@
      /security-review. Kept separate purely for our own readability. -->
 
 #### 2.1 PR title & commit messages (category `style`, severity `low`)
-Commit subject: capitalized, no trailing period, imperative mood, non-empty (`wip`/`.` fail). Conventional-commit prefixes (`feat:`, `fix:`, ...) are never a violation either way; merge commits are exempt entirely. Omit `locations` entirely (not tied to a file).
+Commit subject: capitalized, no trailing period, imperative mood, non-empty (`wip`/`.` fail). Conventional-commit prefixes (`feat:`, `fix:`, ...) are never a violation either way; merge commits are exempt entirely. Bug-fix subjects starting with any casing of `fix bug`/`bug` followed by a number (`fix Bug NNNN`, `fix bug NNNN`, `Bug NNNN`, ...) are this org's convention — never flag casing on these, even lowercase, though it looks inconsistent with the general capitalized-imperative rule. Omit `locations` entirely (not tied to a file).
 
 #### 2.2 Code comment language (category `style`, severity `medium`)
 New/changed code comments must be English (inline/block only — not UI strings, i18n, identifiers, test data, markdown, generated files, string literals). The automated check already catches non-ASCII; you only need to report ASCII non-English and transliterations (e.g. a phonetically-spelled non-English word).
