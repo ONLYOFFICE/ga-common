@@ -20,7 +20,7 @@ Usage:
 Environment:
   BUGZILLA_API_KEY        required for REST fetch
   BUGZILLA_HOST           required: Bugzilla host name (provided via secret)
-  BUGZILLA_MAX_IDS        default: 15 (cap on referenced bugs per PR)
+  BUGZILLA_MAX_IDS        default: 30 (cap on referenced bugs per PR)
   BUGZILLA_COMMENT_MAXLEN default: 2000 (per-comment text cap)
 """
 import json
@@ -33,9 +33,11 @@ import urllib.request
 
 HOST = os.environ.get("BUGZILLA_HOST", "")
 API_KEY = os.environ.get("BUGZILLA_API_KEY", "")
-# fetch_block() calls are sequential (20s timeout each, see fetch()) - a much
-# higher cap risks eating into the job's overall timeout on a slow Bugzilla.
-MAX_IDS = int(os.environ.get("BUGZILLA_MAX_IDS", "15"))
+# fetch_block() calls are sequential (20s timeout each, see fetch()), so a
+# PR referencing many bugs against a slow/unresponsive Bugzilla can eat into
+# the job's overall timeout during "Prepare review context", before the
+# review itself even starts - hence a cap, even a generous one.
+MAX_IDS = int(os.environ.get("BUGZILLA_MAX_IDS", "30"))
 MAXLEN = int(os.environ.get("BUGZILLA_COMMENT_MAXLEN", "2000"))
 
 NO_BUG = "No bug reference found in PR title or description."
