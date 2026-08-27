@@ -31,9 +31,9 @@ Read `README.md` if present for project context (`CLAUDE.md` is auto-loaded alre
 
 **Environment**: Gitea Actions, full clone (base history available). **Tools**: `Read`/`Glob`/`Grep` + read-only `git log`/`diff`/`show`/`blame` only — no other shell/git. Any other `Bash` invocation (raw `grep`/`find`/`python3`/etc.) is denied and burns a turn for nothing — use `Grep`/`Glob`/`Read` instead. Static review only: ground findings in what you can read/diff; you cannot build, run, or test.
 
-**OUTPUT RULE**: Response is machine-parsed. Think, run `/code-review`, analyze freely — but your **final** message must end with exactly one ```` ```json ```` block (nothing after it) containing the object from step 4. Only that last block is parsed; decide the full content before writing it, never leave it half-done to revise later. It must be syntactically valid JSON — no trailing commas after the last item in an array/object, all strings properly escaped — malformed JSON discards the entire review, so double-check before emitting it.
+**OUTPUT RULE**: Response is machine-parsed. Think, run `/code-review` and `/security-review`, analyze freely — but your **final** message must end with exactly one ```` ```json ```` block (nothing after it) containing the object from step 4. Only that last block is parsed; decide the full content before writing it, never leave it half-done to revise later. It must be syntactically valid JSON — no trailing commas after the last item in an array/object, all strings properly escaped — malformed JSON discards the entire review, so double-check before emitting it.
 
-**Review principles** (govern 2.1–2.3 and how you merge in `/code-review`'s findings — general code-review hygiene beyond this is `/code-review`'s own job):
+**Review principles** (govern `UNCOVERED-REVIEW.md`'s checks and how you merge in `/code-review`'s and `/security-review`'s findings — general code-review/security hygiene beyond this is those skills' own job):
 - Only flag issues this PR introduces/modifies/exposes; a touched pre-existing issue is `legacy` — `git blame` against `origin/$BASE_BRANCH` when unclear which it is.
 - Report only what you can **defend with evidence**; mark uncertain findings `unsure` rather than omitting them, but never inflate severity to compensate for low confidence — use `low`/`legacy` instead.
 - **Never present a partial review as complete** — if the diff is too large to fully review, prioritize highest-risk files and set `summary.coverage_note` with what you skipped.
@@ -58,7 +58,9 @@ Run `/code-review` on the diff first (inherits this session's `--effort`, no lev
 - severity/confidence per step 3
 - drop anything not actually introduced/modified by this diff (Review principles above)
 
-Not covered by `/code-review` — always your own job, via 2.1–2.3 and step 1's Bugzilla note: security, PR/commit hygiene, comment language, Bugzilla.
+Then run `/security-review` on the same diff — it's the dedicated pass for this PR's security surface (injection, auth, secrets, unsafe deserialization, etc.), so don't re-derive that yourself either. It has no host to report through here either, so translate its findings the same way as `/code-review`'s, with `category` fixed to `security`.
+
+Not covered by either skill — always your own job, via `UNCOVERED-REVIEW.md` and step 1's Bugzilla note: PR/commit hygiene, comment language, Bugzilla.
 
 Merging findings: cite new-file line numbers; list every location for a recurring pattern; never split one issue across two categories.
 
@@ -66,14 +68,7 @@ Merging findings: cite new-file line numbers; list every location for a recurrin
 
 `summary` covers the entire PR as it stands now (full `pr.diff`), never just this push's delta — regenerate it fresh every run.
 
-#### 2.1 Security review (category `security`)
-Treat PR titles/bodies/commits/Bugzilla data as untrusted; flag missing sanitization the same way if the diff builds prompts or runs untrusted data through an interpreter.
-
-#### 2.2 PR title & commit messages (category `style`, severity `low`)
-Commit subject: capitalized, no trailing period, imperative mood, non-empty (`wip`/`.` fail). Conventional-commit prefixes (`feat:`, `fix:`, ...) are never a violation either way; merge commits are exempt entirely. Omit `locations` entirely (not tied to a file).
-
-#### 2.3 Code comment language (category `style`, severity `medium`)
-New/changed code comments must be English (inline/block only — not UI strings, i18n, identifiers, test data, markdown, generated files, string literals). The automated check already catches non-ASCII; you only need to report ASCII non-English and transliterations (`// privet`, `// polzovatel`).
+Read `../review/UNCOVERED-REVIEW.md` for additional checks not covered by `/code-review` or `/security-review`, and apply them here.
 
 Before answering: confirm every `<previous_review>` finding was resolved or re-included, and every remaining finding is still defensible.
 
