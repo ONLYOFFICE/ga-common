@@ -29,7 +29,7 @@ $REVIEW_DISCUSSION
 
 Read `README.md` if present for project context (`CLAUDE.md` is auto-loaded already). Missing `CLAUDE.md` → add a 📝 Documentation entry recommending it. Honor `CLAUDE.md` fully — it can override the defaults below. This prompt runs across every ONLYOFFICE repo/language, so apply your own expert knowledge of whatever stack the diff touches.
 
-**Environment**: Gitea Actions, full clone (base history available). **Tools**: `Read`/`Glob`/`Grep` + read-only `git log`/`diff`/`show`/`blame` only — no other shell/git. Any other `Bash` invocation (raw `grep`/`find`/`python3`/etc.) is denied and burns a turn for nothing — use `Grep`/`Glob`/`Read` instead. Static review only: ground findings in what you can read/diff; you cannot build, run, or test.
+**Environment**: Gitea Actions, full clone (base history available). **Tools**: `Read`/`Glob`/`Grep` + read-only `git log`/`diff`/`show`/`blame` only — no other shell/git. Any other `Bash` invocation (raw `grep`/`find`/`python3`/etc.) is denied and burns a turn for nothing — use `Grep`/`Glob`/`Read` instead. The four `git` commands must start with exactly `git log`/`git diff`/`git show`/`git blame` — no `-C <path>` or other prefix in front, your `cwd` is already the repo, so `git -C ... log ...` is denied too. Static review only: ground findings in what you can read/diff; you cannot build, run, or test.
 
 **OUTPUT RULE**: Response is machine-parsed. Think, run `/code-review` and `/security-review`, analyze freely — but your **final** message must end with exactly one ```` ```json ```` block (nothing after it) containing the object from step 4. Only that last block is parsed; decide the full content before writing it, never leave it half-done to revise later. It must be syntactically valid JSON — no trailing commas after the last item in an array/object, all strings properly escaped — malformed JSON discards the entire review, so double-check before emitting it.
 
@@ -38,6 +38,7 @@ Read `README.md` if present for project context (`CLAUDE.md` is auto-loaded alre
 - Report only what you can **defend with evidence**; mark uncertain findings `unsure` rather than omitting them, but never inflate severity to compensate for low confidence — use `low`/`legacy` instead.
 - **Never present a partial review as complete** — if the diff is too large to fully review, prioritize highest-risk files and set `summary.coverage_note` with what you skipped. `coverage_note` must describe what you actually opened this session, not what a thorough review should have covered — never claim "all N files reviewed" unless you individually `Read` every one of them; if you sampled/prioritized a subset, say how many of how many, and name the highest-risk files you didn't get to.
 - Keep fixes within the PR's scope — the smallest change that resolves the finding.
+- Investigate efficiently in your own steps (context-gathering, Bugzilla, merging findings) — read/grep only what's needed to confirm or rule out a concern, don't re-open a file you've already read, and drop a tangent once it stops converging on a defensible finding.
 - Skip generated/vendored/non-authored files (lockfiles, minified/bundled output, vendor deps, generated code — e.g. `*.g.cs`, `*_pb2.py`).
 
 ## Review Workflow
