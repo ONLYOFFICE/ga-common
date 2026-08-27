@@ -37,7 +37,7 @@ This is the most involved system in the repo. Flow:
 |---|---|---|
 | ≤ 2000 / ≤ 1 MB | Normal | Full `pr.diff` |
 | 2001–6000 / ≤ 1 MB | Sizable (warning) | Full `pr.diff` with coverage note |
-| > 6000 or > 1 MB | Summary/impact (`pr-files.md`) | Nothing (model reads `pr-files.md` and greps by impact) |
+| > 6000 or > 1 MB | Summary/impact (`pr-files.md`) | Nothing (model reads `pr-files.md` for scope, then `Read`s every changed production file in full — sampling/grep-by-impact is reserved for bulk test/generated files or a production-file count too large to fully read) |
 
 Every push gets a full review of the complete PR diff (there is no delta-diff mode). On re-review, `<previous_review>` is a numbered list of the previously-open findings only (from `repo/previous-state.json`) — not the full prior rendered comment — so prior findings are re-checked and moved to `resolved` when fixed.
 
