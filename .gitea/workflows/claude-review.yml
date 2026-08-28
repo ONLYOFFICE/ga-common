@@ -159,9 +159,7 @@ jobs:
         run: |
           set -euo pipefail
           source .gitea/scripts/gitea-api.sh
-          # Author-filtered like the review comment's own lookup: the marker is public, so
-          # without this a planted comment could be PATCHed (or DELETEd) by the bot below.
-          NON_ASCII_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r --arg bot "$(_bot_login)" '[.[] | select($bot == "" or ((.user.login // "") == $bot)) | select(.body | contains("<!-- Non-ASCII-Check -->"))] | last | .id // empty')
+          NON_ASCII_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Non-ASCII-Check -->"))] | last | .id // empty')
           if python3 .gitea/scripts/check-english-comments.py repo/pr.diff > /tmp/english-check.md; then
             echo "Non-ASCII check passed"
             [ -n "$NON_ASCII_COMMENT_ID" ] && gitea_api_json "$ORG_NAME/$REPO_NAME/issues/comments/$NON_ASCII_COMMENT_ID" -X DELETE > /dev/null || true

@@ -164,26 +164,16 @@ prepare_review_context() {
   # --- previous review --- (two jq calls: @tsv would escape the multi-line body)
   local ALL_COMMENTS PREVIOUS_REVIEW PREVIOUS_REVIEW_ANY REVIEW_COMMENT_ID
   ALL_COMMENTS=$(fetch_all_comments "$REPO_PATH/issues/$PR_NUMBER/comments")
-  # Author filter on top of the marker match: the markers are public, so without it anyone with
-  # PR-comment access could plant a comment and steer $PREVIOUS_SHA and the open/fixed state.
-  # An empty $BOT_LOGIN deliberately disables the filter, so an API hiccup degrades to
-  # marker-only matching instead of discarding a real previous review.
-  local BOT_LOGIN
-  BOT_LOGIN=$(_bot_login)
-  [ -n "$BOT_LOGIN" ] && echo "Tracked-comment author filter: $BOT_LOGIN" \
-    || echo "::warning::Could not resolve the bot's own login — matching the tracked comment by marker only"
-  # shellcheck disable=SC2016  # $bot is a jq variable (--arg below), not a shell one
-  local _mine='.[] | select($bot == "" or ((.user.login // "") == $bot))'
-  local _any="[$_mine | select(.body | contains(\"<!-- Claude-Review:\"))] | last"
+  local _any='[.[] | select(.body | contains("<!-- Claude-Review:"))] | last'
   # Keyed on "has a decodable state blob", not on APPROVE/BLOCKED text or the absence of "Review
   # error" - a fallback (post_review_and_set_status's missing/invalid-output path) now re-embeds the
   # last successful round's state blob unchanged, specifically so a failed round doesn't strand the
   # next genuine review with no <previous_review> at all (confirmed live: it used to, silently
   # dropping every still-open finding - not resolved, just gone, no warning).
-  local _done="[$_mine | select(.body | contains(\"<!-- Claude-Review:\") and contains(\"<!-- claude-review-state:\"))] | last"
-  REVIEW_COMMENT_ID=$(jq -r --arg bot "$BOT_LOGIN" "${_any}  | .id   // empty" <<< "$ALL_COMMENTS")
-  PREVIOUS_REVIEW_ANY=$(jq -r --arg bot "$BOT_LOGIN" "${_any}  | .body // empty" <<< "$ALL_COMMENTS")
-  PREVIOUS_REVIEW=$(     jq -r --arg bot "$BOT_LOGIN" "${_done} | .body // empty" <<< "$ALL_COMMENTS")
+  local _done='[.[] | select(.body | contains("<!-- Claude-Review:") and contains("<!-- claude-review-state:"))] | last'
+  REVIEW_COMMENT_ID=$(jq -r "${_any}  | .id   // empty" <<< "$ALL_COMMENTS")
+  PREVIOUS_REVIEW_ANY=$(jq -r "${_any}  | .body // empty" <<< "$ALL_COMMENTS")
+  PREVIOUS_REVIEW=$(     jq -r "${_done} | .body // empty" <<< "$ALL_COMMENTS")
 
   # Cosmetic only, independent of the strict _done gate below: the last genuine review gets
   # quoted under the working spinner so the PR never goes from "has content" to blank while
@@ -476,10 +466,9 @@ post_review_and_set_status() {
   # resolve comment id (written by prepare; fallback to API lookup)
   local REVIEW_COMMENT_ID
   REVIEW_COMMENT_ID=$(cat repo/review-comment-id 2>/dev/null || true)
-  # Same author filter as prepare's selectors - never PATCH a comment this pipeline didn't write.
   [ -z "$REVIEW_COMMENT_ID" ] && \
     REVIEW_COMMENT_ID=$(fetch_all_comments "$REPO_PATH/issues/$PR_NUMBER/comments" \
-      | jq -r --arg bot "$(_bot_login)" '[.[] | select($bot == "" or ((.user.login // "") == $bot)) | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
+      | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
 
   local DURATION=""
   if [ -r review-start.txt ]; then

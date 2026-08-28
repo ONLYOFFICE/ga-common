@@ -21,19 +21,6 @@ gitea_api_json() { _gitea_raw 0 "$1" -H "Content-Type: application/json" "${@:2}
 
 _run_url() { echo "https://$GITEA_HOST/${WORKFLOW_REPO:-$ORG_NAME/ga-common}/actions/runs/$GITHUB_RUN_ID"; }
 
-# Login behind $GITEA_TOKEN - the author of every comment this pipeline writes, so callers can
-# match the tracked comment by author instead of by public marker text alone. Prints nothing on
-# failure, and callers read empty as "skip the filter", so an API hiccup degrades to marker-only
-# matching. Memoized per shell; $(_bot_login) re-resolves in its subshell, which is cheap enough.
-_bot_login() {
-  if [ -z "${_BOT_LOGIN_CACHED:-}" ]; then
-    _BOT_LOGIN_CACHED=$(curl -s --retry 2 -H "Authorization: token $GITEA_TOKEN" \
-      "https://$GITEA_HOST/api/v1/user" 2>/dev/null | jq -r '.login // empty' 2>/dev/null || true)
-    _BOT_LOGIN_CACHED="${_BOT_LOGIN_CACHED:-none}"
-  fi
-  [ "$_BOT_LOGIN_CACHED" = "none" ] || echo "$_BOT_LOGIN_CACHED"
-}
-
 fetch_all_comments() {
   local endpoint="$1" all="[]" page=1
   while true; do
