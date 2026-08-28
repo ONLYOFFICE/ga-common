@@ -331,17 +331,16 @@ render_claude_review() {
     | [$r[] | select(.status=="completed")
       | select((.path//"" | split("@")[0] | (. == $wf or endswith("/"+$wf))))
       | select((.created_at//.started_at//.updated_at//"") >= $t)
-      | {id, display_title, html_url, conclusion}]
+      | {id, display_title, html_url}]
   ' <<< "$RUNS_RAW" 2>/dev/null || echo '[]')"
   local RUN_COUNT; RUN_COUNT="$(jq 'length' <<< "$RUNS_JSON" 2>/dev/null || echo 0)"
 
-  local -a PIDS=() TITLES=() URLS=() TMPS=() CONCLUSIONS=()
-  local RUN RUN_ID TITLE RUN_URL TMP CONCLUSION
+  local -a PIDS=() TITLES=() URLS=() TMPS=()
+  local RUN RUN_ID TITLE RUN_URL TMP
   while IFS= read -r RUN; do
     RUN_ID="$(jq -r '.id' <<< "$RUN")"
     TITLE="$(jq -r '.display_title' <<< "$RUN")"
     RUN_URL="$(jq -r '.html_url' <<< "$RUN")"
-    CONCLUSION="$(jq -r '.conclusion // ""' <<< "$RUN")"
     TMP="$(mktemp)"
     (
       local JOB_ID
@@ -349,7 +348,7 @@ render_claude_review() {
       [[ -z "$JOB_ID" ]] && exit 0
       fetch "$AUTH" "$API_BASE/actions/jobs/$JOB_ID/logs" 2>/dev/null
     ) > "$TMP" &
-    PIDS+=($!); TITLES+=("$TITLE"); URLS+=("$RUN_URL"); TMPS+=("$TMP"); CONCLUSIONS+=("$CONCLUSION")
+    PIDS+=($!); TITLES+=("$TITLE"); URLS+=("$RUN_URL"); TMPS+=("$TMP")
   done < <(jq -c '.[]' <<< "$RUNS_JSON")
 
   # Runs are newest-first (fetch()/pagination assumes descending order), so the
@@ -369,7 +368,7 @@ render_claude_review() {
   for i in "${!PIDS[@]}"; do
     wait "${PIDS[$i]}" || true
     LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
-    TITLE="${TITLES[$i]}"; RUN_URL="${URLS[$i]}"; CONCLUSION="${CONCLUSIONS[$i]}"
+    TITLE="${TITLES[$i]}"; RUN_URL="${URLS[$i]}"
     # Title is the run-name, i.e. the raw pr_url ("https://HOST/ORG/REPO/pulls/N") since
     # display_name was dropped - match that first. Runs dispatched before that change (or
     # still in this window) may carry the legacy "ORG/REPO!N" / "ORG/REPO#N" label instead -
@@ -395,18 +394,9 @@ render_claude_review() {
     fi
 
     VERDICT="$(grep -oP 'Verdict: \K\S+' <<< "$LOG" | head -1 || true)"
-    if [[ -z "$VERDICT" ]]; then
-      # No "Verdict:" line is ambiguous on its own: a legitimate skip (SHA already reviewed, sync
-      # merge, WIP title) never runs Run review/Post review either, but neither does a run that
-      # crashed inside Run review before ever reaching Post review - same empty log signature.
-      # The run's own conclusion tells them apart, so a real crash still counts as an error
-      # instead of silently vanishing from both the PR count and the error list.
-      if [[ "$CONCLUSION" =~ ^(failure|timed_out|startup_failure|action_required)$ ]]; then
-        PR_ERRORS[$KEY]=$((${PR_ERRORS[$KEY]} + 1))
-        [[ -z "${PR_ERR_LINK[$KEY]:-}" ]] && PR_ERR_LINK[$KEY]="$RUN_URL"
-      fi
-      continue
-    fi
+    # No "Verdict:" line at all means the review was legitimately skipped
+    # (SHA already reviewed, base-branch sync merge, WIP title) — not an error.
+    [[ -z "$VERDICT" ]] && continue
 
     # Wall-clock duration of this run (from post_review_and_set_status's
     # "Job: ... [Xm Ys]" line), regardless of verdict — every executed run
