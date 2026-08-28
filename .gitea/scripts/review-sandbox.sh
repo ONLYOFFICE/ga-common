@@ -86,6 +86,10 @@ EOF
   docker exec "$SANDBOX_NAME" sh -c 'echo "Running review with model: $CLAUDE_MODEL, effort: $CLAUDE_EFFORT (claude-code $(claude --version || echo unknown))"'
   # --dangerously-skip-permissions refuses to run as root, and docker cp leaves files root-owned - hand them to the built-in unprivileged "node" user.
   docker exec "$SANDBOX_NAME" chown -R node:node /workspace /output
+  # Pre-accept the trust dialog for /workspace as the node user - otherwise the CLI ignores the reviewed repo's own .claude/settings.json permissions.allow/additionalDirectories entries and warns about it (moot for permissions.allow under --dangerously-skip-permissions, but additionalDirectories genuinely affects file-tool scope).
+  echo '{"projects":{"/workspace":{"hasTrustDialogAccepted":true}}}' > /tmp/claude-trust.json
+  docker cp /tmp/claude-trust.json "$SANDBOX_NAME":/home/node/.claude.json
+  docker exec "$SANDBOX_NAME" chown node:node /home/node/.claude.json
 }
 
 # Runs claude -p unprivileged, pulls /output out (docker cp fallback if not bind-mounted), validates the result; returns non-zero (after an ::error::) on failure.
