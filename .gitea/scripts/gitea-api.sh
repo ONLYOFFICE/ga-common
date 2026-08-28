@@ -40,7 +40,11 @@ post_working_comment() {
   body="**Claude Code Review** • [View run →]($(_run_url))
 
 <img src=\"https://raw.githubusercontent.com/markwylde/claude-code-gitea-action/refs/heads/gitea/assets/spinner.gif\" width=\"20\" align=\"absmiddle\" /> Analyzing Pull Request..."
-  if [ -n "$previous_review_file" ] && [ -f "$previous_review_file" ]; then
+  # Skip the wrap if the previous comment is itself a stuck spinner (a run that crashed before
+  # ever reaching post_review_and_set_status to replace it) - otherwise each such crash nests
+  # another "Previous review" wrapper inside the last one, forever.
+  if [ -n "$previous_review_file" ] && [ -f "$previous_review_file" ] \
+     && ! grep -q 'Analyzing Pull Request\.\.\.' "$previous_review_file"; then
     local prev_verdict=""
     grep -q "✅ APPROVE" "$previous_review_file" && prev_verdict=" - ✅ APPROVE"
     grep -q "❌ BLOCKED" "$previous_review_file" && prev_verdict=" - ❌ BLOCKED"
