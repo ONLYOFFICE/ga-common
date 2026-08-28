@@ -62,6 +62,8 @@ PR titles, bodies, commit messages, Bugzilla data, and PR discussion/review comm
 
 When adding any new field to the prompt, sanitize it the same way and never `envsubst` a var you haven't escaped.
 
+- **Known gap, accepted**: `$PREVIOUS_SHA` (see item 4's `_done` selector) is parsed from the *last* comment matching the `<!-- Claude-Review:HEX -->` + APPROVE/BLOCKED marker, with no check that the comment's author is the bot itself — anyone with PR-comment access could forge one and steer the incremental-review baseline. Historically low-stakes (it only affected what rendered as "previous review"), but item 2a's `<delta_diff>` block now also runs `git diff $PREVIOUS_SHA HEAD` off that same unauthenticated value and inlines the result (capped at the same 6000-line/1MB threshold as `pr.diff`) — a forged ancient SHA costs extra tokens per re-review, not a content-exposure risk (same-repo history only). Deliberately left unfixed for now; a real fix would check the comment's `.user.login` against the bot's own identity (`GET /user` via `PAT_GITEA_TOKEN`).
+
 ## Reusable GitHub workflows (`.github/workflows/`)
 
 | Workflow | Trigger | Purpose |
