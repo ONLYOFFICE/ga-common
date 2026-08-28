@@ -6,6 +6,30 @@
 source "$(dirname "${BASH_SOURCE[0]}")/gitea-api.sh"
 
 # ---------------------------------------------------------------------------
+# Peels "Previous review" wrappers off the tracked comment's current body, leaving only the
+# innermost genuine rendered review (empty if there is none). Both post_working_comment() and
+# post_review_and_set_status()'s fallback re-wrap whatever this yields, so without the peel a
+# run of failures nests one wrapper per round (confirmed live: three levels deep), and the
+# fallback's own "don't wrap an error" guard then discards the last real review entirely on the
+# second consecutive failure. Feeding both a genuine review keeps the display stable instead.
+# ---------------------------------------------------------------------------
+_unwrap_previous_review() {
+  python3 -c 'import re, sys
+text = sys.stdin.buffer.read().decode("utf-8", "replace").strip()
+# render-review.py always opens with "<details>\n<summary>[<verdict>] - Claude Code Review".
+REAL = re.compile(r"^<details>\s*\n<summary>\[")
+INNER = re.compile(r"<details><summary>[^<]*Previous review[^<]*</summary>\s*\n(.*)\n\s*</details>\s*$", re.DOTALL)
+for _ in range(10):
+    if REAL.match(text):
+        break
+    match = INNER.search(text)
+    text = match.group(1).strip() if match else ""
+    if not text:
+        break
+sys.stdout.buffer.write(text.encode("utf-8"))'
+}
+
+# ---------------------------------------------------------------------------
 # True if a newer push has landed on this PR since this run was dispatched for $PR_SHA - a cheap
 # self-check so a stale run bails out instead of racing a superseding run for the same shared
 # tracked comment. concurrency.cancel-in-progress (keyed on pr_url) is supposed to prevent two
@@ -124,13 +148,18 @@ prepare_review_context() {
   PREVIOUS_REVIEW_ANY=$(jq -r "${_any}  | .body // empty" <<< "$ALL_COMMENTS")
   PREVIOUS_REVIEW=$(     jq -r "${_done} | .body // empty" <<< "$ALL_COMMENTS")
 
-  # Cosmetic only, independent of the strict _done gate below: whatever the tracked
-  # comment currently shows - even a stale "Review error" fallback - gets quoted under
-  # the working spinner so the PR never goes from "has content" to blank while this run
-  # is in flight, regardless of whether that content is trustworthy enough to drive the
-  # skip/state logic below.
-  [ -n "$PREVIOUS_REVIEW_ANY" ] && sed -e '/^<!-- Claude-Review:/d' -e '/^<!-- claude-review-state:/d' \
-    <<< "$PREVIOUS_REVIEW_ANY" > repo/previous-claude-output.md
+  # Cosmetic only, independent of the strict _done gate below: the last genuine review gets
+  # quoted under the working spinner so the PR never goes from "has content" to blank while
+  # this run is in flight, regardless of whether that content is trustworthy enough to drive
+  # the skip/state logic. _unwrap_previous_review peels any error/spinner layers first, so
+  # what gets re-wrapped is always a real review and never a wrapper around one.
+  if [ -n "$PREVIOUS_REVIEW_ANY" ]; then
+    sed -e '/^<!-- Claude-Review:/d' -e '/^<!-- claude-review-state:/d' <<< "$PREVIOUS_REVIEW_ANY" \
+      | _unwrap_previous_review > repo/previous-claude-output.md
+    # No genuine review in there (first round, or nothing but error/spinner layers) - drop the
+    # file so neither re-wrap point has anything to quote.
+    [ -s repo/previous-claude-output.md ] || rm -f repo/previous-claude-output.md
+  fi
 
   # _done's own select() already requires both markers - a non-empty PREVIOUS_REVIEW means one was found.
   if [ -n "$PREVIOUS_REVIEW" ]; then
