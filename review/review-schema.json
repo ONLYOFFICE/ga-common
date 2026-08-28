@@ -1,7 +1,7 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "findings", "resolved"],
+  "required": ["summary", "findings"],
   "properties": {
     "summary": {
       "type": "object",
