@@ -101,9 +101,14 @@ run_claude_review() {
   # (confirmed live: a 2-level-deep subagent fork drove one review's cost to $4.70 vs. the usual $0.15-0.30).
   docker exec --user node -w /workspace "$SANDBOX_NAME" bash -c '
     set -euo pipefail
+    # Forces the final answer to validate against review-schema.json - the CLI re-prompts the model
+    # on a mismatch instead of silently accepting whatever text it stopped on (confirmed live: a
+    # session that ended right after a Skill call left .result holding that skills raw output, no
+    # JSON at all - extract-json.py caught it, but only after the fact, with no chance to self-correct).
     claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
       --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions \
       --disallowedTools "Task" \
+      --json-schema "$(cat /review/review-schema.json)" \
       < claude-prompt.txt > /output/claude-output.json
   ' || rc=$?
   # If /output was bind-mounted from $HOST_OUTPUT_DIR, both sides already see the same files - no docker cp needed.
