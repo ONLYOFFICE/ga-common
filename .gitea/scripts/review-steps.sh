@@ -455,14 +455,24 @@ post_review_and_set_status() {
   # Optimistic-concurrency check, on top of is_pr_stale's SHA check above (which two runs
   # dispatched for the identical SHA - a re-run, a duplicate webhook delivery - wouldn't trip):
   # if the tracked comment's updated_at has moved since this run posted its own working
-  # placeholder, something else wrote to it in between - don't clobber whatever that was.
+  # placeholder, something else wrote to it in between.
   if [ -n "$REVIEW_COMMENT_ID" ] && [ -s repo/comment-updated-at.txt ]; then
-    local EXPECTED_UPDATED_AT CURRENT_UPDATED_AT
+    local EXPECTED_UPDATED_AT CURRENT_COMMENT CURRENT_UPDATED_AT
     EXPECTED_UPDATED_AT=$(<repo/comment-updated-at.txt)
-    CURRENT_UPDATED_AT=$(gitea_api "$REPO_PATH/issues/comments/$REVIEW_COMMENT_ID" 2>/dev/null | jq -r '.updated_at // empty')
+    CURRENT_COMMENT=$(gitea_api "$REPO_PATH/issues/comments/$REVIEW_COMMENT_ID" 2>/dev/null)
+    CURRENT_UPDATED_AT=$(jq -r '.updated_at // empty' <<< "$CURRENT_COMMENT")
     if [ -n "$EXPECTED_UPDATED_AT" ] && [ -n "$CURRENT_UPDATED_AT" ] && [ "$CURRENT_UPDATED_AT" != "$EXPECTED_UPDATED_AT" ]; then
-      echo "::warning::Comment #$REVIEW_COMMENT_ID was touched by another run since this one started — discarding this result instead of overwriting it"
-      return 0
+      # Only defer if what's there now is an actual completed result (has a state blob) - if it's
+      # just another run's own still-in-flight "Analyzing..." placeholder, this run's real content
+      # is strictly better than leaving that stuck there forever, so post it instead of both runs
+      # racing to be the one left holding nothing (confirmed live: exactly this left a PR's
+      # comment stuck on a spinner indefinitely, discarding a genuinely completed review for no
+      # benefit - the run that "won" the placeholder slot never came back to finish it).
+      if jq -r '.body // empty' <<< "$CURRENT_COMMENT" | grep -q '<!-- claude-review-state:'; then
+        echo "::warning::Comment #$REVIEW_COMMENT_ID already has a completed result from another run — discarding this one instead of overwriting it"
+        return 0
+      fi
+      echo "::warning::Comment #$REVIEW_COMMENT_ID was touched by another run since this one started, but it's still just a placeholder — posting this result anyway"
     fi
   fi
 
