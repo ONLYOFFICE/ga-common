@@ -59,12 +59,15 @@ $(cat "$previous_review_file")
 </details>"
   fi
   local payload; payload=$(printf '%s\n\n<!-- Claude-Review: -->' "$body" | jq -Rs .)
+  # id + updated_at (tab-separated) - the caller persists updated_at so post_review_and_set_status
+  # can later detect whether anything else touched this comment before it posts the real result.
+  local resp
   if [ -n "$comment_id" ]; then
-    gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "{\"body\": $payload}" > /dev/null
-    echo "$comment_id"
+    resp=$(gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "{\"body\": $payload}")
   else
-    gitea_api_json "$repo/issues/$pr/comments" -X POST -d "{\"body\": $payload}" | jq -r '.id'
+    resp=$(gitea_api_json "$repo/issues/$pr/comments" -X POST -d "{\"body\": $payload}")
   fi
+  jq -r '[.id, .updated_at] | @tsv' <<< "$resp"
 }
 
 upsert_review_comment() {

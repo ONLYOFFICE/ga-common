@@ -110,7 +110,16 @@ run_claude_review() {
       --disallowedTools "Task" \
       --json-schema "$(cat /review/review-schema.json)" \
       < claude-prompt.txt > /output/claude-output.json
-  ' || rc=$?
+  ' &
+  local REVIEW_PID=$!
+  # Backgrounded + waited-on, not a blocking foreground call: POSIX defers a shell's own trap
+  # delivery until the current foreground command exits, so a plain `docker exec` here would sit
+  # through a job cancellation for as long as claude keeps running inside the container (confirmed
+  # live: a cancelled run's "Run review" step kept going for 5-8 more minutes). `wait` returns as
+  # soon as a trapped signal arrives instead, so this can react by stopping the container directly.
+  trap 'docker stop -t 5 "$SANDBOX_NAME" > /dev/null 2>&1 || true' TERM INT
+  wait "$REVIEW_PID" || rc=$?
+  trap - TERM INT
   # If /output was bind-mounted from $HOST_OUTPUT_DIR, both sides already see the same files - no docker cp needed.
   if [ -z "$HOST_OUTPUT_DIR" ]; then
     docker cp "$SANDBOX_NAME":/output/claude-output.json ./claude-output/claude-output.json 2>/dev/null || true

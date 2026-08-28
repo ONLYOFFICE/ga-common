@@ -242,10 +242,16 @@ prepare_review_context() {
 
   set_commit_status "$REPO_PATH" "$PR_SHA" "pending" "In progress"
 
-  local WORKING_ID
-  WORKING_ID=$(post_working_comment "$REPO_PATH" "$PR_NUMBER" "$REVIEW_COMMENT_ID" "repo/previous-claude-output.md") \
-    || { echo "::warning::Failed to post working comment"; WORKING_ID=""; }
+  local WORKING_RESULT WORKING_ID WORKING_UPDATED_AT
+  WORKING_RESULT=$(post_working_comment "$REPO_PATH" "$PR_NUMBER" "$REVIEW_COMMENT_ID" "repo/previous-claude-output.md") \
+    || { echo "::warning::Failed to post working comment"; WORKING_RESULT=""; }
+  WORKING_ID=$(cut -f1 <<< "$WORKING_RESULT")
+  WORKING_UPDATED_AT=$(cut -f2 <<< "$WORKING_RESULT")
   echo "$WORKING_ID" > repo/review-comment-id
+  # post_review_and_set_status re-checks this against the comment's live updated_at right before
+  # posting the real result - if they differ, something else touched the comment in between
+  # (is_pr_stale's SHA check can miss this, e.g. two runs dispatched for the identical SHA).
+  echo "$WORKING_UPDATED_AT" > repo/comment-updated-at.txt
   echo "Working comment: #$WORKING_ID"
   # post_review_and_set_status (a later, separate step) needs this to avoid stamping a failed
   # run's SHA on the review marker - see the fallback branch there.
@@ -445,6 +451,21 @@ post_review_and_set_status() {
   # without ever echoing it. Printing it here is what the digest depends on.
   cat claude-output.md
   echo "Posting review ($(wc -l < claude-output.md) lines)"
+
+  # Optimistic-concurrency check, on top of is_pr_stale's SHA check above (which two runs
+  # dispatched for the identical SHA - a re-run, a duplicate webhook delivery - wouldn't trip):
+  # if the tracked comment's updated_at has moved since this run posted its own working
+  # placeholder, something else wrote to it in between - don't clobber whatever that was.
+  if [ -n "$REVIEW_COMMENT_ID" ] && [ -s repo/comment-updated-at.txt ]; then
+    local EXPECTED_UPDATED_AT CURRENT_UPDATED_AT
+    EXPECTED_UPDATED_AT=$(<repo/comment-updated-at.txt)
+    CURRENT_UPDATED_AT=$(gitea_api "$REPO_PATH/issues/comments/$REVIEW_COMMENT_ID" 2>/dev/null | jq -r '.updated_at // empty')
+    if [ -n "$EXPECTED_UPDATED_AT" ] && [ -n "$CURRENT_UPDATED_AT" ] && [ "$CURRENT_UPDATED_AT" != "$EXPECTED_UPDATED_AT" ]; then
+      echo "::warning::Comment #$REVIEW_COMMENT_ID was touched by another run since this one started — discarding this result instead of overwriting it"
+      return 0
+    fi
+  fi
+
   # On a fallback, stamp the marker with the last SUCCESSFULLY reviewed SHA (from
   # prepare_review_context, written to previous-sha.txt), not this failed run's PR_SHA - the
   # marker should only ever claim "this SHA was reviewed" for a SHA that actually was.
