@@ -94,11 +94,12 @@ prepare_review_context() {
   local ALL_COMMENTS PREVIOUS_REVIEW PREVIOUS_REVIEW_ANY REVIEW_COMMENT_ID
   ALL_COMMENTS=$(fetch_all_comments "$REPO_PATH/issues/$PR_NUMBER/comments")
   local _any='[.[] | select(.body | contains("<!-- Claude-Review:"))] | last'
-  # A "Review error" fallback (post_review_and_set_status's missing/invalid-output path) quotes
-  # the last genuine review inside a nested <details>, so its APPROVE/BLOCKED badge alone isn't
-  # enough to prove *this* comment reflects a completed review - exclude the fallback explicitly,
-  # else a cancelled/failed run's own SHA gets treated as "already reviewed" by the next push.
-  local _done='[.[] | select(.body | (contains("<!-- Claude-Review:") and (contains("APPROVE") or contains("BLOCKED")) and (contains("**Review error**") | not)))] | last'
+  # Keyed on "has a decodable state blob", not on APPROVE/BLOCKED text or the absence of "Review
+  # error" - a fallback (post_review_and_set_status's missing/invalid-output path) now re-embeds the
+  # last successful round's state blob unchanged, specifically so a failed round doesn't strand the
+  # next genuine review with no <previous_review> at all (confirmed live: it used to, silently
+  # dropping every still-open finding - not resolved, just gone, no warning).
+  local _done='[.[] | select(.body | contains("<!-- Claude-Review:") and contains("<!-- claude-review-state:"))] | last'
   REVIEW_COMMENT_ID=$(jq -r "${_any}  | .id   // empty" <<< "$ALL_COMMENTS")
   PREVIOUS_REVIEW_ANY=$(jq -r "${_any}  | .body // empty" <<< "$ALL_COMMENTS")
   PREVIOUS_REVIEW=$(     jq -r "${_done} | .body // empty" <<< "$ALL_COMMENTS")
@@ -108,9 +109,11 @@ prepare_review_context() {
   # the working spinner so the PR never goes from "has content" to blank while this run
   # is in flight, regardless of whether that content is trustworthy enough to drive the
   # skip/state logic below.
-  [ -n "$PREVIOUS_REVIEW_ANY" ] && sed '/^<!-- Claude-Review:/d' <<< "$PREVIOUS_REVIEW_ANY" > repo/previous-claude-output.md
+  [ -n "$PREVIOUS_REVIEW_ANY" ] && sed -e '/^<!-- Claude-Review:/d' -e '/^<!-- claude-review-state:/d' \
+    <<< "$PREVIOUS_REVIEW_ANY" > repo/previous-claude-output.md
 
-  if [[ "$PREVIOUS_REVIEW" == *"✅ APPROVE"* || "$PREVIOUS_REVIEW" == *"❌ BLOCKED"* ]]; then
+  # _done's own select() already requires both markers - a non-empty PREVIOUS_REVIEW means one was found.
+  if [ -n "$PREVIOUS_REVIEW" ]; then
     echo "Previous review found (#$REVIEW_COMMENT_ID)"
     PREVIOUS_SHA=$(grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' <<< "$PREVIOUS_REVIEW" || true)
 
@@ -389,6 +392,15 @@ post_review_and_set_status() {
       if [ -f repo/previous-claude-output.md ] && ! grep -q '^\*\*Review error\*\*' repo/previous-claude-output.md; then
         printf '\n\n---\n\n<details><summary>Previous review</summary>\n\n%s\n\n</details>' \
                "$(<repo/previous-claude-output.md)"
+      fi
+      # Re-embed the last successful round's state blob unchanged (prepare_review_context loaded it
+      # into repo/previous-state.json) - without this, a failed round drops the tracked open/fixed
+      # findings entirely: confirmed live, two consecutive "Review error" fallbacks left the next
+      # genuine review with no <previous_review> at all, silently losing every still-open finding
+      # (not resolved, just gone - _done's own "Review error" exclusion, working as designed on the
+      # SHA, was also hiding this state from every later round with nothing to recover it from).
+      if [ -s repo/previous-state.json ]; then
+        printf '\n\n<!-- claude-review-state:%s -->' "$(base64 -w0 < repo/previous-state.json)"
       fi
     } > claude-output.md
   fi
