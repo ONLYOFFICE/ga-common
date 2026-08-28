@@ -46,6 +46,15 @@ prepare_review_context() {
   DIFF_FILES=$(grep -c '^diff --git' repo/pr.diff || true)
   echo "PR diff: ${DIFF_FILES} files / ${DIFF_LINES} lines / ${DIFF_BYTES} bytes"
 
+  # Auto effort (used when the dispatch input is 'auto'): a diff big enough already costs a lot from
+  # sheer file-reading volume, so higher effort there compounds cost far more than it does on a small
+  # diff, where the extra reasoning is cheap - invert the usual "more effort = better" default. This
+  # threshold is deliberately its own, well below the >6000-line/>1MB large-diff/pr-files.md one below -
+  # cost ramps up long before a diff is big enough to need summary mode.
+  local AUTO_EFFORT="high"
+  { [ "$DIFF_LINES" -gt 2000 ] || [ "$DIFF_BYTES" -gt 300000 ]; } && AUTO_EFFORT="medium"
+  echo "effort=$AUTO_EFFORT" >> "${GITHUB_OUTPUT:-/dev/null}"
+
   if [ "$DIFF_LINES" -gt 6000 ] || [ "$DIFF_BYTES" -gt 1000000 ]; then
     echo "::warning::Large diff — switching to summary/impact review"
     printf '# Changed files (%s lines total) — diff too large for line-level review\n\n' "$DIFF_LINES" > repo/pr-files.md
