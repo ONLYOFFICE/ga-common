@@ -74,7 +74,7 @@ EOF
     -e https_proxy=http://$PROXY_NAME:3128 \
     -e NO_PROXY=localhost,127.0.0.1 \
     -w /workspace \
-    node:20-slim sleep infinity > /dev/null
+    node:24 sleep infinity > /dev/null
 
   docker exec "$SANDBOX_NAME" mkdir -p /workspace /output
   docker cp repo/. "$SANDBOX_NAME":/workspace/
