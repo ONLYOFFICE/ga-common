@@ -22,9 +22,13 @@ cleanup_sandbox() {
 # Resolves the host path backing $PWD via self-inspect (docker run -v resolves on the HOST under DooD); sets HOST_OUTPUT_DIR empty if unresolved, so callers fall back to docker cp.
 resolve_host_output_dir() {
   HOST_OUTPUT_DIR=""
+  # Self-inspect by container ID, not hostname: this runner sets a custom --hostname unrelated to the container's real ID, so `docker inspect "$(hostname)"` never matched - the cgroup path always encodes the real ID regardless of hostname.
+  local SELF_ID
+  SELF_ID=$(grep -oE '[0-9a-f]{64}' /proc/self/cgroup 2>/dev/null | head -1)
+  [ -n "$SELF_ID" ] || SELF_ID="$(hostname)"
   # `?` on `.[]`/`.Destination` skips anything non-iterable/non-object instead of erroring, so an unexpected `.Mounts` shape just yields no match.
   local HOST_PWD
-  HOST_PWD=$(docker inspect "$(hostname)" --format '{{json .Mounts}}' 2>/dev/null | jq -er --arg pwd "$PWD" '
+  HOST_PWD=$(docker inspect "$SELF_ID" --format '{{json .Mounts}}' 2>/dev/null | jq -er --arg pwd "$PWD" '
     [.[]? | select(.Destination? as $d | $pwd == $d or ($pwd | startswith($d + "/")))]
     | sort_by(-(.Destination | length)) | .[0]
     | if . then .Source + ($pwd | ltrimstr(.Destination)) else empty end
