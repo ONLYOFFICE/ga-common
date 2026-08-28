@@ -92,10 +92,14 @@ EOF
 run_claude_review() {
   local rc=0
   # Single attempt, no CLI timeout: --max-budget-usd bounds cost, job timeout-minutes is the backstop, --debug-file is uploaded next step for post-mortem.
+  # --disallowedTools Task: full access is a sandbox-safety call, not a cost one - a spawned subagent
+  # starts with a fresh context instead of reusing the cheap cached one, and this trades money for wall-clock
+  # (confirmed live: a 2-level-deep subagent fork drove one review's cost to $4.70 vs. the usual $0.15-0.30).
   docker exec --user node -w /workspace "$SANDBOX_NAME" bash -c '
     set -euo pipefail
     claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
       --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions \
+      --disallowedTools "Task" \
       < claude-prompt.txt > /output/claude-output.json
   ' || rc=$?
   # If /output was bind-mounted from $HOST_OUTPUT_DIR, both sides already see the same files - no docker cp needed.
