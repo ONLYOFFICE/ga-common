@@ -129,6 +129,11 @@ jobs:
           HEAD_SHA=$(git -C repo rev-parse HEAD)
           [ "$HEAD_SHA" = "$PR_SHA" ] || \
             echo "::warning::Branch tip $HEAD_SHA differs from dispatched SHA $PR_SHA (new push in flight) — benign: the superseding run will cancel this one"
+          # A plain clone's origin/HEAD tracks the repo's overall default branch, not this PR's own
+          # base - the built-in /security-review skill hardcodes its diff scope to origin/HEAD (no
+          # argument support), so a PR targeting release/*|hotfix/* would otherwise get diffed
+          # against the wrong branch entirely.
+          git -C repo remote set-head origin "$BASE_BRANCH"
 
       - name: Prepare review context
         id: prepare
