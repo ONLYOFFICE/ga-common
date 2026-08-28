@@ -180,25 +180,19 @@ jobs:
           }
           trap cleanup_sandbox EXIT INT TERM
 
-          echo "=== 0. defensive cleanup: DooD resources persist on the HOST daemon ==="
-          docker rm -f egress-proxy claude-review > /dev/null 2>&1 || true
-          docker network rm claude-internal > /dev/null 2>&1 || true
+          cleanup_sandbox
 
-          echo "=== 0.5 resolve the host path backing this job's workspace ==="
           # `docker run -v` resolves host paths via the HOST daemon under DooD, so self-inspect this job container's own Mounts to recover the host-side equivalent of $PWD.
-          # Best-effort: if this runner's hostname doesn't resolve to a real container (or .Mounts isn't
-          # what we expect), fall through with HOST_OUTPUT_DIR unset - step 4 then falls back to `docker cp`
-          # instead of a bind mount, rather than failing the whole review over a nice-to-have optimization.
+          # Best-effort: if it doesn't resolve, fall through with HOST_OUTPUT_DIR unset - step 4 falls back to `docker cp` rather than failing the whole review over a nice-to-have optimization.
           mkdir -p claude-output
           # Pre-create both files before anything below can fail and exit early under `set -e`, so Upload/Post always find real (if empty) files instead of none at all.
           touch claude-output/claude-output.json claude-output/claude-debug.log
           HOST_OUTPUT_DIR=""
+          # `?` on `.[]`/`.Destination` skips anything non-iterable/non-object instead of erroring, so an unexpected `.Mounts` shape just yields no match.
           HOST_PWD=$(docker inspect "$(hostname)" --format '{{json .Mounts}}' 2>/dev/null | jq -er --arg pwd "$PWD" '
-            if type != "array" then empty else
-              [.[] | select(.Destination as $d | $pwd == $d or ($pwd | startswith($d + "/")))]
-              | sort_by(-(.Destination | length)) | .[0]
-              | if . then .Source + ($pwd | ltrimstr(.Destination)) else empty end
-            end
+            [.[]? | select(.Destination? as $d | $pwd == $d or ($pwd | startswith($d + "/")))]
+            | sort_by(-(.Destination | length)) | .[0]
+            | if . then .Source + ($pwd | ltrimstr(.Destination)) else empty end
           ' 2>/dev/null || true)
           if [ -n "$HOST_PWD" ]; then
             HOST_OUTPUT_DIR="$HOST_PWD/claude-output"
@@ -206,8 +200,7 @@ jobs:
             echo "::warning::Could not resolve the host path backing $PWD via docker inspect - using docker cp instead of a bind mount for /output"
           fi
 
-          echo "=== 1. isolated network + egress-restricted proxy (npm + Anthropic only) ==="
-          docker network create --internal claude-internal
+          docker network create --internal claude-internal > /dev/null
           mkdir -p /tmp/squid
           cat > /tmp/squid/squid.conf << 'EOF'
           http_port 3128
@@ -215,17 +208,14 @@ jobs:
           http_access allow allowed_dst
           http_access deny all
           EOF
-          docker create --name egress-proxy --network claude-internal ubuntu/squid:latest
+          docker create --name egress-proxy --network claude-internal ubuntu/squid:latest > /dev/null
           # `docker cp` streams content over the API, so it works under DooD regardless of whose filesystem the source is on, unlike `-v`.
           docker cp /tmp/squid/squid.conf egress-proxy:/etc/squid/squid.conf
-          docker start egress-proxy
+          docker start egress-proxy > /dev/null
           docker network connect bridge egress-proxy
           sleep 2
 
-          echo "=== 2. claude container: only ANTHROPIC_API_KEY, no docker.sock, egress-restricted ==="
-          # /output is the ONLY bind mount into the sandbox when HOST_OUTPUT_DIR resolved above - a dedicated
-          # empty dir (not the job's real workspace) - writes land in ./claude-output immediately, surviving
-          # the container being lost. Falls back to no mount (plain docker cp afterward) when it didn't.
+          # /output is the ONLY bind mount into the sandbox (when HOST_OUTPUT_DIR resolved) - a dedicated empty dir, not the job's real workspace; falls back to no mount (docker cp afterward) otherwise.
           OUTPUT_MOUNT_ARGS=()
           [ -n "$HOST_OUTPUT_DIR" ] && OUTPUT_MOUNT_ARGS=(-v "$HOST_OUTPUT_DIR:/output")
           docker run -d --name claude-review --network claude-internal \
@@ -242,7 +232,7 @@ jobs:
             -e https_proxy=http://egress-proxy:3128 \
             -e NO_PROXY=localhost,127.0.0.1 \
             -w /workspace \
-            node:20-slim sleep infinity
+            node:20-slim sleep infinity > /dev/null
 
           docker exec claude-review mkdir -p /workspace /output
           docker cp repo/. claude-review:/workspace/
@@ -250,13 +240,11 @@ jobs:
           docker cp review/. claude-review:/review/
           echo "Files inside container: $(docker exec claude-review sh -c 'find /workspace -type f | wc -l')"
 
-          echo "=== 3. npm install as root (privileged, not exposed to untrusted PR content) ==="
-          docker exec claude-review npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
+          docker exec claude-review npm install -g --no-fund --no-audit --no-update-notifier --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
           docker exec claude-review sh -c 'echo "claude version: $(claude --version || echo unknown)"'
           # --dangerously-skip-permissions refuses to run as root, and docker cp leaves files root-owned - hand them to the built-in unprivileged "node" user.
           docker exec claude-review chown -R node:node /workspace /output
 
-          echo "=== 4. run claude unprivileged, full tool access (sandbox replaces --allowedTools) ==="
           rc=0
           # Single attempt, no CLI timeout: --max-budget-usd bounds cost, job timeout-minutes is the backstop, --debug-file is uploaded next step for post-mortem.
           docker exec --user node -w /workspace claude-review bash -c '
@@ -265,10 +253,8 @@ jobs:
               --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions \
               < claude-prompt.txt > /output/claude-output.json
           ' || rc=$?
-          if [ -n "$HOST_OUTPUT_DIR" ]; then
-            # /output was bind-mounted from $HOST_OUTPUT_DIR (./claude-output here), so both sides already see the same files - no docker cp needed.
-            :
-          else
+          # If /output was bind-mounted from $HOST_OUTPUT_DIR, both sides already see the same files - no docker cp needed.
+          if [ -z "$HOST_OUTPUT_DIR" ]; then
             docker cp claude-review:/output/claude-output.json ./claude-output/claude-output.json 2>/dev/null || true
             docker cp claude-review:/output/claude-debug.log ./claude-output/claude-debug.log 2>/dev/null || true
           fi
