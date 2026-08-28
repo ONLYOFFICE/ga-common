@@ -112,7 +112,7 @@ End your final message with exactly one ```` ```json ```` fenced block containin
       "severity": "critical | medium | low | legacy",
       "confidence": "sure | likely | unsure",
       "title": "short issue title",
-      "locations": "optional: [ { \"path\": \"app.py\", \"line\": 5 } ] - omit entirely when the issue isn't tied to a specific file/line (e.g. PR title/description)",
+      "locations": [ { "path": "app.py", "line": 5 } ],
       "why": "1-3 short sentences: previous behavior, new behavior, consequence - grounded in the diff",
       "fix_summary": "optional: one sentence, the smallest fix - omit only when no concrete fix applies (e.g. a naming/title nitpick where 'why' already says everything)",
       "fix_code": "optional: ready-to-apply code snippet, omit only for trivial fixes",
@@ -122,6 +122,7 @@ End your final message with exactly one ```` ```json ```` fenced block containin
 ```
 
 - `summary`/`resolved`/`findings` always present (latter two may be empty arrays). Omit `bugs` entirely if no bug is referenced — no placeholder note.
+- `locations` is a real JSON array of `{"path": "...", "line": N}` objects — never a string, and every entry needs both keys. Omit the key entirely when the finding isn't tied to a file/line (e.g. a PR-title or commit-message finding); an empty array is fine too, but a string or a `line`-less entry discards the finding.
 - `category`: exactly one of the six values above, never a new one, never split across two.
 - `findings` = currently-open issues only (new + still-open from `<previous_review>`) — never duplicate something in `resolved`.
 - Fields render near-verbatim except `fix_code` (its own fenced block) — no markdown formatting in other fields, plain sentences only.

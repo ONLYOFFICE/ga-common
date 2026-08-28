@@ -28,16 +28,23 @@ FIXED_BY_PR_ICON = {"yes": "✅", "no": "❌", "partially": "\U0001F7E1", "canno
 
 
 def esc(s):
-    """Escapes free text before embedding it in <summary>/<details>, so a malicious
-    diff can't close them early. Not applied to fix_code (fenced code blocks)."""
+    """Escapes free text before embedding it in <summary>/<details>, so a malicious diff
+    can't close them early. Not applied to fix_code (fenced code blocks). Coerces
+    non-strings - nothing enforces the schema's types, and a numeric title shouldn't
+    cost the run its whole review."""
     if not s:
         return ""
+    if not isinstance(s, str):
+        s = str(s)
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def render_locations(locations, file_link_base):
+    # Second line of defense behind extract-json.py - this module also runs standalone.
     groups = []
     for loc in locations:
+        if not isinstance(loc, dict) or "path" not in loc or "line" not in loc:
+            continue
         if groups and groups[-1][0] == loc["path"]:
             groups[-1][1].append(loc["line"])
         else:
@@ -85,8 +92,10 @@ def code_fence(code, lang):
 def render_open_issue(item):
     sev, conf = item["severity"], item["confidence"]
     lines = [f"  <details><summary>[{SEVERITY_BADGE[sev]} · {CONFIDENCE_BADGE[conf]}]: {esc(item['title'])}</summary>", ""]
-    if item.get("locations"):
-        lines.append(f"  - **File**: {render_locations(item['locations'], FILE_LINK_BASE)}")
+    locations = item.get("locations")
+    rendered = render_locations(locations, FILE_LINK_BASE) if isinstance(locations, list) else ""
+    if rendered:
+        lines.append(f"  - **File**: {rendered}")
     lines.append(f"  - **Why**: {esc(item['why'])}")
     if item.get("fix_summary"):
         lines.append(f"  - **Fix**: {esc(item['fix_summary'])}")

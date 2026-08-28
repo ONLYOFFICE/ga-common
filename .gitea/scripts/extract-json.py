@@ -60,8 +60,10 @@ def extract_candidate(text, required_keys):
 
 
 def _validate_object(item, item_schema, path):
-    """Required-key/enum check for a single object against a JSON-Schema-shaped
-    dict (one level, no further recursion - same shallow scope as before).
+    """Required-key/enum check for one object, recursing into nested arrays of objects.
+    That recursion is load-bearing for findings[].locations: render-review.py indexes
+    loc["path"]/loc["line"] directly, so a 'line'-less entry (or a locations value that
+    is a string) used to crash the renderer and lose the entire review.
     Returns None on success, or a short error string."""
     if not isinstance(item, dict):
         return f"{path}: expected an object, got {type(item).__name__}"
@@ -71,8 +73,20 @@ def _validate_object(item, item_schema, path):
     item_props = item_schema.get("properties", {})
     for ikey, ival in item.items():
         ischema = item_props.get(ikey)
-        if ischema and "enum" in ischema and ival not in ischema["enum"]:
+        if not ischema:
+            continue
+        if "enum" in ischema and ival not in ischema["enum"]:
             return f"{path}.{ikey}: invalid value {ival!r}, expected one of {ischema['enum']}"
+        if ischema.get("type") == "array":
+            if not isinstance(ival, list):
+                return f"{path}.{ikey}: expected an array, got {type(ival).__name__}"
+            sub_schema = ischema.get("items", {})
+            if sub_schema.get("type") != "object":
+                continue
+            for j, sub in enumerate(ival):
+                error = _validate_object(sub, sub_schema, f"{path}.{ikey}[{j}]")
+                if error:
+                    return error
     return None
 
 

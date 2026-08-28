@@ -416,7 +416,9 @@ post_review_and_set_status() {
   # render-review.py computes verdict/counters/sections from claude-structured.json - nothing to reconcile here.
   local FILE_LINK_BASE="https://$GITEA_HOST/$ORG_NAME/$REPO_NAME/src/commit/$PR_SHA"
   local CORRECT_VERDICT=""
-  if [ -s claude-structured.json ] && jq -e '.summary and .findings and (.resolved != null)' claude-structured.json > /dev/null 2>&1; then
+  # Exactly review-schema.json's required set, nothing more: 'resolved' is optional there and the
+  # renderer handles its absence, so also demanding it here discarded complete, already-paid reviews.
+  if [ -s claude-structured.json ] && jq -e '.summary and (.findings | type == "array")' claude-structured.json > /dev/null 2>&1; then
     local PREV_STATE_ARGS=()
     [ -f repo/previous-state.json ] && PREV_STATE_ARGS=(--previous-state repo/previous-state.json)
     if python3 .gitea/scripts/render-review.py \
