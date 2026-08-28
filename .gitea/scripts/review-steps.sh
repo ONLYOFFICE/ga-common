@@ -240,6 +240,22 @@ prepare_review_context() {
     return 0
   fi
 
+  # A duplicate/near-simultaneous dispatch for this exact SHA (two webhook deliveries, a manual
+  # re-run) can't be caught by is_pr_stale (same SHA either way) or "head unchanged" above (that
+  # only looks at PREVIOUS_SHA from a run that's already finished, which a still-in-flight
+  # duplicate hasn't done yet) - if the tracked comment already shows a completed result for
+  # $PR_SHA by the time we get here, a concurrent duplicate beat us to it; don't bury its real
+  # result under our own "Analyzing..." placeholder just to do the same work over again.
+  if [ -n "$REVIEW_COMMENT_ID" ]; then
+    local EXISTING_BODY
+    EXISTING_BODY=$(gitea_api "$REPO_PATH/issues/comments/$REVIEW_COMMENT_ID" 2>/dev/null | jq -r '.body // empty')
+    if grep -qF "<!-- Claude-Review:${PR_SHA} -->" <<< "$EXISTING_BODY" && grep -q '<!-- claude-review-state:' <<< "$EXISTING_BODY"; then
+      echo "A concurrent duplicate run already posted a completed result for $PR_SHA — skipping"
+      echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+      return 0
+    fi
+  fi
+
   set_commit_status "$REPO_PATH" "$PR_SHA" "pending" "In progress"
 
   local WORKING_RESULT WORKING_ID WORKING_UPDATED_AT
