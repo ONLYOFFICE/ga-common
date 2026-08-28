@@ -24,7 +24,7 @@ resolve_host_output_dir() {
   HOST_OUTPUT_DIR=""
   # Self-inspect by container ID, not hostname: this runner sets a custom --hostname unrelated to the container's real ID, so `docker inspect "$(hostname)"` never matched - the cgroup path always encodes the real ID regardless of hostname.
   local SELF_ID
-  SELF_ID=$(grep -oE '[0-9a-f]{64}' /proc/self/cgroup 2>/dev/null | head -1)
+  SELF_ID=$(grep -oE '[0-9a-f]{64}' /proc/self/cgroup 2>/dev/null | head -1 || true)
   [ -n "$SELF_ID" ] || SELF_ID="$(hostname)"
   # `?` on `.[]`/`.Destination` skips anything non-iterable/non-object instead of erroring, so an unexpected `.Mounts` shape just yields no match.
   local HOST_PWD
