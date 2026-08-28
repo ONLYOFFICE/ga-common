@@ -83,7 +83,7 @@ EOF
   echo "Files inside container: $(docker exec "$SANDBOX_NAME" sh -c 'find /workspace -type f | wc -l')"
 
   docker exec "$SANDBOX_NAME" npm install -g --no-fund --no-audit --no-update-notifier --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
-  docker exec "$SANDBOX_NAME" sh -c 'echo "claude version: $(claude --version || echo unknown)"'
+  docker exec "$SANDBOX_NAME" sh -c 'echo "Running review with model: $CLAUDE_MODEL, effort: $CLAUDE_EFFORT (claude-code $(claude --version || echo unknown))"'
   # --dangerously-skip-permissions refuses to run as root, and docker cp leaves files root-owned - hand them to the built-in unprivileged "node" user.
   docker exec "$SANDBOX_NAME" chown -R node:node /workspace /output
 }
