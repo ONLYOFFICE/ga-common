@@ -139,6 +139,30 @@ prepare_review_context() {
   # PREVIOUS_SHA can be set but still unusable (force-push rewrote history, shallow clone).
   [ -n "$PREVIOUS_SHA" ] && git -C repo rev-parse --verify --quiet "${PREVIOUS_SHA}^{commit}" > /dev/null && PREV_AVAILABLE=true
 
+  # --- submodule-only guard: skip when the only changes are submodule gitlink bumps ---
+  # A gitlink entry (mode 160000 both sides) is just a commit-pointer bump - the real change lives
+  # in the submodule's own history/review, not this repo's diff. Strict: any other changed path
+  # anywhere in range means a real review still runs. Known gap, accepted: this trusts the pointed-to
+  # submodule commit was itself reviewed somewhere - that isn't re-verified here.
+  local SUBMODULE_RAW
+  if $PREV_AVAILABLE; then
+    SUBMODULE_RAW=$(git -C repo diff --raw "$PREVIOUS_SHA" HEAD 2>/dev/null)
+  else
+    SUBMODULE_RAW=$(git -C repo diff --raw "origin/$BASE_BRANCH...HEAD" 2>/dev/null)
+  fi
+  if [ -n "$SUBMODULE_RAW" ] && ! grep -qv '^:160000 160000' <<< "$SUBMODULE_RAW"; then
+    if $PREV_AVAILABLE; then
+      echo "Only submodule bump(s) since ${PREVIOUS_SHA:0:10} — nothing to review in this repo, carrying over the previous verdict"
+      carry_over_statuses "$REPO_PATH" "$PREVIOUS_SHA" "$PR_SHA"
+    else
+      echo "Diff is submodule bump(s) only — nothing to review in this repo"
+      set_commit_status "$REPO_PATH" "$PR_SHA" "success" "Submodule bump only — no reviewable changes" "Claude Code Review"
+      set_commit_status "$REPO_PATH" "$PR_SHA" "success" "Ok" "Non-ASCII Check"
+    fi
+    echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+    return 0
+  fi
+
   # --- sync-merge guard: skip a pure base-branch sync merge (no new feature work) ---
   # Only skips if a previous reviewed SHA exists to carry statuses from - otherwise a
   # PR's first push being such a merge still gets a real review. "HEAD^2 == base tip"
