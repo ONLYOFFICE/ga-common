@@ -14,10 +14,15 @@ on:
         type: string
         default: claude-sonnet-5
       claude_code_version:
-        description: 'Claude Code CLI version (npm dist-tag or exact version)'
+        # Pinned, not 'latest': this workflow ships to every repo in the org at once, and the
+        # review depends on specific CLI flags (--effort, --max-budget-usd, --json-schema), so a
+        # single upstream release changing one of them would break every review simultaneously
+        # with no staging step in between. Bump deliberately after a manual run with the new
+        # version; pass 'latest' as the input to test one ad hoc.
+        description: 'Claude Code CLI version (exact version, or a dist-tag like "latest" to test)'
         required: false
         type: string
-        default: 'latest'
+        default: '2.1.250'
       effort:
         description: 'Reasoning effort level (auto: high for small diffs, medium for large)'
         required: false
@@ -154,7 +159,9 @@ jobs:
         run: |
           set -euo pipefail
           source .gitea/scripts/gitea-api.sh
-          NON_ASCII_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Non-ASCII-Check -->"))] | last | .id // empty')
+          # Author-filtered like the review comment's own lookup: the marker is public, so
+          # without this a planted comment could be PATCHed (or DELETEd) by the bot below.
+          NON_ASCII_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r --arg bot "$(_bot_login)" '[.[] | select($bot == "" or ((.user.login // "") == $bot)) | select(.body | contains("<!-- Non-ASCII-Check -->"))] | last | .id // empty')
           if python3 .gitea/scripts/check-english-comments.py repo/pr.diff > /tmp/english-check.md; then
             echo "Non-ASCII check passed"
             [ -n "$NON_ASCII_COMMENT_ID" ] && gitea_api_json "$ORG_NAME/$REPO_NAME/issues/comments/$NON_ASCII_COMMENT_ID" -X DELETE > /dev/null || true
@@ -177,6 +184,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
+          # post_review_and_set_status reads this to put the review duration in the commit
+          # status description; without it every status silently rendered "Approved" with no
+          # timing at all (the write was lost when the sandbox was wired in).
+          date +%s > review-start.txt
           source .gitea/scripts/review-sandbox.sh
 
           # DooD: claude CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY and egress restricted to npm + Anthropic via a Squid proxy - that containment is what lets --allowedTools be dropped entirely below (full tool access).

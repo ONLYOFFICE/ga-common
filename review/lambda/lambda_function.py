@@ -109,7 +109,12 @@ def verify_signature(raw_body, headers, webhook_secret):
 
     for header_name in ("x-gitea-signature", "x-gogs-signature", "x-hub-signature-256"):
         actual = lower_headers.get(header_name)
-        if actual and any(hmac.compare_digest(actual, expected) for expected in expected_values):
+        if not actual:
+            continue
+        # compare_digest() raises TypeError on a non-ASCII str, and this value is
+        # caller-controlled - encode both sides so a junk header is a 401, not a 502.
+        actual_bytes = actual.strip().encode("utf-8", "surrogateescape")
+        if any(hmac.compare_digest(actual_bytes, expected.encode("ascii")) for expected in expected_values):
             return True
 
     return False

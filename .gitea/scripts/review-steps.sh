@@ -6,6 +6,19 @@
 source "$(dirname "${BASH_SOURCE[0]}")/gitea-api.sh"
 
 # ---------------------------------------------------------------------------
+# Character-accurate length caps, replacing `cut -c` (which counts BYTES): for this org's
+# routinely-Cyrillic PR text that halved every cap and could sever a codepoint mid-sequence.
+# Callers must truncate BEFORE the &/</> escaping, or a cap inside "&amp;" leaves "&am".
+# The explicit utf-8 codec on .buffer is required - the text wrappers follow the locale.
+# ---------------------------------------------------------------------------
+_trim_chars() {
+  python3 -c 'import sys
+limit = int(sys.argv[1])
+text = sys.stdin.buffer.read().decode("utf-8", "replace")[:limit]
+sys.stdout.buffer.write(text.encode("utf-8"))' "$1"
+}
+
+# ---------------------------------------------------------------------------
 # Peels "Previous review" wrappers off the tracked comment's current body, leaving only the
 # innermost genuine rendered review (empty if there is none). Both post_working_comment() and
 # post_review_and_set_status()'s fallback re-wrap whatever this yields, so without the peel a
@@ -27,6 +40,16 @@ for _ in range(10):
     if not text:
         break
 sys.stdout.buffer.write(text.encode("utf-8"))'
+}
+
+# Per-line variant, for a list where each entry gets its own cap (commit subjects).
+_trim_chars_per_line() {
+  python3 -c 'import sys
+limit = int(sys.argv[1])
+lines = sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()
+if lines:
+    out = "\n".join(line[:limit] for line in lines) + "\n"
+    sys.stdout.buffer.write(out.encode("utf-8"))' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -123,7 +146,11 @@ prepare_review_context() {
     TEST_LIST=$(awk -F'\t' "!($TEST_AWK)" "$ALL_FILES")
     PROD_N=$(grep -c . <<< "$PROD_LIST" || true)
     TEST_N=$(grep -c . <<< "$TEST_LIST" || true)
-    { printf '## Production files (%s)\n' "$PROD_N"
+    # REVIEW.md tells the model to trust this list as complete, so flag it when the
+    # (pathological) 500-entry ceiling actually bites rather than truncating silently.
+    local PROD_NOTE=""
+    [ "$PROD_N" -gt 500 ] && PROD_NOTE=", TRUNCATED - only the 500 highest-churn are listed"
+    { printf '## Production files (%s%s)\n' "$PROD_N" "$PROD_NOTE"
       head -500 <<< "$PROD_LIST" | awk -F'\t' '{printf "- +%d / -%d  `%s`\n",$2,$3,$4}'
       printf '\n## Test/generated files (%s, churn-sorted, capped at 200)\n' "$TEST_N"
       head -200 <<< "$TEST_LIST" | awk -F'\t' '{printf "- +%d / -%d  `%s`\n",$2,$3,$4}'
@@ -137,16 +164,26 @@ prepare_review_context() {
   # --- previous review --- (two jq calls: @tsv would escape the multi-line body)
   local ALL_COMMENTS PREVIOUS_REVIEW PREVIOUS_REVIEW_ANY REVIEW_COMMENT_ID
   ALL_COMMENTS=$(fetch_all_comments "$REPO_PATH/issues/$PR_NUMBER/comments")
-  local _any='[.[] | select(.body | contains("<!-- Claude-Review:"))] | last'
+  # Author filter on top of the marker match: the markers are public, so without it anyone with
+  # PR-comment access could plant a comment and steer $PREVIOUS_SHA and the open/fixed state.
+  # An empty $BOT_LOGIN deliberately disables the filter, so an API hiccup degrades to
+  # marker-only matching instead of discarding a real previous review.
+  local BOT_LOGIN
+  BOT_LOGIN=$(_bot_login)
+  [ -n "$BOT_LOGIN" ] && echo "Tracked-comment author filter: $BOT_LOGIN" \
+    || echo "::warning::Could not resolve the bot's own login — matching the tracked comment by marker only"
+  # shellcheck disable=SC2016  # $bot is a jq variable (--arg below), not a shell one
+  local _mine='.[] | select($bot == "" or ((.user.login // "") == $bot))'
+  local _any="[$_mine | select(.body | contains(\"<!-- Claude-Review:\"))] | last"
   # Keyed on "has a decodable state blob", not on APPROVE/BLOCKED text or the absence of "Review
   # error" - a fallback (post_review_and_set_status's missing/invalid-output path) now re-embeds the
   # last successful round's state blob unchanged, specifically so a failed round doesn't strand the
   # next genuine review with no <previous_review> at all (confirmed live: it used to, silently
   # dropping every still-open finding - not resolved, just gone, no warning).
-  local _done='[.[] | select(.body | contains("<!-- Claude-Review:") and contains("<!-- claude-review-state:"))] | last'
-  REVIEW_COMMENT_ID=$(jq -r "${_any}  | .id   // empty" <<< "$ALL_COMMENTS")
-  PREVIOUS_REVIEW_ANY=$(jq -r "${_any}  | .body // empty" <<< "$ALL_COMMENTS")
-  PREVIOUS_REVIEW=$(     jq -r "${_done} | .body // empty" <<< "$ALL_COMMENTS")
+  local _done="[$_mine | select(.body | contains(\"<!-- Claude-Review:\") and contains(\"<!-- claude-review-state:\"))] | last"
+  REVIEW_COMMENT_ID=$(jq -r --arg bot "$BOT_LOGIN" "${_any}  | .id   // empty" <<< "$ALL_COMMENTS")
+  PREVIOUS_REVIEW_ANY=$(jq -r --arg bot "$BOT_LOGIN" "${_any}  | .body // empty" <<< "$ALL_COMMENTS")
+  PREVIOUS_REVIEW=$(     jq -r --arg bot "$BOT_LOGIN" "${_done} | .body // empty" <<< "$ALL_COMMENTS")
 
   # Cosmetic only, independent of the strict _done gate below: the last genuine review gets
   # quoted under the working spinner so the PR never goes from "has content" to blank while
@@ -164,7 +201,9 @@ prepare_review_context() {
   # _done's own select() already requires both markers - a non-empty PREVIOUS_REVIEW means one was found.
   if [ -n "$PREVIOUS_REVIEW" ]; then
     echo "Previous review found (#$REVIEW_COMMENT_ID)"
-    PREVIOUS_SHA=$(grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' <<< "$PREVIOUS_REVIEW" || true)
+    # tail -1, like the state blob below: a body with two markers otherwise makes this
+    # multi-line, breaking rev-parse and leaking a newline into previous-sha.txt.
+    PREVIOUS_SHA=$(grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' <<< "$PREVIOUS_REVIEW" | tail -1 || true)
 
     # Decode the persisted open/fixed state (base64 JSON, see render-review.py) so
     # incremental review works off a numbered findings list, not re-parsed markdown.
@@ -306,19 +345,19 @@ prepare_review_context() {
   local PR_INFO PR_TITLE PR_AUTHOR PR_BODY COMMIT_MESSAGES PR_ADDITIONS PR_DELETIONS
   PR_INFO=$(gitea_api "$REPO_PATH/pulls/$PR_NUMBER")
   local PR_TITLE_RAW
-  PR_TITLE_RAW=$(jq -r '.title' <<< "$PR_INFO" | tr '\n\r`$' '    ' | sed 's/[[:space:]]*$//' | cut -c1-200)
+  PR_TITLE_RAW=$(jq -r '.title' <<< "$PR_INFO" | tr '\n\r`$' '    ' | sed 's/[[:space:]]*$//' | _trim_chars 200)
   PR_TITLE=$(  echo "$PR_TITLE_RAW" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
-  PR_AUTHOR=$( jq -r '.user.login'   <<< "$PR_INFO" | tr '\n\r`$' '    ' | cut -c1-100)
-  PR_BODY=$(   jq -r '.body // empty' <<< "$PR_INFO" | tr '\n\r`$' '    ' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-4000)
+  PR_AUTHOR=$( jq -r '.user.login'   <<< "$PR_INFO" | tr '\n\r`$' '    ' | _trim_chars 100)
+  PR_BODY=$(   jq -r '.body // empty' <<< "$PR_INFO" | tr '\n\r`$' '    ' | _trim_chars 4000 | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
   read -r PR_ADDITIONS PR_DELETIONS < <(jq -r '[.additions // 0, .deletions // 0] | @tsv' <<< "$PR_INFO" || echo "0	0")
   PR_ADDITIONS=${PR_ADDITIONS:-0}; PR_DELETIONS=${PR_DELETIONS:-0}
   local COMMIT_SUBJECTS_RAW
   COMMIT_SUBJECTS_RAW=$(gitea_api "$REPO_PATH/pulls/$PR_NUMBER/commits" \
     | jq -r '.[].commit.message | split("\n")[0]' | head -20)
-  # cut -c1-120 below is display-only: this org's multi-bug commits ("fix Bug 1,
-  # 2, 3, ...") can run well past 120 chars, so Bugzilla extraction below uses
-  # the untruncated $COMMIT_SUBJECTS_RAW instead, not this sanitized copy.
-  COMMIT_MESSAGES=$(cut -c1-120 <<< "$COMMIT_SUBJECTS_RAW" \
+  # The 120-char per-subject cap below is display-only: this org's multi-bug commits
+  # ("fix Bug 1, 2, 3, ...") can run well past 120 chars, so Bugzilla extraction below
+  # uses the untruncated $COMMIT_SUBJECTS_RAW instead, not this sanitized copy.
+  COMMIT_MESSAGES=$(_trim_chars_per_line 120 <<< "$COMMIT_SUBJECTS_RAW" \
     | sed 's/[`$]/./g; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/^/  - /' | tr '\r' ' ' || echo "  (none)")
   echo "PR: #$PR_NUMBER '$PR_TITLE_RAW' by $PR_AUTHOR ($PR_BRANCH → $BASE_BRANCH) [+$PR_ADDITIONS/-$PR_DELETIONS]"
 
@@ -333,18 +372,24 @@ prepare_review_context() {
 
   # --- prior discussion/review comments (human context; own comments excluded) ---
   local REVIEW_DISCUSSION
-  REVIEW_DISCUSSION=$(python3 .gitea/scripts/review-discussion.py 2>/dev/null | cut -c1-8000)
+  REVIEW_DISCUSSION=$(python3 .gitea/scripts/review-discussion.py 2>/dev/null | _trim_chars 8000)
   [ -n "$REVIEW_DISCUSSION" ] || REVIEW_DISCUSSION="No prior discussion or review comments found."
   grep -q '^## ' <<< "$REVIEW_DISCUSSION" && echo "Review discussion: prior comments/review threads attached" || true
 
   # --- render prompt ---
+  # Resolved here, not described to the model in prose: an empty PREVIOUS_SHA used to leave a
+  # literal "/code-review ...HEAD" in the prompt. Keys on PREV_AVAILABLE, same as delta-diff.
+  local REVIEW_RANGE="origin/$BASE_BRANCH...HEAD"
+  $PREV_AVAILABLE && REVIEW_RANGE="$PREVIOUS_SHA...HEAD"
+  echo "Review range for /code-review: $REVIEW_RANGE"
+
   # Branch names may contain backticks/$/<>; sanitize only the envsubst copies below, git/API keep raw values.
   local PR_BRANCH_SAFE BASE_BRANCH_SAFE
-  PR_BRANCH_SAFE=$(printf '%s' "$PR_BRANCH" | tr '`$' '  ' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-200)
-  BASE_BRANCH_SAFE=$(printf '%s' "$BASE_BRANCH" | tr '`$' '  ' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-200)
-  export PR_TITLE PR_AUTHOR PR_BODY PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES BUGZILLA_CONTEXT REVIEW_DISCUSSION PREVIOUS_SHA
+  PR_BRANCH_SAFE=$(printf '%s' "$PR_BRANCH" | tr '`$' '  ' | _trim_chars 200 | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+  BASE_BRANCH_SAFE=$(printf '%s' "$BASE_BRANCH" | tr '`$' '  ' | _trim_chars 200 | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+  export PR_TITLE PR_AUTHOR PR_BODY PR_ADDITIONS PR_DELETIONS COMMIT_MESSAGES BUGZILLA_CONTEXT REVIEW_DISCUSSION PREVIOUS_SHA REVIEW_RANGE
   PR_BRANCH="$PR_BRANCH_SAFE" BASE_BRANCH="$BASE_BRANCH_SAFE" \
-    envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_BODY $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $BUGZILLA_CONTEXT $REVIEW_DISCUSSION $PREVIOUS_SHA' \
+    envsubst '$BASE_BRANCH $ORG_NAME $REPO_NAME $PR_NUMBER $PR_BRANCH $PR_TITLE $PR_AUTHOR $PR_BODY $PR_ADDITIONS $PR_DELETIONS $COMMIT_MESSAGES $BUGZILLA_CONTEXT $REVIEW_DISCUSSION $PREVIOUS_SHA $REVIEW_RANGE' \
     < review/REVIEW.md > repo/claude-prompt.txt
   echo "Prompt (pre-diff): $(wc -l < repo/claude-prompt.txt) lines / $(wc -c < repo/claude-prompt.txt) bytes"
 
@@ -431,9 +476,10 @@ post_review_and_set_status() {
   # resolve comment id (written by prepare; fallback to API lookup)
   local REVIEW_COMMENT_ID
   REVIEW_COMMENT_ID=$(cat repo/review-comment-id 2>/dev/null || true)
+  # Same author filter as prepare's selectors - never PATCH a comment this pipeline didn't write.
   [ -z "$REVIEW_COMMENT_ID" ] && \
     REVIEW_COMMENT_ID=$(fetch_all_comments "$REPO_PATH/issues/$PR_NUMBER/comments" \
-      | jq -r '[.[] | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
+      | jq -r --arg bot "$(_bot_login)" '[.[] | select($bot == "" or ((.user.login // "") == $bot)) | select(.body | contains("<!-- Claude-Review:"))] | last | .id // empty')
 
   local DURATION=""
   if [ -r review-start.txt ]; then
@@ -533,10 +579,11 @@ post_review_and_set_status() {
 
   # derive commit status from job result + review verdict
   local STATE DESC
-  if   [[ "$JOB_STATUS"       != "success" ]]; then STATE="failure" DESC="Failed $DURATION"
-  elif [[ "$CORRECT_VERDICT"  == "APPROVE" ]]; then STATE="success" DESC="Approved $DURATION"
-  elif [[ "$CORRECT_VERDICT"  == "BLOCKED" ]]; then STATE="failure" DESC="Blocked $DURATION"
-  else                                              STATE="error"   DESC="Unknown $DURATION"
+  # ${DURATION:+ ...} so a missing review-start.txt yields "Approved", not "Approved ".
+  if   [[ "$JOB_STATUS"       != "success" ]]; then STATE="failure" DESC="Failed${DURATION:+ $DURATION}"
+  elif [[ "$CORRECT_VERDICT"  == "APPROVE" ]]; then STATE="success" DESC="Approved${DURATION:+ $DURATION}"
+  elif [[ "$CORRECT_VERDICT"  == "BLOCKED" ]]; then STATE="failure" DESC="Blocked${DURATION:+ $DURATION}"
+  else                                              STATE="error"   DESC="Unknown${DURATION:+ $DURATION}"
   fi
 
   echo "Job: $JOB_STATUS | Verdict: ${CORRECT_VERDICT:-none} | Status: $STATE $DURATION"

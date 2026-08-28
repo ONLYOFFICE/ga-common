@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Isolated-container review sandbox helpers for claude-review.yml's "Run review" step; expects ANTHROPIC_API_KEY/CLAUDE_MODEL/CLAUDE_CODE_VERSION/CLAUDE_EFFORT/CLAUDE_MAX_BUDGET_USD from the job env.
+# Optional tuning: SANDBOX_PIDS_LIMIT (default 1024), SANDBOX_MEMORY (unset = no ceiling, see setup_sandbox).
 
 # Names this run's sandbox resources (per-run, not fixed - fixed names let one concurrent PR's cleanup kill another's still-live sandbox) and pre-creates claude-output/.
 name_sandbox_resources() {
@@ -55,23 +56,57 @@ EOF
   docker cp /tmp/squid/squid.conf "$PROXY_NAME":/etc/squid/squid.conf
   docker start "$PROXY_NAME" > /dev/null
   docker network connect bridge "$PROXY_NAME"
-  sleep 2
+  # Wait for squid to actually accept connections rather than guessing at a fixed sleep: the npm
+  # install below is the first thing through the proxy and fails outright if it is not listening.
+  # The probe needs bash for /dev/tcp - the image's `sh` is dash, which has no such thing - so
+  # confirm bash exists first and fall back to the old fixed wait instead of burning the timeout.
+  local WAITED=0
+  if docker exec "$PROXY_NAME" bash -c 'true' 2>/dev/null; then
+    until docker exec "$PROXY_NAME" bash -c 'exec 3<>/dev/tcp/127.0.0.1/3128' 2>/dev/null; do
+      WAITED=$((WAITED + 1))
+      if [ "$WAITED" -ge 30 ]; then
+        echo "::warning::Egress proxy still not listening on :3128 after ${WAITED}s - continuing anyway"
+        break
+      fi
+      sleep 1
+    done
+    [ "$WAITED" -lt 30 ] && echo "Egress proxy ready after ${WAITED}s"
+  else
+    echo "::warning::No bash in the proxy image to probe :3128 with - falling back to a fixed wait"
+    sleep 2
+  fi
 
   # /output is the ONLY bind mount into the sandbox (when HOST_OUTPUT_DIR resolved) - a dedicated empty dir, not the job's real workspace; falls back to no mount (docker cp afterward) otherwise.
   local OUTPUT_MOUNT_ARGS=()
   [ -n "$HOST_OUTPUT_DIR" ] && OUTPUT_MOUNT_ARGS=(-v "$HOST_OUTPUT_DIR:/output")
+  # Hardening. A review is untrusted-input processing by definition, so drop the default
+  # capability set and keep only what setup below actually needs: CHOWN/FOWNER/DAC_OVERRIDE for
+  # the `chown -R node:node` and npm's file-mode work as root. That still removes NET_RAW,
+  # MKNOD, SYS_CHROOT, KILL and friends. --pids-limit bounds a runaway (or deliberately
+  # fork-bombing) session to this container instead of the shared runner host.
+  # --memory is deliberately opt-in via $SANDBOX_MEMORY: an OOM kill has already been seen here
+  # live, so imposing a ceiling by default would make it more frequent, not less.
+  local HARDENING_ARGS=(
+    --cap-drop=ALL
+    --cap-add=CHOWN --cap-add=FOWNER --cap-add=DAC_OVERRIDE
+    --security-opt=no-new-privileges
+    --pids-limit="${SANDBOX_PIDS_LIMIT:-1024}"
+  )
+  [ -n "${SANDBOX_MEMORY:-}" ] && HARDENING_ARGS+=(--memory="$SANDBOX_MEMORY")
+
   docker run -d --name "$SANDBOX_NAME" --network "$NET_NAME" \
     "${OUTPUT_MOUNT_ARGS[@]}" \
+    "${HARDENING_ARGS[@]}" \
     -e ANTHROPIC_API_KEY \
     -e CLAUDE_CODE_VERSION \
     -e CLAUDE_MODEL \
     -e CLAUDE_EFFORT \
     -e CLAUDE_MAX_BUDGET_USD \
     -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-    -e HTTP_PROXY=http://$PROXY_NAME:3128 \
-    -e HTTPS_PROXY=http://$PROXY_NAME:3128 \
-    -e http_proxy=http://$PROXY_NAME:3128 \
-    -e https_proxy=http://$PROXY_NAME:3128 \
+    -e "HTTP_PROXY=http://$PROXY_NAME:3128" \
+    -e "HTTPS_PROXY=http://$PROXY_NAME:3128" \
+    -e "http_proxy=http://$PROXY_NAME:3128" \
+    -e "https_proxy=http://$PROXY_NAME:3128" \
     -e NO_PROXY=localhost,127.0.0.1 \
     -w /workspace \
     node:24 sleep infinity > /dev/null

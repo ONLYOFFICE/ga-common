@@ -22,23 +22,30 @@ Environment:
   BUGZILLA_HOST           required: Bugzilla host name (provided via secret)
   BUGZILLA_MAX_IDS        default: 30 (cap on referenced bugs per PR)
   BUGZILLA_COMMENT_MAXLEN default: 2000 (per-comment text cap)
+  BUGZILLA_TOTAL_TIMEOUT  default: 120 (seconds of total wall clock for all fetches)
 """
 import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 HOST = os.environ.get("BUGZILLA_HOST", "")
 API_KEY = os.environ.get("BUGZILLA_API_KEY", "")
-# fetch_block() calls are sequential (20s timeout each, see fetch()), so a
+# fetch_block() calls are sequential (20s timeout each, see rest_get()), so a
 # PR referencing many bugs against a slow/unresponsive Bugzilla can eat into
 # the job's overall timeout during "Prepare review context", before the
 # review itself even starts - hence a cap, even a generous one.
 MAX_IDS = int(os.environ.get("BUGZILLA_MAX_IDS", "30"))
 MAXLEN = int(os.environ.get("BUGZILLA_COMMENT_MAXLEN", "2000"))
+# MAX_IDS alone does not bound the damage: 30 ids x 2 requests x 20s is 20 minutes - the whole
+# job budget, spent before claude starts. Bugs that miss the budget degrade to a note.
+TOTAL_TIMEOUT = float(os.environ.get("BUGZILLA_TOTAL_TIMEOUT", "120"))
+
+_deadline = None
 
 NO_BUG = "No bug reference found in PR title or description."
 
@@ -48,8 +55,9 @@ NO_BUG = "No bug reference found in PR title or description."
 # are captured as one blob and split out below.
 #   "fix Bug 81502", "Bug fix 81502", "Bug 81502", "Bug #81502",
 #   "bugfix 81502", "Bug81502", "fix bug 81502, 81503, 81504".
+# The (?<![A-Za-z]) guard keeps "debug 1234" from registering as a bug reference.
 _BUG_RE = re.compile(
-    r"(?:bug[\s_#:-]*(?:fix)?|fix[\s_#:-]*bug)[\s_#:-]*"
+    r"(?:(?<![A-Za-z])bug[\s_#:-]*(?:fix)?|(?<![A-Za-z])fix[\s_#:-]*bug)[\s_#:-]*"
     r"([0-9]{3,7}(?:\s*[,;]\s*[0-9]{3,7})*)",
     re.IGNORECASE,
 )
@@ -72,8 +80,10 @@ def bug_url(bug_id):
 
 
 def note(bug_id, reason):
-    """Fallback block when data could not be retrieved."""
-    return f'<bug id="{bug_id}">\nBug {bug_id}: data not retrieved ({reason}). {bug_url(bug_id)}\n</bug>'
+    """Fallback block when data could not be retrieved. The reason is server-supplied
+    (Bugzilla's own error message), so it goes through sanitize() like any other untrusted
+    text - unsanitized it could carry angle brackets and close the <bug> wrapper."""
+    return f'<bug id="{bug_id}">\nBug {bug_id}: data not retrieved ({sanitize(reason, 200)}). {bug_url(bug_id)}\n</bug>'
 
 
 def fix_mojibake(text):
@@ -139,12 +149,17 @@ def render(bug, comments, bug_id):
     lines = [f'<bug id="{bid}">']
     lines.append(f"- URL: {bug_url(bid)}")
     lines.append(f"- Summary: {sanitize(b.get('summary', ''), 300)}")
-    lines.append(f"- Status: {b.get('status', '')} {b.get('resolution', '')}".rstrip())
+    # Bugzilla-supplied text reaching an LLM prompt, so same sanitize() as summary/comments:
+    # enum-ish in practice, but an angle bracket in a component name would leak markup.
+    def field(name, cap=120):
+        return sanitize(str(b.get(name, "") or ""), cap)
+
+    lines.append(f"- Status: {field('status')} {field('resolution')}".rstrip())
     lines.append(
         f"- Product / Component / Version: "
-        f"{b.get('product', '')} / {b.get('component', '')} / {b.get('version', '')}"
+        f"{field('product')} / {field('component')} / {field('version')}"
     )
-    lines.append(f"- Severity / Priority: {b.get('severity', '')} / {b.get('priority', '')}")
+    lines.append(f"- Severity / Priority: {field('severity')} / {field('priority')}")
 
     # /rest/bug/<id>/comment -> {"bugs": {"<id>": {"comments": [...]}}}
     clist = (((comments or {}).get("bugs") or {}).get(bid) or {}).get("comments") or []
@@ -167,19 +182,36 @@ def render(bug, comments, bug_id):
     return "\n".join(lines)
 
 
+def budget_exhausted():
+    return _deadline is not None and time.monotonic() >= _deadline
+
+
 def fetch_block(bug_id):
+    if budget_exhausted():
+        return note(bug_id, "bugzilla time budget exhausted")
     bug, err = rest_get(f"bug/{bug_id}")
     if err:
         return note(bug_id, err)
-    comments, _ = rest_get(f"bug/{bug_id}/comment")
+    # Comments are the optional half - with the budget gone, still render the metadata.
+    comments = None
+    if not budget_exhausted():
+        comments, _ = rest_get(f"bug/{bug_id}/comment")
     return render(bug, comments, bug_id)
+
+
+def fetch_blocks(ids):
+    """Renders every id under one shared wall-clock budget (see TOTAL_TIMEOUT)."""
+    global _deadline
+    if TOTAL_TIMEOUT > 0:
+        _deadline = time.monotonic() + TOTAL_TIMEOUT
+    return "\n".join(fetch_block(bid) for bid in ids)
 
 
 def context_from_text(text):
     ids = extract_bug_ids(text)
     if not ids:
         return NO_BUG
-    return "\n".join(fetch_block(bid) for bid in ids)
+    return fetch_blocks(ids)
 
 
 def main(argv):
@@ -203,7 +235,7 @@ def main(argv):
     if not argv:
         print("usage: bugzilla-api.py --from-text | <id>...", file=sys.stderr)
         return 2
-    print("\n".join(fetch_block(bid) for bid in argv))
+    print(fetch_blocks(argv))
     return 0
 
 

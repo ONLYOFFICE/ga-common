@@ -4,8 +4,8 @@
 Fetches general PR conversation comments and inline code-review comments
 (threads left by human reviewers) from the Gitea API and renders a compact
 <review_discussion> data block, e.g. a maintainer explaining why a flagged
-pattern is intentional. Excludes this pipeline's own comments (tracked by
-the "<!-- Claude-Review:" marker). Output is plain data, never instructions.
+pattern is intentional. Excludes this pipeline's own comments (any of the
+markers in BOT_MARKERS). Output is plain data, never instructions.
 Any failure degrades to a placeholder so the review never breaks.
 
 Usage:
@@ -39,7 +39,9 @@ MAX_INLINE = int(os.environ.get("REVIEW_DISCUSSION_MAX_INLINE", "30"))
 MAXLEN = int(os.environ.get("REVIEW_DISCUSSION_COMMENT_MAXLEN", "400"))
 
 NO_DISCUSSION = "No prior discussion or review comments found."
-BOT_MARKER = "<!-- Claude-Review:"
+# Every marker this pipeline stamps on its own comments - the non-ASCII report included,
+# which used to come back into the prompt as if a human had written it.
+BOT_MARKERS = ("<!-- Claude-Review:", "<!-- Non-ASCII-Check -->", "<!-- claude-review-state:")
 
 
 def sanitize(text, cap=None):
@@ -96,7 +98,8 @@ def render_comments(pr_number):
         comments = paginate(f"issues/{pr_number}/comments", max_items=MAX_COMMENTS * 4)
     except Exception:  # noqa: BLE001 - network/API hiccup, never fatal
         return []
-    human = [c for c in comments if BOT_MARKER not in (c.get("body") or "")]
+    human = [c for c in comments
+             if not any(marker in (c.get("body") or "") for marker in BOT_MARKERS)]
     lines = []
     for c in human[:MAX_COMMENTS]:
         body = sanitize(c.get("body", ""))

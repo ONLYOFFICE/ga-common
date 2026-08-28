@@ -146,12 +146,57 @@ def render_bug(bug):
     return "\n".join(lines)
 
 
+STATE_OPEN_KEYS = ("id", "category", "severity", "title", "why")
+STATE_FIXED_KEYS = ("category", "severity", "title", "was", "fix_applied")
+
+
+def load_previous_state(path):
+    """Reads --previous-state defensively and drops anything unusable.
+
+    The blob is base64-decoded out of a PR comment, so its shape is not guaranteed:
+    an older pipeline's schema or a hand-edited comment both reach this code, and
+    build()/render_fixed_issue()/cap_state_size() index these fields directly. A
+    non-dict payload or an unknown severity used to raise and lose the whole review.
+    """
+    state = {"open": [], "fixed": []}
+    if not path:
+        return state
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except FileNotFoundError:
+        return state
+    except ValueError as e:
+        print(f"::warning::render-review: previous state is not valid JSON ({e}) - ignoring", file=sys.stderr)
+        return state
+    if not isinstance(loaded, dict):
+        print(f"::warning::render-review: previous state is a {type(loaded).__name__}, expected an object - ignoring", file=sys.stderr)
+        return state
+
+    def usable(entry, keys):
+        return (isinstance(entry, dict)
+                and all(key in entry for key in keys)
+                and entry["severity"] in SEVERITY_EMOJI
+                and isinstance(entry.get("locations", []), list))
+
+    for bucket, keys in (("open", STATE_OPEN_KEYS), ("fixed", STATE_FIXED_KEYS)):
+        raw = loaded.get(bucket)
+        raw = raw if isinstance(raw, list) else []
+        kept = [entry for entry in raw if usable(entry, keys)]
+        if len(kept) != len(raw):
+            print(f"::warning::render-review: dropped {len(raw) - len(kept)} unusable previous-state '{bucket}' entr(ies)", file=sys.stderr)
+        state[bucket] = kept
+    return state
+
+
 def cap_state_size(state, max_bytes):
     """Backstop so a PR with many findings can't blow the state blob past the comment
     budget: drops oldest fixed entries first, then least-severe open findings."""
     if not max_bytes:
         return state
-    budget = max_bytes // 2
+    # 3/8 raw, not 1/2: the blob is embedded base64-encoded (4 bytes per 3), so a half
+    # budget took ~2/3 of the comment allowance and squeezed the visible review.
+    budget = max_bytes * 3 // 8
     def size():
         return len(json.dumps(state, ensure_ascii=False).encode("utf-8"))
     while size() > budget and state["fixed"]:
@@ -283,13 +328,7 @@ def main():
     with open(args.structured, "r", encoding="utf-8") as fh:
         structured = json.load(fh)
 
-    prev_state = {"open": [], "fixed": []}
-    if args.previous_state:
-        try:
-            with open(args.previous_state, "r", encoding="utf-8") as fh:
-                prev_state = json.load(fh)
-        except FileNotFoundError:
-            pass
+    prev_state = load_previous_state(args.previous_state)
 
     output = build(structured, prev_state, max_state_bytes=args.max_bytes)
     if args.max_bytes and len(output.encode("utf-8")) > args.max_bytes:
