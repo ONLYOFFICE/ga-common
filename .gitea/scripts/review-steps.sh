@@ -310,9 +310,12 @@ post_review_and_set_status() {
   # fallback when Claude or the renderer produced no valid output
   if [ ! -s claude-output.md ] || ! grep -q "<details>" claude-output.md 2>/dev/null; then
     { printf '**Review error** — could not complete. See the [workflow run](%s) for details.' "$(_run_url)"
-      [ -f repo/previous-claude-output.md ] && \
+      # Skip the wrap if the previous comment is itself an error fallback - otherwise consecutive
+      # failures nest a "Previous review" wrapper inside a "Previous review" wrapper each time.
+      if [ -f repo/previous-claude-output.md ] && ! grep -q '^\*\*Review error\*\*' repo/previous-claude-output.md; then
         printf '\n\n---\n\n<details><summary>Previous review</summary>\n\n%s\n\n</details>' \
                "$(<repo/previous-claude-output.md)"
+      fi
     } > claude-output.md
   fi
 
