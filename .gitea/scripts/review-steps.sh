@@ -218,6 +218,9 @@ prepare_review_context() {
     || { echo "::warning::Failed to post working comment"; WORKING_ID=""; }
   echo "$WORKING_ID" > repo/review-comment-id
   echo "Working comment: #$WORKING_ID"
+  # post_review_and_set_status (a later, separate step) needs this to avoid stamping a failed
+  # run's SHA on the review marker - see the fallback branch there.
+  echo "$PREVIOUS_SHA" > repo/previous-sha.txt
 
   # --- PR metadata: single jq pass for numeric fields ---
   local PR_INFO PR_TITLE PR_AUTHOR PR_BODY COMMIT_MESSAGES PR_ADDITIONS PR_DELETIONS
@@ -377,7 +380,9 @@ post_review_and_set_status() {
   fi
 
   # fallback when Claude or the renderer produced no valid output
+  local IS_FALLBACK=false
   if [ ! -s claude-output.md ] || ! grep -q "<details>" claude-output.md 2>/dev/null; then
+    IS_FALLBACK=true
     { printf '**Review error** — could not complete. See the [workflow run](%s) for details.' "$(_run_url)"
       # Skip the wrap if the previous comment is itself an error fallback - otherwise consecutive
       # failures nest a "Previous review" wrapper inside a "Previous review" wrapper each time.
@@ -394,7 +399,12 @@ post_review_and_set_status() {
   # without ever echoing it. Printing it here is what the digest depends on.
   cat claude-output.md
   echo "Posting review ($(wc -l < claude-output.md) lines)"
-  upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$PR_SHA" "" "true" \
+  # On a fallback, stamp the marker with the last SUCCESSFULLY reviewed SHA (from
+  # prepare_review_context, written to previous-sha.txt), not this failed run's PR_SHA - the
+  # marker should only ever claim "this SHA was reviewed" for a SHA that actually was.
+  local COMMENT_SHA="$PR_SHA"
+  $IS_FALLBACK && COMMENT_SHA=$(cat repo/previous-sha.txt 2>/dev/null || true)
+  upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$COMMENT_SHA" "" "true" \
     || echo "::warning::Failed to post review comment"
 
   # derive commit status from job result + review verdict
