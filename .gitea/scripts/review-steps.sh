@@ -6,6 +6,20 @@
 source "$(dirname "${BASH_SOURCE[0]}")/gitea-api.sh"
 
 # ---------------------------------------------------------------------------
+# True if a newer push has landed on this PR since this run was dispatched for $PR_SHA - a cheap
+# self-check so a stale run bails out instead of racing a superseding run for the same shared
+# tracked comment. concurrency.cancel-in-progress (keyed on pr_url) is supposed to prevent two
+# runs for the same PR from ever being live together, but isn't reliable enough alone to depend
+# on for correctness here: confirmed live, an older run finished normally and its "Analyzing..."
+# working-comment placeholder (posted by a run for a newer push that wasn't actually cancelled)
+# landed after it, permanently burying the older run's real, completed result.
+is_pr_stale() {
+  local live_sha
+  live_sha=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER" 2>/dev/null | jq -r '.head.sha // empty')
+  [ -n "$live_sha" ] && [ "$live_sha" != "$PR_SHA" ]
+}
+
+# ---------------------------------------------------------------------------
 # Carries review statuses to a sync-merge commit (statuses are SHA-bound, so a
 # required check would otherwise block the PR). Best-effort.
 # ---------------------------------------------------------------------------
@@ -34,6 +48,12 @@ carry_over_statuses() {
 prepare_review_context() {
   local REPO_PATH="$ORG_NAME/$REPO_NAME"
   local PREVIOUS_SHA="" PREV_AVAILABLE=false
+
+  if is_pr_stale; then
+    echo "A newer push landed on this PR since dispatch — skipping (the superseding run owns it)"
+    echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+    return 0
+  fi
 
   # --- diff ---
   gitea_api "$REPO_PATH/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
@@ -214,6 +234,12 @@ prepare_review_context() {
     fi
   fi
 
+  if is_pr_stale; then
+    echo "A newer push landed on this PR while preparing the review — skipping before touching the shared comment"
+    echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+    return 0
+  fi
+
   set_commit_status "$REPO_PATH" "$PR_SHA" "pending" "In progress"
 
   local WORKING_ID
@@ -342,6 +368,14 @@ prepare_review_context() {
 # ---------------------------------------------------------------------------
 post_review_and_set_status() {
   local REPO_PATH="$ORG_NAME/$REPO_NAME"
+
+  # The review itself can run for minutes - re-check right before touching the shared comment,
+  # not just at prepare_review_context's start, so a push landing mid-review doesn't let a
+  # now-stale run bury a superseding run's result under this one (or vice versa).
+  if is_pr_stale; then
+    echo "A newer push landed on this PR during the review — discarding this run's result instead of posting it"
+    return 0
+  fi
 
   # resolve comment id (written by prepare; fallback to API lookup)
   local REVIEW_COMMENT_ID
