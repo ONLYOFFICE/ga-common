@@ -146,9 +146,12 @@ prepare_review_context() {
   # submodule commit was itself reviewed somewhere - that isn't re-verified here.
   local SUBMODULE_RAW
   if $PREV_AVAILABLE; then
-    SUBMODULE_RAW=$(git -C repo diff --raw "$PREVIOUS_SHA" HEAD 2>/dev/null)
+    SUBMODULE_RAW=$(git -C repo diff --no-color --raw "$PREVIOUS_SHA" HEAD 2>/dev/null)
   else
-    SUBMODULE_RAW=$(git -C repo diff --raw "origin/$BASE_BRANCH...HEAD" 2>/dev/null)
+    SUBMODULE_RAW=$(git -C repo diff --no-color --raw "origin/$BASE_BRANCH...HEAD" 2>/dev/null)
+  fi
+  if [ -n "$SUBMODULE_RAW" ]; then
+    echo "Submodule-only check: $(grep -c '^:160000 160000' <<< "$SUBMODULE_RAW") of $(grep -c . <<< "$SUBMODULE_RAW") changed path(s) are gitlinks"
   fi
   if [ -n "$SUBMODULE_RAW" ] && ! grep -qv '^:160000 160000' <<< "$SUBMODULE_RAW"; then
     if $PREV_AVAILABLE; then
