@@ -51,7 +51,9 @@ env:
 
 concurrency:
   group: Claude-Review-${{ inputs.pr_url }}
-  cancel-in-progress: true
+  # false (queue, don't cancel): true proved unreliable live - a "cancelled" run kept running
+  # long enough to clobber a finished run's comment. review-steps.sh's is_pr_stale() stays as backup.
+  cancel-in-progress: false
 
 jobs:
   review:
