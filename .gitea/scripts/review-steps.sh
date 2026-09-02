@@ -80,7 +80,10 @@ carry_over_statuses() {
     entry=$(jq -c --arg ctx "$ctx" '[.[] | select(.context == $ctx)] | sort_by(.id) | last // empty' <<< "$statuses" 2>/dev/null) || continue
     [ -n "$entry" ] && [ "$entry" != "null" ] || continue
     state=$(jq -r '.status // empty' <<< "$entry")
-    case "$state" in success|failure|error) ;; *) continue ;; esac
+    # warning: BLOCKED's own status since post_review_and_set_status stopped using failure for
+    # it - without this here too, a carried-over BLOCKED verdict silently vanished instead of
+    # propagating to the sync-merge/submodule-skip commit.
+    case "$state" in success|failure|error|warning) ;; *) continue ;; esac
     # set_commit_status re-adds the "/ " description prefix, so strip it here.
     desc=$(jq -r '.description // "" | sub("^/ "; "")' <<< "$entry")
     set_commit_status "$repo" "$to_sha" "$state" "${desc:+$desc }(carried over)" "$ctx"
@@ -569,10 +572,14 @@ post_review_and_set_status() {
   # derive commit status from job result + review verdict
   local STATE DESC
   # ${DURATION:+ ...} so a missing review-start.txt yields "Approved", not "Approved ".
-  if   [[ "$JOB_STATUS"       != "success" ]]; then STATE="failure" DESC="Failed${DURATION:+ $DURATION}"
+  # Never "failure", anywhere below, on purpose: this pipeline's own status must never be able to
+  # gate merge, whether that's a content judgment (BLOCKED) or the review failing to run at all
+  # (JOB_STATUS != success) - that's a human call to make from the PR, not something this status
+  # context should be able to force even if a repo later marks it required.
+  if   [[ "$JOB_STATUS"       != "success" ]]; then STATE="warning" DESC="Failed${DURATION:+ $DURATION}"
   elif [[ "$CORRECT_VERDICT"  == "APPROVE" ]]; then STATE="success" DESC="Approved${DURATION:+ $DURATION}"
-  elif [[ "$CORRECT_VERDICT"  == "BLOCKED" ]]; then STATE="failure" DESC="Blocked${DURATION:+ $DURATION}"
-  else                                              STATE="error"   DESC="Unknown${DURATION:+ $DURATION}"
+  elif [[ "$CORRECT_VERDICT"  == "BLOCKED" ]]; then STATE="warning" DESC="Blocked${DURATION:+ $DURATION}"
+  else                                              STATE="warning" DESC="Unknown${DURATION:+ $DURATION}"
   fi
 
   echo "Job: $JOB_STATUS | Verdict: ${CORRECT_VERDICT:-none} | Status: $STATE $DURATION"
