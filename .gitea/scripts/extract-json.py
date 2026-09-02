@@ -10,11 +10,14 @@ summary object fails the whole extraction; see validate()'s docstring for why.
 Prints the JSON compact on success; exits 1 with a warning on stderr otherwise.
 """
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent.parent / "review" / "review-schema.json"
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+# Defaults to the review schema; the bug-triage pipeline points EXTRACT_JSON_SCHEMA at its own.
+SCHEMA_PATH = Path(os.environ.get("EXTRACT_JSON_SCHEMA") or _REPO_ROOT / "review" / "review-schema.json")
 
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 
@@ -119,9 +122,10 @@ def validate(data, schema, path="root"):
         if error:
             return error
 
-    for key in ("bugs", "findings", "resolved"):
-        arr_schema = props.get(key)
-        if not arr_schema:
+    # Every top-level array-of-objects the schema declares: for review-schema.json that is
+    # exactly bugs/findings/resolved, and a triage schema gets its own arrays filtered the same way.
+    for key, arr_schema in props.items():
+        if arr_schema.get("type") != "array" or arr_schema.get("items", {}).get("type") != "object":
             continue
         value = data.get(key)
         if value is None:
@@ -156,7 +160,7 @@ def main():
 
     error = validate(data, schema)
     if error:
-        print(f"::warning::extract-json: extracted JSON does not match review-schema.json's required shape ({error})", file=sys.stderr)
+        print(f"::warning::extract-json: extracted JSON does not match {SCHEMA_PATH.name}'s required shape ({error})", file=sys.stderr)
         sys.exit(1)
 
     json.dump(data, sys.stdout, ensure_ascii=False)

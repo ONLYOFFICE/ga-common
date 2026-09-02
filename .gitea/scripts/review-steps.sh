@@ -566,6 +566,18 @@ post_review_and_set_status() {
   upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$COMMENT_SHA" "" "true" \
     || echo "::warning::Failed to post review comment"
 
+  # Recorded only here, after the comment has actually gone out: the optimistic-concurrency check
+  # above can discard this run's output entirely when another run already posted a real review,
+  # and claiming "posted a fallback" for a run that posted nothing would be a false alert. The run
+  # can still end green at this point, which is why nothing outside the workflow would otherwise
+  # see that the PR got an error stub instead of a review.
+  if $IS_FALLBACK; then
+    # pipeline-failure.txt is read by the last step of the workflow, Notify on failure, which
+    # cannot source anything from here: it has to work when the failure happened before the
+    # checkout. The name is spelled out in both places on purpose.
+    echo "posted a Review error fallback instead of a review" > pipeline-failure.txt
+  fi
+
   # derive commit status from job result + review verdict
   local STATE DESC
   # ${DURATION:+ ...} so a missing review-start.txt yields "Approved", not "Approved ".
