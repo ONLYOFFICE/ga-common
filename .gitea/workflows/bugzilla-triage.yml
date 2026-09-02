@@ -1,0 +1,177 @@
+name: Bugzilla Triage
+run-name: "Triage • Bug ${{ inputs.bug_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bug_id:
+        description: 'Bugzilla bug id (e.g. 83616)'
+        required: true
+        type: string
+      repos:
+        # Escape hatch for a manual run: skips the model-driven selection entirely. Names are still
+        # validated against the Gitea listing, so a typo fails the run instead of being ignored.
+        description: 'Repositories to inspect, comma-separated (empty = let the model choose)'
+        required: false
+        type: string
+        default: ''
+      is_retry:
+        # Set only by the pipeline's own re-dispatch, so a run that again finds itself short of a
+        # repository ends the chain instead of looping.
+        description: 'Internal: this run is a retry with an added repository'
+        required: false
+        type: string
+        default: 'false'
+      model:
+        description: 'Claude model'
+        required: false
+        type: string
+        default: claude-sonnet-5
+      claude_code_version:
+        # Pinned, not 'latest': the run depends on specific CLI flags (--effort, --max-budget-usd,
+        # --json-schema), so bump it deliberately after a manual run with the new version.
+        description: 'Claude Code CLI version (exact version, or a dist-tag like "latest" to test)'
+        required: false
+        type: string
+        default: '2.1.250'
+      effort:
+        description: 'Reasoning effort level'
+        required: false
+        type: choice
+        default: 'high'
+        options:
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+      max_budget_usd:
+        description: 'Hard cap on API spend for a single triage run (USD)'
+        required: false
+        type: string
+        default: '2'
+
+env:
+  GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+
+concurrency:
+  # Per bug, and queue rather than cancel: a duplicate webhook delivery for the same bug should
+  # wait and then find the work already done, never race a live run (same reasoning as claude-review.yml).
+  group: Bugzilla-Triage-${{ inputs.bug_id }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    # Generous next to the review job: several repositories get cloned before the model starts.
+    timeout-minutes: 30
+    env:
+      BUG_ID: ${{ inputs.bug_id }}
+    steps:
+      - name: Validate input
+        run: |
+          set -euo pipefail
+          [[ "$BUG_ID" =~ ^[0-9]{1,7}$ ]] || { echo "::error::bug_id must be a number, got '$BUG_ID'"; exit 1; }
+
+      - name: Checkout ga-common
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
+          git clone "https://$GITEA_HOST/ONLYOFFICE/ga-common" --depth=1 --branch "$REF_NAME" .
+
+      - name: Select API key
+        id: select_key
+        env:
+          ANTHROPIC_KEY_TRIAGE: ${{ secrets.ANTHROPIC_KEY_TRIAGE }}
+          ANTHROPIC_KEY_DEFAULT: ${{ secrets.ANTHROPIC_KEY_DEFAULT }}
+        run: |
+          set -euo pipefail
+          # A dedicated key keeps triage spend separate from the per-repo review keys; falls back to the shared default.
+          ANTHROPIC_API_KEY="${ANTHROPIC_KEY_TRIAGE:-$ANTHROPIC_KEY_DEFAULT}"
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::No Anthropic API key available (neither ANTHROPIC_KEY_TRIAGE nor ANTHROPIC_KEY_DEFAULT is set)"
+            exit 1
+          fi
+          echo "::add-mask::$ANTHROPIC_API_KEY"
+          echo "api_key=$ANTHROPIC_API_KEY" >> $GITHUB_OUTPUT
+
+      - name: Prepare triage context
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          BUGZILLA_API_KEY: ${{ secrets.BUGZILLA_API_KEY }}
+          BUGZILLA_HOST: ${{ secrets.BUGZILLA_HOST }}
+          # Used only for the repository-selection call (see select-repos.py), never inside the sandbox.
+          ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
+          SELECT_MODEL: ${{ inputs.model }}
+          TRIAGE_REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$ANTHROPIC_API_KEY"
+          source .gitea/scripts/triage-steps.sh
+          prepare_triage_context
+
+      - name: Run triage (isolated container)
+        env:
+          ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
+          CLAUDE_MODEL: ${{ inputs.model }}
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+          CLAUDE_EFFORT: ${{ inputs.effort }}
+          CLAUDE_MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$ANTHROPIC_API_KEY"
+          source .gitea/scripts/triage-sandbox.sh
+
+          # DooD: the CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY, egress
+          # restricted to npm + Anthropic - no GITEA_TOKEN, no BUGZILLA_API_KEY, no docker.sock.
+          name_triage_resources
+          trap cleanup_triage_sandbox EXIT INT TERM
+          cleanup_triage_sandbox
+
+          resolve_triage_output_dir
+          setup_triage_sandbox
+          run_claude_triage
+          summarize_claude_triage
+
+      - name: Upload triage artifacts
+        # v3: v4/v7 intermittently fail against a non-github.com host (GHESNotSupportedError).
+        uses: actions/upload-artifact@v3.2.2
+        if: always()
+        continue-on-error: true
+        with:
+          name: claude-triage-artifacts
+          path: |
+            claude-output/claude-debug.log
+            claude-output/claude-output.json
+            claude-prompt.txt
+            triage-message.txt
+          retention-days: 1
+          if-no-files-found: ignore
+
+      - name: Report result
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          source .gitea/scripts/triage-steps.sh
+          report_triage_result
+
+      - name: Retry with the missing repository
+        # Only when the analysis itself named code it was not given (see TRIAGE.md); never on a retry.
+        if: always() && inputs.is_retry != 'true'
+        continue-on-error: true
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          IS_RETRY: ${{ inputs.is_retry }}
+          CLAUDE_MODEL: ${{ inputs.model }}
+          CLAUDE_EFFORT: ${{ inputs.effort }}
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+          CLAUDE_MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
+        run: |
+          set -euo pipefail
+          source .gitea/scripts/triage-steps.sh
+          maybe_retry_with_missing_repo

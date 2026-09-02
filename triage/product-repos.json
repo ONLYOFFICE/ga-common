@@ -1,0 +1,62 @@
+[
+  {
+    "products": ["DocSpace"],
+    "repos": ["DocSpace-client", "DocSpace-server", "docspace-ui-kit-react", "DocSpace-buildtools"]
+  },
+  {
+    "products": ["AI.Agent"],
+    "repos": ["DocSpace-server", "DocSpace-client", "onlyoffice-ai-chat"]
+  },
+  {
+    "products": ["SDK.Word", "SDK.Cell", "SDK.Slide", "SDK.PDF", "SDK.Form", "UI", "UI.MobileWeb"],
+    "repos": ["sdkjs", "web-apps"]
+  },
+  {
+    "products": ["SDK.Visio"],
+    "repos": ["sdkjs", "core"]
+  },
+  {
+    "products": ["Converter"],
+    "repos": ["core", "build_tools"]
+  },
+  {
+    "products": ["Server"],
+    "repos": ["server", "core"]
+  },
+  {
+    "products": ["Sdk.Builder"],
+    "repos": ["core", "sdkjs", "document-builder-package"]
+  },
+  {
+    "products": ["Plugins"],
+    "repos": ["sdkjs-plugins", "sdkjs"]
+  },
+  {
+    "products": ["UI.Desktop"],
+    "repos": ["desktop-apps", "desktop-sdk", "web-apps"]
+  },
+  {
+    "products": ["SDK.Desktop"],
+    "repos": ["desktop-apps", "desktop-sdk", "sdkjs"]
+  },
+  {
+    "products": ["Addon.Desktop"],
+    "repos": ["desktop-apps", "desktop-sdk"]
+  },
+  {
+    "products": ["Install"],
+    "repos": ["document-server-package", "Docker-DocumentServer", "OneClickInstall-Docs"]
+  },
+  {
+    "products": ["Install.Desktop"],
+    "repos": ["desktop-apps", "desktop-onlineinstaller", "appimage-desktopeditors", "snap-desktopeditors"]
+  },
+  {
+    "products": ["Sdk.Android"],
+    "repos": ["documents-app-android", "sdkjs"]
+  },
+  {
+    "products": ["UI.Android"],
+    "repos": ["documents-app-android"]
+  }
+]
