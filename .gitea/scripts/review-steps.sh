@@ -253,8 +253,16 @@ prepare_review_context() {
   # --- sync-merge guard: skip a pure base-branch sync merge (no new feature work) ---
   # Only skips if a previous reviewed SHA exists to carry statuses from - otherwise a
   # PR's first push being such a merge still gets a real review. "HEAD^2 == base tip"
-  # alone isn't enough: also require no new commits since the last review and no
-  # conflict resolution of the merge's own.
+  # alone isn't enough: also require no new commits since the last review.
+  #
+  # Deliberately does NOT look at whether the merge itself resolved conflicts (dropped an
+  # earlier "evil merge" --cc combined-diff check that ran a real review whenever it found
+  # hand-reconciled content): confirmed live, a real conflict resolution here still turned out
+  # to be content the base branch had already brought in and had presumably already been
+  # reviewed as part of landing on the base branch itself - re-reviewing it again here, in an
+  # unrelated feature PR, just because a sync-merge happened to collide with it, is noise, not
+  # a second independent look at genuinely new code. If a *pure* sync-merge should ever need a
+  # human's attention again, that's a call for the merge's own author to make, not this guard's.
   if git -C repo rev-parse --verify "HEAD^2" &>/dev/null; then
     local MERGE_P2 BASE_TIP
     MERGE_P2=$(git -C repo rev-parse HEAD^2 2>/dev/null || true)
@@ -268,14 +276,6 @@ prepare_review_context() {
         NEW_COMMITS=$(git -C repo rev-list --no-merges "HEAD^1" --not "$PREVIOUS_SHA" "$BASE_TIP" 2>/dev/null) \
           || NEW_COMMITS="rev-list-failed"
       fi
-      # An "evil merge" resolves conflicts with hand-written code neither parent has,
-      # so real --cc combined-diff *content* means the merge itself needs review.
-      # --name-only is NOT a substitute here: it lists any file whose merged blob
-      # differs from either parent, which includes files both sides touched on
-      # non-overlapping lines and git auto-merged cleanly - only patch mode's
-      # "diff --cc <path>" headers confirm there's actual hand-reconciled content.
-      local MERGE_OWN_FILES
-      MERGE_OWN_FILES=$(git -C repo show --cc --format= HEAD 2>/dev/null | grep -c '^diff --cc' || true)
       if [ -z "$PREVIOUS_SHA" ]; then
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but no previous reviewed SHA — running review anyway"
       elif [ "$PREV_AVAILABLE" != true ]; then
@@ -284,8 +284,6 @@ prepare_review_context() {
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but the commits since ${PREVIOUS_SHA:0:10} could not be enumerated — running review anyway"
       elif [ -n "$NEW_COMMITS" ]; then
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but $(grep -c . <<< "$NEW_COMMITS") new commit(s) landed on $PR_BRANCH since ${PREVIOUS_SHA:0:10} — running review"
-      elif [ "${MERGE_OWN_FILES:-0}" -gt 0 ]; then
-        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but it resolves conflicts in $MERGE_OWN_FILES file(s) — running review"
       else
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) with no new commits since ${PREVIOUS_SHA:0:10} — skipping review"
         carry_over_statuses "$REPO_PATH" "$PREVIOUS_SHA" "$PR_SHA"
