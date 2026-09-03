@@ -458,13 +458,15 @@ prepare_review_context() {
 post_review_and_set_status() {
   local REPO_PATH="$ORG_NAME/$REPO_NAME"
 
-  # The review itself can run for minutes - re-check right before touching the shared comment,
-  # not just at prepare_review_context's start, so a push landing mid-review doesn't let a
-  # now-stale run bury a superseding run's result under this one (or vice versa).
-  if is_pr_stale; then
-    echo "A newer push landed on this PR during the review — discarding this run's result instead of posting it"
-    return 0
-  fi
+  # No is_pr_stale() check here on purpose, unlike prepare_review_context's two early ones: this
+  # point is reached only after the review already ran and cost real money - discarding a
+  # completed result just because a newer push landed meanwhile throws away paid-for work for no
+  # safety benefit, now that the workflow queues instead of racing (concurrency.cancel-in-progress:
+  # false - same pr_url means a newer dispatch waits for this run to finish, it can't clobber
+  # this post). Confirmed live: exactly this discard silently dropped a completed, ready-to-post
+  # review (sdkjs#2741) even though the queued next run would have safely waited its turn either
+  # way. The comment-updated-at check below still guards the one thing queuing alone doesn't fully
+  # rule out - two dispatches racing on the literal same comment.
 
   # resolve comment id (written by prepare; fallback to API lookup)
   local REVIEW_COMMENT_ID
@@ -537,10 +539,11 @@ post_review_and_set_status() {
   cat claude-output.md
   echo "Posting review ($(wc -l < claude-output.md) lines)"
 
-  # Optimistic-concurrency check, on top of is_pr_stale's SHA check above (which two runs
-  # dispatched for the identical SHA - a re-run, a duplicate webhook delivery - wouldn't trip):
-  # if the tracked comment's updated_at has moved since this run posted its own working
-  # placeholder, something else wrote to it in between.
+  # Optimistic-concurrency check: if the tracked comment's updated_at has moved since this run
+  # posted its own working placeholder, something else wrote to it in between - queuing (see
+  # concurrency.cancel-in-progress in claude-review.yml) should make that impossible for two
+  # distinct pushes, but doesn't fully rule out two runs dispatched for the identical SHA (a
+  # re-run, a duplicate webhook delivery), which still share this comment.
   if [ -n "$REVIEW_COMMENT_ID" ] && [ -s repo/comment-updated-at.txt ]; then
     local EXPECTED_UPDATED_AT CURRENT_COMMENT CURRENT_UPDATED_AT
     EXPECTED_UPDATED_AT=$(<repo/comment-updated-at.txt)
