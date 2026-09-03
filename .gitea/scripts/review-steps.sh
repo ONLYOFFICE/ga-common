@@ -566,7 +566,7 @@ post_review_and_set_status() {
   # marker should only ever claim "this SHA was reviewed" for a SHA that actually was.
   local COMMENT_SHA="$PR_SHA"
   $IS_FALLBACK && COMMENT_SHA=$(cat repo/previous-sha.txt 2>/dev/null || true)
-  upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$COMMENT_SHA" "" "true" \
+  upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$COMMENT_SHA" \
     || echo "::warning::Failed to post review comment"
 
   # derive commit status from job result + review verdict

@@ -458,12 +458,11 @@ render_claude_review() {
   (( R_COUNT == 0 && R_ERRCOUNT == 0 )) && return
 
   # 👍/👎 reactions on each PR's latest Claude Review comment (Gitea reaction
-  # content is "+1"/"-1", same convention as GitHub). claude-review.yml now
-  # seeds one +1 and one -1 on that comment from the bot account itself so
-  # both buttons are visibly present - exclude reactions from that same
-  # account (the comment's own author, whoever that is) so the seed doesn't
-  # get counted as real feedback. Only PRs with a real verdict ever got a
-  # comment; network-bound, so fetched in parallel like the run logs above.
+  # content is "+1"/"-1", same convention as GitHub) - genuine human reactions
+  # only, the pipeline no longer pre-seeds any of its own. Still excludes
+  # reactions from the comment's own author (the bot account) as a defensive
+  # measure in case that ever changes again. Only PRs with a real verdict ever
+  # got a comment; network-bound, so fetched in parallel like the run logs above.
   local -a REACT_PIDS=() REACT_KEYS=() REACT_TMPS=()
   for KEY in "${PR_ORDER[@]}"; do
     [[ -z "${PR_VERDICT[$KEY]:-}" ]] && continue
