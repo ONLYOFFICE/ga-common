@@ -32,6 +32,11 @@ ALLOWED_REPOSITORIES = tuple(
     for value in os.getenv("ALLOWED_REPOSITORIES", "").split(",")
     if value.strip()
 )
+NOT_ALLOWED_REPOSITORIES = tuple(
+    value.strip()
+    for value in os.getenv("NOT_ALLOWED_REPOSITORIES", "").split(",")
+    if value.strip()
+)
 # Default WIP title prefixes (comma-separated string). Override with WIP_PREFIXES env var.
 # Matching is case-insensitive with an alphanumeric-continuation guard: a bare prefix like "WIP"
 # matches "WIP", "WIP:", "WIP - x", "WIP foo" but never "WIPe".
@@ -67,6 +72,14 @@ def load_config():
         "allowed_repositories": tuple(
             value.strip()
             for value in os.getenv("ALLOWED_REPOSITORIES", ",".join(ALLOWED_REPOSITORIES)).split(",")
+            if value.strip()
+        ),
+        "not_allowed_repositories": tuple(
+            value.strip()
+            for value in os.getenv(
+                "NOT_ALLOWED_REPOSITORIES",
+                ",".join(NOT_ALLOWED_REPOSITORIES),
+            ).split(",")
             if value.strip()
         ),
         "wip_prefixes": tuple(
@@ -138,6 +151,11 @@ def is_repository_allowed(full_name, repo_name, allowed_repositories):
         return True
 
     return full_name in allowed_repositories or repo_name in allowed_repositories
+
+
+def is_repository_not_allowed(full_name, repo_name, not_allowed_repositories):
+    repository_names = {full_name.casefold(), repo_name.casefold()}
+    return any(value.casefold() in repository_names for value in not_allowed_repositories)
 
 
 def is_work_in_progress(title, prefixes):
@@ -288,6 +306,16 @@ def lambda_handler(event, context):
         return response(400, {"ok": False, "error": str(error)})
 
     full_name = f"{inputs['org_name']}/{inputs['repo_name']}"
+    if is_repository_not_allowed(
+        full_name,
+        inputs["repo_name"],
+        config["not_allowed_repositories"],
+    ):
+        return response(
+            200,
+            {"ok": True, "ignored": True, "reason": "repository explicitly not allowed"},
+        )
+
     if not is_repository_allowed(full_name, inputs["repo_name"], config["allowed_repositories"]):
         return response(200, {"ok": True, "ignored": True, "reason": "repository not allowed"})
 
