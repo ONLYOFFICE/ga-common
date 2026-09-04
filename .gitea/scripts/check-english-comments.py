@@ -18,18 +18,51 @@ EXCLUDED_EXTENSIONS = {
     ".json", ".p7s", ".po", ".license", ".resx", ".md", ".lock", ".svg", ".csv",
 }
 
-EXCLUDED_PATH_SEGMENTS = {"locale", "i18n", "translations", "node_modules", "vendor"}
+# Suffixes checked case-insensitively against the full filename (not splitext),
+# since generated files are usually named "*.min.js" / "*.g.cs", not just ".js".
+GENERATED_FILE_SUFFIXES = (
+    ".min.js", ".min.css", ".g.cs", ".designer.cs", ".generated.cs", ".pb.go", ".pb.cs",
+)
 
-COMMENT_RE = re.compile(r"(?://|#(?!!)|<!--|/\*|\{/\*|^\s*\*(?!/)|--(?!\w))")
-STRING_RE  = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|\'[^\'\\]*(?:\\.[^\'\\]*)*\'|`[^`]*`')
-HUNK_RE    = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+EXCLUDED_PATH_SEGMENTS = {
+    "locale", "i18n", "translations", "node_modules", "vendor", "dist", "generated",
+}
+
+# Inline escape hatch for an intentional non-ASCII comment (e.g. a proper noun).
+SUPPRESS_MARKER = "non-ascii: allow"
+
+# Matches the middle of a `/* ... */` block comment when a diff hunk starts partway
+# through one (the opening `/*` is outside the hunk, so BLOCK_COMMENT state alone
+# can't see it) - a conservative per-line fallback, not real cross-hunk tracking.
+STAR_CONTINUATION_RE = re.compile(r"^\s*\*(?!/)")
+
+# Ordered so multi-char delimiters are tried before the single-quote-string
+# alternative would otherwise swallow the first two chars of """ / '''.
+# `--` requires a non-word char on both sides, so a SQL/Lua comment still needs a
+# following space (`--comment` is missed, same as before) but `x--`/`--x` decrement
+# operators are never mistaken for one - and \w is Unicode-aware, so this also
+# spares Cyrillic-adjacent decrements like `--i` in a loop over a Cyrillic buffer.
+TOKEN_RE = re.compile(
+    r'"""|\'\'\''
+    r'|"[^"\\]*(?:\\.[^"\\]*)*"'
+    r'|\'[^\'\\]*(?:\\.[^\'\\]*)*\''
+    r'|`'
+    r'|/\*'
+    r'|//|#(?!!)|<!--|(?<!\w)--(?!\w)'
+)
+
+HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 def has_non_ascii_letters(text: str) -> bool:
     return any(ord(ch) > 127 and unicodedata.category(ch).startswith("L") for ch in text)
 
 
+_missing_link_env_warned = False
+
+
 def file_link(filename: str, lineno: int) -> str:
+    global _missing_link_env_warned
     host = os.environ.get("GITEA_HOST", "")
     org = os.environ.get("ORG_NAME", "")
     repo = os.environ.get("REPO_NAME", "")
@@ -41,11 +74,14 @@ def file_link(filename: str, lineno: int) -> str:
     if host and org and repo and sha:
         url = f"https://{host}/{org}/{repo}/src/commit/{sha}/{filename}#L{lineno}"
         return f"[{filename}:{lineno}]({url})"
+    if not _missing_link_env_warned:
+        print(
+            "Warning: GITEA_HOST/ORG_NAME/REPO_NAME/PR_SHA not fully set - "
+            "falling back to plain file:line references.",
+            file=sys.stderr,
+        )
+        _missing_link_env_warned = True
     return f"{filename}:{lineno}"
-
-
-def strip_strings(line: str) -> str:
-    return STRING_RE.sub('""', line)
 
 
 def max_backtick_run(text: str) -> int:
@@ -58,11 +94,93 @@ def max_backtick_run(text: str) -> int:
 
 
 def is_excluded(path: str) -> bool:
-    ext = os.path.splitext(path)[1].lower()
+    normalized = path.replace("\\", "/")
+    ext = os.path.splitext(normalized)[1].lower()
     if ext in EXCLUDED_EXTENSIONS:
         return True
-    parts = set(path.replace("\\", "/").split("/"))
+    if normalized.lower().endswith(GENERATED_FILE_SUFFIXES):
+        return True
+    parts = set(normalized.split("/"))
     return bool(parts & EXCLUDED_PATH_SEGMENTS)
+
+
+def new_scan_state() -> dict:
+    return {"block_comment": False, "string_delim": None}
+
+
+def extract_comment_text(content: str, state: dict) -> str | None:
+    """Scan one added/context line, carrying `state` forward for multi-line strings
+    and block comments that span diff lines within the same hunk. Returns the
+    comment text to check for non-ASCII letters, or None if there is none."""
+    pos = 0
+    n = len(content)
+
+    if not state["block_comment"] and not state["string_delim"]:
+        star = STAR_CONTINUATION_RE.match(content)
+        if star:
+            close = content.find("*/", star.end())
+            if close == -1:
+                # No closer on this line either - still an open block comment for
+                # whatever follows, same as an explicit `/*` would set below.
+                state["block_comment"] = True
+                return content[star.start():]
+            comment = content[star.start():close]
+            pos = close + 2
+            if comment:
+                return comment
+
+    while pos < n:
+        if state["string_delim"]:
+            idx = content.find(state["string_delim"], pos)
+            if idx == -1:
+                return None
+            pos = idx + len(state["string_delim"])
+            state["string_delim"] = None
+            continue
+
+        if state["block_comment"]:
+            idx = content.find("*/", pos)
+            if idx == -1:
+                return content[pos:]
+            comment = content[pos:idx]
+            pos = idx + 2
+            state["block_comment"] = False
+            if comment:
+                return comment
+            continue
+
+        m = TOKEN_RE.search(content, pos)
+        if not m:
+            return None
+        tok = m.group()
+
+        if tok in ('"""', "'''", "`"):
+            close = content.find(tok, m.end())
+            if close == -1:
+                state["string_delim"] = tok
+                return None
+            pos = close + len(tok)
+            continue
+
+        if tok == "/*":
+            close = content.find("*/", m.end())
+            if close == -1:
+                state["block_comment"] = True
+                return content[m.end():]
+            comment = content[m.end():close]
+            pos = close + 2
+            if comment:
+                return comment
+            continue
+
+        if tok[0] in ('"', "'"):
+            pos = m.end()
+            continue
+
+        # //, #, <!--, or -- - a line comment: everything to end of line is text.
+        return content[m.start():]
+
+    return None
 
 
 def parse_diff(diff_text: str) -> list[tuple[str, int, str]]:
@@ -70,16 +188,23 @@ def parse_diff(diff_text: str) -> list[tuple[str, int, str]]:
     results = []
     current_file = ""
     current_line = 0
+    excluded = False
+    state = new_scan_state()
 
     for line in diff_text.splitlines():
         if line.startswith("+++ b/"):
             current_file = line[6:]
             current_line = 0
+            excluded = is_excluded(current_file)
+            state = new_scan_state()
             continue
 
         hunk = HUNK_RE.match(line)
         if hunk:
             current_line = int(hunk.group(1)) - 1
+            # Each hunk is a separate visible window into the file - state carried
+            # in from before it would be a guess about invisible lines, not a fact.
+            state = new_scan_state()
             continue
 
         # "\ No newline at end of file" is a diff annotation, not a line of either side -
@@ -87,17 +212,30 @@ def parse_diff(diff_text: str) -> list[tuple[str, int, str]]:
         if line.startswith("\\"):
             continue
 
+        if excluded:
+            if line.startswith("+") and not line.startswith("+++"):
+                current_line += 1
+            elif not line.startswith("-"):
+                current_line += 1
+            continue
+
         if line.startswith("+") and not line.startswith("+++"):
             current_line += 1
-            if is_excluded(current_file):
-                continue
             content = line[1:].strip()
-            stripped = strip_strings(content)
-            comment = COMMENT_RE.search(stripped)
-            if comment and has_non_ascii_letters(stripped[comment.start():]):
+            comment = extract_comment_text(content, state)
+            if (
+                comment is not None
+                and SUPPRESS_MARKER not in content.lower()
+                and has_non_ascii_letters(comment)
+            ):
                 results.append((current_file, current_line, content))
-        elif not line.startswith("-"):
+        elif line.startswith("-"):
+            continue
+        else:
             current_line += 1
+            # Context line: keep string/comment state in sync but never report it -
+            # it isn't part of this PR's added code.
+            extract_comment_text(line[1:].strip(), state)
 
     return results
 
