@@ -80,7 +80,10 @@ carry_over_statuses() {
     entry=$(jq -c --arg ctx "$ctx" '[.[] | select(.context == $ctx)] | sort_by(.id) | last // empty' <<< "$statuses" 2>/dev/null) || continue
     [ -n "$entry" ] && [ "$entry" != "null" ] || continue
     state=$(jq -r '.status // empty' <<< "$entry")
-    case "$state" in success|failure|error) ;; *) continue ;; esac
+    # warning: BLOCKED's own status since post_review_and_set_status stopped using failure for
+    # it - without this here too, a carried-over BLOCKED verdict silently vanished instead of
+    # propagating to the sync-merge/submodule-skip commit.
+    case "$state" in success|failure|error|warning) ;; *) continue ;; esac
     # set_commit_status re-adds the "/ " description prefix, so strip it here.
     desc=$(jq -r '.description // "" | sub("^/ "; "")' <<< "$entry")
     set_commit_status "$repo" "$to_sha" "$state" "${desc:+$desc }(carried over)" "$ctx"
@@ -250,8 +253,16 @@ prepare_review_context() {
   # --- sync-merge guard: skip a pure base-branch sync merge (no new feature work) ---
   # Only skips if a previous reviewed SHA exists to carry statuses from - otherwise a
   # PR's first push being such a merge still gets a real review. "HEAD^2 == base tip"
-  # alone isn't enough: also require no new commits since the last review and no
-  # conflict resolution of the merge's own.
+  # alone isn't enough: also require no new commits since the last review.
+  #
+  # Deliberately does NOT look at whether the merge itself resolved conflicts (dropped an
+  # earlier "evil merge" --cc combined-diff check that ran a real review whenever it found
+  # hand-reconciled content): confirmed live, a real conflict resolution here still turned out
+  # to be content the base branch had already brought in and had presumably already been
+  # reviewed as part of landing on the base branch itself - re-reviewing it again here, in an
+  # unrelated feature PR, just because a sync-merge happened to collide with it, is noise, not
+  # a second independent look at genuinely new code. If a *pure* sync-merge should ever need a
+  # human's attention again, that's a call for the merge's own author to make, not this guard's.
   if git -C repo rev-parse --verify "HEAD^2" &>/dev/null; then
     local MERGE_P2 BASE_TIP
     MERGE_P2=$(git -C repo rev-parse HEAD^2 2>/dev/null || true)
@@ -265,14 +276,6 @@ prepare_review_context() {
         NEW_COMMITS=$(git -C repo rev-list --no-merges "HEAD^1" --not "$PREVIOUS_SHA" "$BASE_TIP" 2>/dev/null) \
           || NEW_COMMITS="rev-list-failed"
       fi
-      # An "evil merge" resolves conflicts with hand-written code neither parent has,
-      # so real --cc combined-diff *content* means the merge itself needs review.
-      # --name-only is NOT a substitute here: it lists any file whose merged blob
-      # differs from either parent, which includes files both sides touched on
-      # non-overlapping lines and git auto-merged cleanly - only patch mode's
-      # "diff --cc <path>" headers confirm there's actual hand-reconciled content.
-      local MERGE_OWN_FILES
-      MERGE_OWN_FILES=$(git -C repo show --cc --format= HEAD 2>/dev/null | grep -c '^diff --cc' || true)
       if [ -z "$PREVIOUS_SHA" ]; then
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but no previous reviewed SHA — running review anyway"
       elif [ "$PREV_AVAILABLE" != true ]; then
@@ -281,8 +284,6 @@ prepare_review_context() {
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but the commits since ${PREVIOUS_SHA:0:10} could not be enumerated — running review anyway"
       elif [ -n "$NEW_COMMITS" ]; then
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but $(grep -c . <<< "$NEW_COMMITS") new commit(s) landed on $PR_BRANCH since ${PREVIOUS_SHA:0:10} — running review"
-      elif [ "${MERGE_OWN_FILES:-0}" -gt 0 ]; then
-        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but it resolves conflicts in $MERGE_OWN_FILES file(s) — running review"
       else
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) with no new commits since ${PREVIOUS_SHA:0:10} — skipping review"
         carry_over_statuses "$REPO_PATH" "$PREVIOUS_SHA" "$PR_SHA"
@@ -455,13 +456,15 @@ prepare_review_context() {
 post_review_and_set_status() {
   local REPO_PATH="$ORG_NAME/$REPO_NAME"
 
-  # The review itself can run for minutes - re-check right before touching the shared comment,
-  # not just at prepare_review_context's start, so a push landing mid-review doesn't let a
-  # now-stale run bury a superseding run's result under this one (or vice versa).
-  if is_pr_stale; then
-    echo "A newer push landed on this PR during the review — discarding this run's result instead of posting it"
-    return 0
-  fi
+  # No is_pr_stale() check here on purpose, unlike prepare_review_context's two early ones: this
+  # point is reached only after the review already ran and cost real money - discarding a
+  # completed result just because a newer push landed meanwhile throws away paid-for work for no
+  # safety benefit, now that the workflow queues instead of racing (concurrency.cancel-in-progress:
+  # false - same pr_url means a newer dispatch waits for this run to finish, it can't clobber
+  # this post). Confirmed live: exactly this discard silently dropped a completed, ready-to-post
+  # review (sdkjs#2741) even though the queued next run would have safely waited its turn either
+  # way. The comment-updated-at check below still guards the one thing queuing alone doesn't fully
+  # rule out - two dispatches racing on the literal same comment.
 
   # resolve comment id (written by prepare; fallback to API lookup)
   local REVIEW_COMMENT_ID
@@ -534,10 +537,11 @@ post_review_and_set_status() {
   cat claude-output.md
   echo "Posting review ($(wc -l < claude-output.md) lines)"
 
-  # Optimistic-concurrency check, on top of is_pr_stale's SHA check above (which two runs
-  # dispatched for the identical SHA - a re-run, a duplicate webhook delivery - wouldn't trip):
-  # if the tracked comment's updated_at has moved since this run posted its own working
-  # placeholder, something else wrote to it in between.
+  # Optimistic-concurrency check: if the tracked comment's updated_at has moved since this run
+  # posted its own working placeholder, something else wrote to it in between - queuing (see
+  # concurrency.cancel-in-progress in claude-review.yml) should make that impossible for two
+  # distinct pushes, but doesn't fully rule out two runs dispatched for the identical SHA (a
+  # re-run, a duplicate webhook delivery), which still share this comment.
   if [ -n "$REVIEW_COMMENT_ID" ] && [ -s repo/comment-updated-at.txt ]; then
     local EXPECTED_UPDATED_AT CURRENT_COMMENT CURRENT_UPDATED_AT
     EXPECTED_UPDATED_AT=$(<repo/comment-updated-at.txt)
@@ -563,7 +567,7 @@ post_review_and_set_status() {
   # marker should only ever claim "this SHA was reviewed" for a SHA that actually was.
   local COMMENT_SHA="$PR_SHA"
   $IS_FALLBACK && COMMENT_SHA=$(cat repo/previous-sha.txt 2>/dev/null || true)
-  upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$COMMENT_SHA" "" "true" \
+  upsert_review_comment "$REPO_PATH" "$PR_NUMBER" claude-output.md "$REVIEW_COMMENT_ID" "$COMMENT_SHA" \
     || echo "::warning::Failed to post review comment"
 
   # Recorded only here, after the comment has actually gone out: the optimistic-concurrency check
@@ -581,10 +585,14 @@ post_review_and_set_status() {
   # derive commit status from job result + review verdict
   local STATE DESC
   # ${DURATION:+ ...} so a missing review-start.txt yields "Approved", not "Approved ".
-  if   [[ "$JOB_STATUS"       != "success" ]]; then STATE="failure" DESC="Failed${DURATION:+ $DURATION}"
+  # Never "failure", anywhere below, on purpose: this pipeline's own status must never be able to
+  # gate merge, whether that's a content judgment (BLOCKED) or the review failing to run at all
+  # (JOB_STATUS != success) - that's a human call to make from the PR, not something this status
+  # context should be able to force even if a repo later marks it required.
+  if   [[ "$JOB_STATUS"       != "success" ]]; then STATE="warning" DESC="Failed${DURATION:+ $DURATION}"
   elif [[ "$CORRECT_VERDICT"  == "APPROVE" ]]; then STATE="success" DESC="Approved${DURATION:+ $DURATION}"
-  elif [[ "$CORRECT_VERDICT"  == "BLOCKED" ]]; then STATE="failure" DESC="Blocked${DURATION:+ $DURATION}"
-  else                                              STATE="error"   DESC="Unknown${DURATION:+ $DURATION}"
+  elif [[ "$CORRECT_VERDICT"  == "BLOCKED" ]]; then STATE="warning" DESC="Blocked${DURATION:+ $DURATION}"
+  else                                              STATE="warning" DESC="Unknown${DURATION:+ $DURATION}"
   fi
 
   echo "Job: $JOB_STATUS | Verdict: ${CORRECT_VERDICT:-none} | Status: $STATE $DURATION"
