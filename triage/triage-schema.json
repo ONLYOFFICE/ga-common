@@ -1,0 +1,62 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "locations"],
+  "properties": {
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["symptom", "probable_cause", "confidence"],
+      "properties": {
+        "symptom": { "type": "string", "description": "One sentence in English, about 120 characters and never more than 150, restating what the reporter observed. Translate if the bug text is not in English." },
+        "probable_cause": { "type": "string", "description": "1-2 short sentences on the mechanism, about 250 characters and never more than 350: what the code does now, and why that produces the reported symptom. One idea per sentence - a reader who wants the full chain reads the locations. Grounded in code you actually read, never invented." },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"], "description": "high = you read the responsible code and the mechanism explains the symptom. medium = right area, exact line not proven. low = plausible direction only. Never inflate. The repository you settled on is locations[0].repository - there is no separate field for it, so rank the locations accordingly." },
+        "note_kind": { "type": "string", "enum": ["outside_readable_source", "several_repositories", "intended_behavior", "insufficient_report"], "description": "Set only when one of these genuinely applies, and then explain it in 'note'. outside_readable_source: the cause sits in a vendored package, a binary, or a submodule pin. several_repositories: the fix needs changes in more than one. intended_behavior: the code does this deliberately and the report may not be a defect. insufficient_report: the bug text is too damaged or vague to determine what was even observed." },
+        "note": { "type": "string", "description": "One sentence, about 150 characters, expanding on note_kind. Omit both fields when none of the kinds applies - an empty note is better than a filler one." }
+      }
+    },
+    "locations": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ranked candidate places to look, best first. The first entry is taken as your answer for which repository holds the cause, so order deliberately. Prefer 1-4 entries. When the exact line is unproven, still name the responsible file or module rather than widening to a whole directory.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "path"],
+        "properties": {
+          "repository": { "type": "string", "description": "Repository name exactly as listed in <repositories>. A name from anywhere else is reported to the reader as unverified, so never invent one." },
+          "path": { "type": "string", "description": "Repository-relative path, e.g. packages/client/src/store/FilesStore.ts. For a cause outside readable source, the closest real artifact (e.g. common/ASC.NewAi/package.json)." },
+          "line": { "type": "integer", "description": "Line number in the checked-out file when you can point at one. Omit rather than guess." },
+          "why": { "type": "string", "description": "One sentence, about 90 characters and never more than 120, tying this exact place to the symptom. Do not repeat the path, and do not restate what probable_cause already said. Expected on every entry - it is left out of the required list only so that a thin explanation cannot delete an otherwise useful location." }
+        }
+      }
+    },
+    "ruled_out": {
+      "type": "array",
+      "description": "Repositories or subsystems you inspected and excluded, so nobody repeats the work. Include a repository here when its code is genuinely correct for this symptom - not merely unread.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "reason"],
+        "properties": {
+          "repository": { "type": "string" },
+          "reason": { "type": "string", "description": "One sentence: what you checked there and why it is not the cause." }
+        }
+      }
+    },
+    "similar_bugs": { "type": "array", "maxItems": 3, "description": "Bugs from <related_bugs> that describe the same behaviour as this one. Only a real match: the same screen, the same feature or the same words are not enough, and that list is a recency list rather than a search result, so having nothing to put here is the normal outcome. A bug already resolved there is worth more to the reader than anything else in this answer; a wrong one costs them a ticket to read and some trust in the next answer.", "items": { "type": "object", "additionalProperties": false, "required": ["id", "why"], "properties": { "id": { "type": "integer", "description": "The bug id, exactly as listed in <related_bugs>. Never an id from anywhere else." }, "why": { "type": "string", "maxLength": 160, "description": "One short sentence, about 100 characters, on what is the same - the behaviour, not the area." } } } },
+    "suggested_component": { "type": "string", "maxLength": 60, "description": "Set only when the code contradicts the Bugzilla component this bug was filed under - the name of the component or subsystem that actually owns the behavior, e.g. 'SDK.Cell'. A name only: never a sentence, and never a sentence saying that no change is needed, since the reader is shown this as a correction. Omit the field entirely when the filed component is right. This is the one output that improves triage itself rather than this single bug, so it is worth stating plainly when the evidence supports it, and worth omitting entirely when it does not." },
+    "missing_repository": { "type": "string", "maxLength": 80, "description": "Set this ONLY when the cause almost certainly lives in code you were not given: the name of that one repository, or of the package it ships when the repository has no name you can know. A name, never a sentence and never a description of what the repository would contain. It is shown to a person, who decides whether the routing for this product needs it - so an unfounded guess costs somebody a search for a repository that does not exist. Leave it out unless the readable code genuinely rules itself out, which usually means listing what you excluded in 'ruled_out'." },
+    "next_steps": { "type": "string", "description": "One or two short sentences, about 120 characters and never more than 180: the fastest checks that would confirm or refute the hypothesis (a log line to look at, a value to print, a config to compare). Omit when the locations already say everything." },
+    "fix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "description": "Minimal corrected code, only when confidence is high and the fix is small and obvious. Never a speculative rewrite; omit the whole object when unsure.",
+      "properties": {
+        "code": { "type": "string", "description": "Ready-to-apply corrected code, as short as the fix allows." },
+        "lang": { "type": "string", "description": "Code-fence language tag for the snippet, e.g. 'typescript', 'csharp', 'scss'." }
+      }
+    }
+  }
+}

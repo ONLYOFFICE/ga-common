@@ -96,7 +96,7 @@ jobs:
           ANTHROPIC_KEYS: ${{ secrets.ANTHROPIC_KEYS }}
           ANTHROPIC_KEY_DEFAULT: ${{ secrets.ANTHROPIC_KEY_DEFAULT }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID_OPS: ${{ secrets.TELEGRAM_CHAT_ID_OPS }}
         run: |
           set -euo pipefail
           printf '%s' "$ANTHROPIC_KEYS" | jq '.' > /dev/null 2>&1 || echo "::warning::ANTHROPIC_KEYS is not valid JSON"
@@ -106,10 +106,17 @@ jobs:
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             ANTHROPIC_API_KEY="$ANTHROPIC_KEY_DEFAULT"
             echo "::warning::No dedicated API key for $ORG_NAME/$REPO_NAME - using default key"
-            for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -H "Content-Type: application/json" \
-                -d "$(jq -n --argjson id "$CHAT_ID" --arg r "$REPO_NAME" '{chat_id:$id,text:("⚠️ Claude Review: add Anthropic key for `"+$r+"`"),parse_mode:"Markdown"}')" > /dev/null
-            done
+            # Ops-only: a missing key is a configuration problem for whoever runs the pipeline,
+            # not news for the team channel, so it goes to the same single chat as the failure
+            # alerts. Written out here rather than shared, because ga-common is not
+            # checked out yet at this step. --max-time because a hung curl here would block the
+            # whole run on a notification nobody is waiting for.
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID_OPS:-}" ]; then
+              curl -s --max-time 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID_OPS" --arg r "$REPO_NAME" \
+                      '{chat_id:$id,text:("⚠️ Claude Review: add Anthropic key for `"+$r+"`"),parse_mode:"Markdown"}')" > /dev/null || true
+            fi
           fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "::error::No Anthropic API key available (neither ANTHROPIC_KEYS[$REPO_NAME] nor ANTHROPIC_KEY_DEFAULT is set)"
@@ -181,6 +188,11 @@ jobs:
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
           CLAUDE_EFFORT: ${{ inputs.effort == 'auto' && steps.prepare.outputs.effort || inputs.effort }}
           CLAUDE_MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
+          # Well inside the job's own 20 minutes, so a hung session fails as a step - with its log,
+          # and with the notify step still to come - instead of being killed along with the job.
+          # 840, not 900: measured over four recent runs, 12-128s goes on checkout and npm before
+          # the CLI even starts, and 900 left barely 170s of slack on the slowest of them.
+          REVIEW_CLI_TIMEOUT: '840'
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
@@ -222,3 +234,44 @@ jobs:
           set -euo pipefail
           source .gitea/scripts/review-steps.sh
           post_review_and_set_status
+
+      - name: Notify on failure
+        # Self-contained on purpose: no source, no repository files. The earliest steps run
+        # before anything is checked out, and a failure there is exactly the case this exists
+        # for - sourcing a script that is not on disk yet would abort the alert precisely when
+        # it matters most. Only the optional reason file comes from the workspace.
+        if: always()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID_OPS: ${{ secrets.TELEGRAM_CHAT_ID_OPS }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          REASON=""
+          case "${JOB_STATUS:-}" in
+            # Concurrency cancels a superseded run as a matter of course, and the reason file below is
+            # written by an always() step that still runs on cancellation - so this case has to come
+            # first, or every cancelled run would alert.
+            cancelled) exit 0 ;;
+            failure)   REASON="run failed" ;;
+            *)         [ -s pipeline-failure.txt ] && REASON=$(tr -d "\r" < pipeline-failure.txt | head -1) ;;
+          esac
+          [ -n "$REASON" ] || exit 0
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID_OPS:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID_OPS is unset - alert not sent"; exit 0
+          fi
+          # No literal host: it comes from the CI_GITEA_HOST secret, and ga-common is mirrored to public
+          # GitHub. Without the secret the alert simply carries no link.
+          LINK=""
+          if [ -n "${GITEA_HOST:-}" ]; then
+            LINK="https://$GITEA_HOST/${GITHUB_REPOSITORY:-ONLYOFFICE/ga-common}/actions/runs/$GITHUB_RUN_ID"
+          fi
+          TEXT=$(printf "%s problem\n%s - %s" "⚠️ Claude Review" "$PR_URL" "$REASON")
+          [ -n "$LINK" ] && TEXT=$(printf "%s\n%s" "$TEXT" "$LINK")
+          curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID_OPS" --arg text "$TEXT" \
+                  '{chat_id:$id,text:$text,disable_web_page_preview:true}')" || true
+          echo "Failure alert sent"

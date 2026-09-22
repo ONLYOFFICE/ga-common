@@ -130,16 +130,22 @@ EOF
 # Runs claude -p unprivileged, pulls /output out (docker cp fallback if not bind-mounted), validates the result; returns non-zero (after an ::error::) on failure.
 run_claude_review() {
   local rc=0
-  # Single attempt, no CLI timeout: --max-budget-usd bounds cost, job timeout-minutes is the backstop, --debug-file is uploaded next step for post-mortem.
+  # Single attempt: --max-budget-usd bounds cost, REVIEW_CLI_TIMEOUT below bounds wall-clock, and
+  # --debug-file is uploaded by the next step for post-mortem.
   # --disallowedTools Task: full access is a sandbox-safety call, not a cost one - a spawned subagent
   # starts with a fresh context instead of reusing the cheap cached one, and this trades money for wall-clock
   # (confirmed live: a 2-level-deep subagent fork drove one review's cost to $4.70 vs. the usual $0.15-0.30).
-  docker exec --user node -w /workspace "$SANDBOX_NAME" bash -c '
+  docker exec --user node -w /workspace -e REVIEW_CLI_TIMEOUT "$SANDBOX_NAME" bash -c '
     set -euo pipefail
+    # timeout inside the container, mirroring triage-sandbox.sh: without it a hung session sits
+    # there until the job timeout kills the whole runner, and that kill takes the step log and
+    # every later step with it - including the notify step, so the failure is never reported.
+    # An exit 124 is a clean step failure that the reporting and notify steps still get to see.
     # Forces the final answer to validate against review-schema.json - the CLI re-prompts the model
     # on a mismatch instead of silently accepting whatever text it stopped on (confirmed live: a
     # session that ended right after a Skill call left .result holding that skills raw output, no
     # JSON at all - extract-json.py caught it, but only after the fact, with no chance to self-correct).
+    timeout "${REVIEW_CLI_TIMEOUT:-900}" \
     claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
       --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions \
       --disallowedTools "Task" \
@@ -154,6 +160,9 @@ run_claude_review() {
   # soon as a trapped signal arrives instead, so this can react by stopping the container directly.
   trap 'docker stop -t 5 "$SANDBOX_NAME" > /dev/null 2>&1 || true' TERM INT
   wait "$REVIEW_PID" || rc=$?
+  if [ "${rc:-0}" -eq 124 ]; then
+    echo "::error::Review hit the ${REVIEW_CLI_TIMEOUT:-900}s CLI timeout - raise REVIEW_CLI_TIMEOUT or lower the effort"
+  fi
   trap - TERM INT
   # If /output was bind-mounted from $HOST_OUTPUT_DIR, both sides already see the same files - no docker cp needed.
   if [ -z "$HOST_OUTPUT_DIR" ]; then
