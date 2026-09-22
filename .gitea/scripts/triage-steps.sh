@@ -54,6 +54,12 @@ _skip_run() {
   local REASON="$1"
   echo "::notice::Skipping bug $BUG_ID: $REASON"
   echo "$REASON" > triage-skip-reason.txt
+  # A skip is not a failure - the run stays green - but it is the one outcome nobody finds out
+  # about otherwise: the bug simply never gets an analysis. An unrouted product is a hole in the
+  # routing map, and holes only get filled if somebody hears about them. pipeline-notice.txt is
+  # read by the workflow's last step; the name is spelled out there too, since that step cannot
+  # source this file.
+  echo "skipped - $REASON" > pipeline-notice.txt
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "skip=true" >> "$GITHUB_OUTPUT"
   return 0
 }
@@ -671,6 +677,9 @@ publish_triage_comment() {
     echo "Posted the analysis as a comment on bug $BUG_ID (HTTP $CODE)"
   else
     echo "::warning::Could not post the comment on bug $BUG_ID (HTTP $CODE): $(head -c 200 publish-response.json | tr -d '\n')"
+    # A finished analysis that never reached the bug is worth a message: nothing outside this
+    # step sees it otherwise, since the step is continue-on-error and the run still ends green.
+    echo "could not post the comment on bug $BUG_ID (HTTP $CODE)" > pipeline-notice.txt
   fi
 }
 
@@ -751,6 +760,16 @@ report_triage_result() {
   fi
   if [ -s line-history.txt ]; then
     ARGS+=(--line-history line-history.txt)
+  fi
+  # The analysis saying "the cause is in code you did not give me" is a routing-map hole reported
+  # from the other side, and the most valuable one: it is how onlyoffice-ai-chat and Docker-MailServer
+  # were found. It reaches the message too, but only somebody reading that bug sees it there.
+  if [ -s claude-structured.json ]; then
+    local WANTED
+    WANTED=$(jq -r '.missing_repository // ""' claude-structured.json 2>/dev/null | tr -d '\r' | head -c 120 || true)
+    if [ -n "$WANTED" ] && [ "$WANTED" != "null" ]; then
+      echo "analysis places the cause in $WANTED, which the routing map did not supply" > pipeline-notice.txt
+    fi
   fi
   ARGS+=(--gitea-host "${GITEA_HOST:-}" --org "${TRIAGE_ORG:-ONLYOFFICE}")
   # The renderer takes the status of a resembling bug from here rather than from the analysis: it

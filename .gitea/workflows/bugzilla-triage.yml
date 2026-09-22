@@ -180,7 +180,7 @@ jobs:
           source .gitea/scripts/triage-steps.sh
           publish_triage_comment
 
-      - name: Notify on failure
+      - name: Notify
         # Self-contained on purpose: no source, no repository files. The earliest steps run
         # before anything is checked out, and a failure there is exactly the case this exists
         # for - sourcing a script that is not on disk yet would abort the alert precisely when
@@ -194,13 +194,22 @@ jobs:
         run: |
           set -uo pipefail
           REASON=""
+          KIND=""
           case "${JOB_STATUS:-}" in
-            # Concurrency cancels a superseded run as a matter of course, and the reason file below is
-            # written by an always() step that still runs on cancellation - so this case has to come
+            # Concurrency cancels a superseded run as a matter of course, and the reason files below
+            # are written by always() steps that still run on cancellation - so this case has to come
             # first, or every cancelled run would alert.
             cancelled) exit 0 ;;
-            failure)   REASON="run failed" ;;
-            *)         [ -s pipeline-failure.txt ] && REASON=$(tr -d "\r" < pipeline-failure.txt | head -1) ;;
+            failure)   REASON="run failed"; KIND="problem" ;;
+            *)         if [ -s pipeline-failure.txt ]; then
+                         REASON=$(tr -d "\r" < pipeline-failure.txt | head -1); KIND="problem"
+                       elif [ -s pipeline-notice.txt ]; then
+                         # Not a failure: the run went green and there is still something a person
+                         # should know - a bug nobody analysed, or an analysis pointing at code the
+                         # routing map never supplied. Both are holes in the map, and a hole nobody
+                         # hears about stays open.
+                         REASON=$(tr -d "\r" < pipeline-notice.txt | head -1); KIND="notice"
+                       fi ;;
           esac
           [ -n "$REASON" ] || exit 0
           if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID_OPS:-}" ]; then
@@ -212,11 +221,15 @@ jobs:
           if [ -n "${GITEA_HOST:-}" ]; then
             LINK="https://$GITEA_HOST/${GITHUB_REPOSITORY:-ONLYOFFICE/ga-common}/actions/runs/$GITHUB_RUN_ID"
           fi
-          TEXT=$(printf "%s problem\n%s - %s" "⚠️ Claude Triage" "Bug $BUG_ID" "$REASON")
+          if [ "$KIND" = "problem" ]; then
+            TEXT=$(printf "%s problem\n%s - %s" "⚠️ Claude Triage" "Bug $BUG_ID" "$REASON")
+          else
+            TEXT=$(printf "%s\n%s - %s" "ℹ️ Claude Triage" "Bug $BUG_ID" "$REASON")
+          fi
           [ -n "$LINK" ] && TEXT=$(printf "%s\n%s" "$TEXT" "$LINK")
           curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID_OPS" --arg text "$TEXT" \
                   '{chat_id:$id,text:$text,disable_web_page_preview:true}')" || true
-          echo "Failure alert sent"
+          echo "Alert sent ($KIND)"
