@@ -58,7 +58,7 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 26
     env:
       PR_URL: ${{ inputs.pr_url }}
       FORCE_REVIEW: ${{ inputs.force }}
@@ -188,11 +188,12 @@ jobs:
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
           CLAUDE_EFFORT: ${{ inputs.effort == 'auto' && steps.prepare.outputs.effort || inputs.effort }}
           CLAUDE_MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
-          # Well inside the job's own 20 minutes, so a hung session fails as a step - with its log,
+          # Well inside the job's own 26 minutes, so a hung session fails as a step - with its log,
           # and with the notify step still to come - instead of being killed along with the job.
-          # 840, not 900: measured over four recent runs, 12-128s goes on checkout and npm before
-          # the CLI even starts, and 900 left barely 170s of slack on the slowest of them.
-          REVIEW_CLI_TIMEOUT: '840'
+          # Raised from 840 to 1200 (20m) after run 97871 hit the old CLI timeout outright; the job
+          # timeout moved up in lockstep to keep the same ~230s slack for checkout/npm overhead
+          # (12-128s, measured over four earlier runs) and the post-CLI steps.
+          REVIEW_CLI_TIMEOUT: '1200'
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
