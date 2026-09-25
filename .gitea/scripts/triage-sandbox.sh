@@ -122,11 +122,15 @@ EOF
     echo "Copied $REPO_NAME into the sandbox"
   done
   docker cp claude-prompt.txt "$SANDBOX_NAME":/workspace/claude-prompt.txt
-  # The sandbox cannot reach Bugzilla - egress is npm and Anthropic only - so the screenshots have
-  # to arrive the same way the repositories do.
+  # The sandbox cannot reach Bugzilla - egress is npm and Anthropic only - so the attachments have
+  # to arrive the same way the repositories do. Already vetted: expand-attachments.py unpacked any
+  # zip among them on the runner, before this copy, so nothing here runs an extractor on untrusted
+  # bytes itself.
   if [ -d attachments ] && [ -n "$(ls -A attachments 2>/dev/null)" ]; then
     docker cp attachments "$SANDBOX_NAME":/workspace/
-    echo "Copied $(ls -1 attachments | wc -l | tr -d ' ') attachment(s) into the sandbox"
+    # find, not ls: an extracted archive's files sit in a subdirectory, and a top-level-only count
+    # would silently stop mentioning them the moment expand-attachments.py had anything to unpack.
+    echo "Copied $(find attachments -type f | wc -l | tr -d ' ') attachment file(s) into the sandbox"
   fi
   # TRIAGE.md references /triage/triage-schema.json, and run_claude_triage reads the schema from there.
   docker cp triage/. "$SANDBOX_NAME":/triage/

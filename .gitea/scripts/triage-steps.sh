@@ -575,6 +575,10 @@ prepare_triage_context() {
   # is regularly the only place the symptom is actually visible - see fetch-attachments.py.
   rm -rf attachments; : > attachments.txt
   python3 .gitea/scripts/fetch-attachments.py --bug-id "$BUG_ID" --out-dir attachments > attachments.txt || true
+  # Unpacks any zip/tar among them in place, on this runner and before the sandbox exists - see
+  # expand-attachments.py for why that order matters. Extracted paths are appended to the same
+  # manifest the model sees, right after the archive that produced them.
+  ATTACHMENTS_EXTRACTED=$(python3 .gitea/scripts/expand-attachments.py attachments 2>attachments-expand.log || true)
   # Tolerated, not required: a listed product already knows its repositories, and the listing only
   # validates their spelling and feeds expand-repos.py. It is mandatory solely for model selection,
   # which _select_and_clone_repos checks for itself. Seen live: PAT_GITEA_TOKEN can clone but may
@@ -606,6 +610,11 @@ prepare_triage_context() {
   # "attachments/<file> - <what the reporter called it>: <their description>", one per line. The
   # path is what the model opens; the rest is context and is already escaped by the fetcher.
   ATTACHMENTS=$(awk -F'\t' '{ printf "attachments/%s - %s%s\n", $1, $2, ($3 == "" ? "" : ": " $3) }' attachments.txt 2>/dev/null || true)
+  if [ -n "${ATTACHMENTS_EXTRACTED:-}" ]; then
+    local EXTRACTED_LINES
+    EXTRACTED_LINES=$(printf '%s' "$ATTACHMENTS_EXTRACTED" | sed 's/^/attachments\//; s/$/ - extracted from the archive above/')
+    ATTACHMENTS="${ATTACHMENTS:+$ATTACHMENTS$'\n'}$EXTRACTED_LINES"
+  fi
   [ -n "$ATTACHMENTS" ] || ATTACHMENTS="(none)"
   [ -n "$RELATED_BUGS" ] || RELATED_BUGS="(none available)"
   export BUG_ID BUG_URL PRODUCT COMPONENT BUGZILLA_CONTEXT REPOSITORIES RELATED_BUGS ATTACHMENTS
