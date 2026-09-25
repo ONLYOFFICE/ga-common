@@ -9,13 +9,10 @@ on:
         required: true
         type: string
       publish:
-        # Off by default on purpose: this is the one step that writes outside the pipeline, into a
-        # thread people read. Turn it on deliberately, per run or by changing this default once the
-        # team is happy with what the message says.
         description: 'Post the analysis as a comment on the bug'
         required: false
         type: string
-        default: 'false'
+        default: 'true'
       model:
         description: 'Claude model'
         required: false
