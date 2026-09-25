@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Renders the posted <details> comment from Claude's structured_output JSON
 (review/review-schema.json) - verdict, counters, section grouping, and per-issue
-markdown are computed here, not authored by the model. Open/fixed state persists
-between pushes as a base64 JSON blob, fed back in via --previous-state.
+markdown are computed here, not authored by the model. Open/fixed state, plus the
+running history of every reviewed head SHA (reviewed_shas), persists between pushes
+as a base64 JSON blob, fed back in via --previous-state.
 """
 import argparse
 import base64
@@ -148,6 +149,10 @@ def render_bug(bug):
 
 STATE_OPEN_KEYS = ("id", "category", "severity", "title", "why")
 STATE_FIXED_KEYS = ("category", "severity", "title", "was", "fix_applied")
+SHA_RE = re.compile(r"^[a-f0-9]{7,40}$")
+# Hard cap on how many past reviewed SHAs are carried forward, independent of cap_state_size's
+# byte budget below - keeps a long-lived PR's history bounded even when the blob has room to spare.
+MAX_REVIEWED_SHAS = 100
 
 
 def load_previous_state(path):
@@ -158,7 +163,7 @@ def load_previous_state(path):
     build()/render_fixed_issue()/cap_state_size() index these fields directly. A
     non-dict payload or an unknown severity used to raise and lose the whole review.
     """
-    state = {"open": [], "fixed": []}
+    state = {"open": [], "fixed": [], "reviewed_shas": []}
     if not path:
         return state
     try:
@@ -186,6 +191,13 @@ def load_previous_state(path):
         if len(kept) != len(raw):
             print(f"::warning::render-review: dropped {len(raw) - len(kept)} unusable previous-state '{bucket}' entr(ies)", file=sys.stderr)
         state[bucket] = kept
+
+    raw_shas = loaded.get("reviewed_shas")
+    raw_shas = raw_shas if isinstance(raw_shas, list) else []
+    kept_shas = [s for s in raw_shas if isinstance(s, str) and SHA_RE.match(s)]
+    if len(kept_shas) != len(raw_shas):
+        print(f"::warning::render-review: dropped {len(raw_shas) - len(kept_shas)} unusable previous-state 'reviewed_shas' entr(ies)", file=sys.stderr)
+    state["reviewed_shas"] = kept_shas
     return state
 
 
@@ -205,12 +217,29 @@ def cap_state_size(state, max_bytes):
     while size() > budget and state["open"]:
         state["open"].sort(key=lambda f: severity_rank[f["severity"]])
         state["open"].pop()
+    # Last resort: reviewed_shas is cheap (a handful of bytes each) but still counts against the
+    # same budget - drop the oldest first, keeping at least 2: the newest entry is this round's
+    # own PR_SHA (about to become next round's marker/PREVIOUS_SHA), so a floor of 1 would leave
+    # nothing for review-steps.sh's force-push recovery to fall back to but that same SHA itself -
+    # it always `continue`s past whichever entry equals PREVIOUS_SHA, so recovery needs a second,
+    # older entry to actually be useful.
+    while size() > budget and len(state["reviewed_shas"]) > 2:
+        state["reviewed_shas"].pop(0)
     return state
 
 
-def build(structured, prev_state, max_state_bytes=None):
+def build(structured, prev_state, max_state_bytes=None, pr_sha=None):
     prev_open_by_id = {item["id"]: item for item in prev_state.get("open") or []}
     new_fixed = list(prev_state.get("fixed") or [])
+
+    # History of every SHA this pipeline has actually posted a completed review for - lets a
+    # force-push that rewrites only the tip (e.g. `commit --amend`) still get an incremental
+    # review off the newest ancestor still present, instead of falling back to a full diff just
+    # because the single last-reviewed SHA no longer resolves (review-steps.sh does the lookup).
+    reviewed_shas = list(prev_state.get("reviewed_shas") or [])
+    if pr_sha and (not reviewed_shas or reviewed_shas[-1] != pr_sha):
+        reviewed_shas.append(pr_sha)
+    reviewed_shas = reviewed_shas[-MAX_REVIEWED_SHAS:]
 
     for r in structured.get("resolved") or []:
         item = prev_open_by_id.get(r["id"])
@@ -275,7 +304,10 @@ def build(structured, prev_state, max_state_bytes=None):
                f"{SEVERITY_EMOJI['legacy']} **{counts['legacy']}** Legacy · "
                f"⚪️ **{len(new_fixed)}** Fixed")
 
-    new_state = cap_state_size({"open": [slim(f) for f in new_open], "fixed": new_fixed}, max_state_bytes)
+    new_state = cap_state_size(
+        {"open": [slim(f) for f in new_open], "fixed": new_fixed, "reviewed_shas": reviewed_shas},
+        max_state_bytes,
+    )
     state_b64 = base64.b64encode(json.dumps(new_state, ensure_ascii=False).encode("utf-8")).decode("ascii")
 
     parts = [
@@ -317,6 +349,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--structured", required=True, help="Path to claude's .structured_output JSON")
     ap.add_argument("--previous-state", help="Path to previous run's persisted state JSON (open+fixed); omitted or missing on first review")
+    ap.add_argument("--pr-sha", default="", help="Head SHA this run reviewed - appended to the persisted reviewed_shas history")
     ap.add_argument("--file-link-base", required=True)
     ap.add_argument("--output", required=True, help="Where to write the rendered markdown")
     ap.add_argument("--max-bytes", type=int, default=0, help="Truncate the visible content (never the trailing state comment) if the rendered output exceeds this size")
@@ -330,7 +363,7 @@ def main():
 
     prev_state = load_previous_state(args.previous_state)
 
-    output = build(structured, prev_state, max_state_bytes=args.max_bytes)
+    output = build(structured, prev_state, max_state_bytes=args.max_bytes, pr_sha=args.pr_sha or None)
     if args.max_bytes and len(output.encode("utf-8")) > args.max_bytes:
         output = truncate_preserving_state(output, args.max_bytes, args.run_url)
 

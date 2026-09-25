@@ -223,6 +223,36 @@ prepare_review_context() {
   # PREVIOUS_SHA can be set but still unusable (force-push rewrote history, shallow clone).
   [ -n "$PREVIOUS_SHA" ] && git -C repo rev-parse --verify --quiet "${PREVIOUS_SHA}^{commit}" > /dev/null && PREV_AVAILABLE=true
 
+  # --- force-push recovery ---
+  # A force-push that only rewrites the tip (the common `commit --amend` + push -f case) moves
+  # the marker's single last-reviewed SHA out from under us, even though every earlier commit -
+  # already reviewed in a previous round - is still a perfectly good ancestor of the new HEAD.
+  # previous-state.json's reviewed_shas (see render-review.py) is the full history of every SHA
+  # this pipeline has actually posted a completed review for, newest last - walk it backwards and
+  # reuse the newest one still resolvable in this clone, instead of giving up straight to a full
+  # origin/$BASE_BRANCH...HEAD review.
+  if ! $PREV_AVAILABLE && [ -f repo/previous-state.json ]; then
+    local -a REVIEWED_SHAS_HISTORY
+    mapfile -t REVIEWED_SHAS_HISTORY < <(jq -r '(.reviewed_shas // [])[]' repo/previous-state.json 2>/dev/null | tac)
+    local HIST_SHA
+    for HIST_SHA in "${REVIEWED_SHAS_HISTORY[@]:-}"; do
+      [ -n "$HIST_SHA" ] || continue
+      [ "$HIST_SHA" = "$PREVIOUS_SHA" ] && continue
+      # Existence alone isn't enough: the repo is cloned in full (all branches, no --depth), so a
+      # SHA from an earlier, unrelated force-push (a hard reset to a different base, an abandoned
+      # rebase) can still resolve here without sharing any real lineage with the current HEAD -
+      # `git diff` against it would produce a nonsensical "delta since the last review". Require
+      # it to actually be an ancestor of HEAD before treating it as a valid incremental base.
+      if git -C repo rev-parse --verify --quiet "${HIST_SHA}^{commit}" > /dev/null \
+        && git -C repo merge-base --is-ancestor "$HIST_SHA" HEAD 2>/dev/null; then
+        echo "Reviewed commit ${PREVIOUS_SHA:0:10} not found in this clone (force-push?) — falling back to last known-good reviewed commit ${HIST_SHA:0:10}"
+        PREVIOUS_SHA="$HIST_SHA"
+        PREV_AVAILABLE=true
+        break
+      fi
+    done
+  fi
+
   # --- submodule-only guard: skip when the only changes are submodule gitlink bumps ---
   # A gitlink entry (mode 160000 both sides) is just a commit-pointer bump - the real change lives
   # in the submodule's own history/review, not this repo's diff. Strict: any other changed path
@@ -491,6 +521,7 @@ post_review_and_set_status() {
     if python3 .gitea/scripts/render-review.py \
          --structured claude-structured.json \
          "${PREV_STATE_ARGS[@]}" \
+         --pr-sha "$PR_SHA" \
          --file-link-base "$FILE_LINK_BASE" \
          --max-bytes 59000 \
          --run-url "$(_run_url)" \
