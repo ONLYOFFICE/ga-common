@@ -372,14 +372,23 @@ prepare_review_context() {
   PR_BODY=$(   jq -r '.body // empty' <<< "$PR_INFO" | tr '\n\r`$' '    ' | _trim_chars 4000 | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
   read -r PR_ADDITIONS PR_DELETIONS < <(jq -r '[.additions // 0, .deletions // 0] | @tsv' <<< "$PR_INFO" || echo "0	0")
   PR_ADDITIONS=${PR_ADDITIONS:-0}; PR_DELETIONS=${PR_DELETIONS:-0}
-  local COMMIT_SUBJECTS_RAW
-  COMMIT_SUBJECTS_RAW=$(gitea_api "$REPO_PATH/pulls/$PR_NUMBER/commits" \
-    | jq -r '.[].commit.message | split("\n")[0]' | head -20)
-  # The 120-char per-subject cap below is display-only: this org's multi-bug commits
-  # ("fix Bug 1, 2, 3, ...") can run well past 120 chars, so Bugzilla extraction below
-  # uses the untruncated $COMMIT_SUBJECTS_RAW instead, not this sanitized copy.
+  local COMMIT_SUBJECTS_RAW="" COMMIT_PAGE=1 COMMIT_COUNT=0 COMMIT_BATCH BATCH_COUNT
+  # Gitea may cap a single API page below 100. Read up to 100 commit subjects so
+  # Bugzilla references do not disappear as newer commits push them past the first page.
+  while [ "$COMMIT_COUNT" -lt 100 ]; do
+    COMMIT_BATCH=$(gitea_api "$REPO_PATH/pulls/$PR_NUMBER/commits?limit=50&page=$COMMIT_PAGE")
+    BATCH_COUNT=$(jq 'length' <<< "$COMMIT_BATCH")
+    [ "$BATCH_COUNT" -eq 0 ] && break
+    COMMIT_SUBJECTS_RAW+="$(jq -r --argjson remaining "$((100 - COMMIT_COUNT))" \
+      '.[:$remaining][] | .commit.message | split("\n")[0]' <<< "$COMMIT_BATCH")"$'\n'
+    COMMIT_COUNT=$((COMMIT_COUNT + BATCH_COUNT))
+    COMMIT_PAGE=$((COMMIT_PAGE + 1))
+  done
+  COMMIT_SUBJECTS_RAW=${COMMIT_SUBJECTS_RAW%$'\n'}
+  # Only the prompt display is limited to 20 subjects and 120 chars each. Bugzilla
+  # extraction below uses all fetched subjects, including long multi-bug commits.
   COMMIT_MESSAGES=$(_trim_chars_per_line 120 <<< "$COMMIT_SUBJECTS_RAW" \
-    | sed 's/[`$]/./g; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/^/  - /' | tr '\r' ' ' || echo "  (none)")
+    | sed -n '1,20p' | sed 's/[`$]/./g; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/^/  - /' | tr '\r' ' ' || echo "  (none)")
   echo "PR: #$PR_NUMBER '$PR_TITLE_RAW' by $PR_AUTHOR ($PR_BRANCH → $BASE_BRANCH) [+$PR_ADDITIONS/-$PR_DELETIONS]"
 
   # --- Bugzilla: keep newlines for regex, strip backticks/$ like other fields ---
