@@ -12,7 +12,7 @@ on:
         description: 'Post the analysis as a comment on the bug'
         required: false
         type: string
-        default: 'true'
+        default: 'false'
       model:
         description: 'Claude model'
         required: false
@@ -53,6 +53,8 @@ concurrency:
 
 jobs:
   triage:
+    # Temporarily disabled; remove this line to allow manual triage runs again.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     # Generous next to the review job: several repositories get cloned before the model starts.
     timeout-minutes: 30
