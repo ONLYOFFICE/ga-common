@@ -159,7 +159,7 @@ run_claude_triage() {
     set -euo pipefail
     timeout "${TRIAGE_CLI_TIMEOUT:-900}" \
     claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
-      --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions \
+      --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions --permission-prompts none \
       --disallowedTools "Task" \
       --json-schema "$(cat /triage/triage-schema.json)" \
       < claude-prompt.txt > /output/claude-output.json

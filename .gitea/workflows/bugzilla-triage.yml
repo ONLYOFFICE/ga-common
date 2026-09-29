@@ -17,14 +17,14 @@ on:
         description: 'Claude model'
         required: false
         type: string
-        default: claude-sonnet-5
+        default: claude-sonnet-5-5
       claude_code_version:
         # Pinned, not 'latest': the run depends on specific CLI flags (--effort, --max-budget-usd,
         # --json-schema), so bump it deliberately after a manual run with the new version.
         description: 'Claude Code CLI version (exact version, or a dist-tag like "latest" to test)'
         required: false
         type: string
-        default: '2.1.250'
+        default: '2.1.284'
       effort:
         description: 'Reasoning effort level'
         required: false

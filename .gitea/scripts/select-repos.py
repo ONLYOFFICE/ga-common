@@ -26,7 +26,7 @@ Usage:
 
 Environment:
   ANTHROPIC_API_KEY  required; without it no selection is possible and the run fails
-  SELECT_MODEL       default: claude-sonnet-5
+  SELECT_MODEL       default: claude-sonnet-5-5
   SELECT_MAX_REPOS   default: 6 (cap on how many repos get cloned)
   SELECT_TIMEOUT     default: 60 (seconds for the API call)
 
@@ -43,7 +43,7 @@ import urllib.request
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 
-MODEL = os.environ.get("SELECT_MODEL") or "claude-sonnet-5"
+MODEL = os.environ.get("SELECT_MODEL") or "claude-sonnet-5-5"
 # 6, not 4: the cost of one repository too many is clone time, the cost of one too few is an
 # analysis that never sees the responsible code (measured on Bug 83616, where the answer sat
 # outside a 4-slot answer). expand-repos.py can add a couple more on top of this.
