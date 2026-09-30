@@ -12,7 +12,8 @@ on:
         description: 'Claude model'
         required: false
         type: string
-        default: claude-sonnet-5-5
+        # sonnet-5, not 5-5: on CLI 2.1.284 claude-sonnet-5-5 has no /code-review recipe of its own and gets a shallower one (measured 2026-09-30).
+        default: claude-sonnet-5
       claude_code_version:
         # Pinned, not 'latest': this workflow ships to every repo in the org at once, and the
         # review depends on specific CLI flags (--effort, --max-budget-usd, --json-schema), so a
