@@ -139,7 +139,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
-          bash .gitea/scripts/triage-run.sh sandbox
+          exec bash .gitea/scripts/triage-run.sh sandbox
 
       - name: Upload triage artifacts
         # v3: v4/v7 intermittently fail against a non-github.com host (GHESNotSupportedError).

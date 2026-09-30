@@ -268,6 +268,15 @@ import zipfile
 from pathlib import Path
 
 
+def env_number(name, default, cast=int):
+    """An environment number, or the default when it is unset, empty or not a number: a typo in a
+    tuning variable must not crash every subcommand of a module at import time."""
+    try:
+        return cast(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
 # ----------------------------------------------------------------------------
 # Attachments
 # ----------------------------------------------------------------------------
@@ -306,7 +315,10 @@ def safe_name(attachment_id, file_name):
 
 
 def clean_attachment_field(text, cap=160):
-    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    # A lone surrogate (json.loads accepts "\\ud800") cannot be encoded to UTF-8 and would abort the
+    # print below half-way through the manifest.
+    text = str(text or "").encode("utf-8", "replace").decode("utf-8")
+    text = re.sub(r"\s+", " ", text).strip()
     text = text.replace("<", "&lt;").replace(">", "&gt;")
     return text[:cap]
 
@@ -456,9 +468,11 @@ def extract_zip(path, dest_dir):
         if rel is None:
             continue
         dest = os.path.join(dest_dir, rel)
-        os.makedirs(os.path.dirname(dest) or dest_dir, exist_ok=True)
         written = 0
         try:
+            # Inside the try: members "a" and "a/b" make this raise FileExistsError, which must skip
+            # the member rather than end the whole run.
+            os.makedirs(os.path.dirname(dest) or dest_dir, exist_ok=True)
             with archive.open(info) as source, open(dest, "wb") as sink:
                 while True:
                     chunk = source.read(CHUNK)
@@ -468,7 +482,7 @@ def extract_zip(path, dest_dir):
                     if written > MAX_MEMBER_BYTES or written > budget:
                         raise ValueError("extraction budget exceeded")
                     sink.write(chunk)
-        except (ValueError, OSError, zipfile.BadZipFile, RuntimeError):
+        except Exception:  # noqa: BLE001 - untrusted archive: a corrupt stream (zlib.error, EOFError, ...) skips the member
             try:
                 os.remove(dest)
             except OSError:
@@ -535,7 +549,7 @@ def extract_tar(path, dest_dir):
                             raise ValueError("extraction budget exceeded")
                         if sink:
                             sink.write(chunk)
-            except (ValueError, OSError):
+            except Exception:  # noqa: BLE001 - untrusted archive: budget, corrupt stream, truncated stream
                 if sink:
                     sink.close()
                 # One member misrepresenting its size is reason enough to distrust everything this
@@ -549,8 +563,8 @@ def extract_tar(path, dest_dir):
             budget -= written
             if rel:
                 extracted.append(rel)
-    except (tarfile.TarError, OSError):
-        pass  # a truncated or corrupt stream simply stops here; whatever was already extracted stands
+    except Exception:  # noqa: BLE001 - a truncated or corrupt stream simply stops here; whatever was already extracted stands
+        pass
     finally:
         archive.close()
     return extracted
@@ -568,11 +582,15 @@ def main_expand_attachments():
         path = os.path.join(root, name)
         if not os.path.isfile(path):
             continue
-        if looks_like_a_zip_by_name(name) and is_zip(path):
-            members = extract_zip(path, path + "-contents")
-        elif tar_extension(name) and tarfile.is_tarfile(path):
-            members = extract_tar(path, path + "-contents")
-        else:
+        try:
+            if looks_like_a_zip_by_name(name) and is_zip(path):
+                members = extract_zip(path, path + "-contents")
+            elif tar_extension(name) and tarfile.is_tarfile(path):
+                members = extract_tar(path, path + "-contents")
+            else:
+                continue
+        except Exception as error:  # noqa: BLE001 - one bad archive must not hide the rest
+            print(f"::warning::triage-attachments: {name} not unpacked ({type(error).__name__})", file=sys.stderr)
             continue
         if members:
             print(f"Unpacked {len(members)} file(s) from {name}", file=sys.stderr)
@@ -596,8 +614,8 @@ MODEL = os.environ.get("SELECT_MODEL") or "claude-sonnet-5-5"
 # 6, not 4: the cost of one repository too many is clone time, the cost of one too few is an
 # analysis that never sees the responsible code (measured on Bug 83616, where the answer sat
 # outside a 4-slot answer). triage-tools.py expand-repos can add a couple more on top of this.
-MAX_REPOS = int(os.environ.get("SELECT_MAX_REPOS") or "6")
-SELECT_TIMEOUT = float(os.environ.get("SELECT_TIMEOUT") or "60")
+MAX_REPOS = env_number("SELECT_MAX_REPOS", 6)
+SELECT_TIMEOUT = env_number("SELECT_TIMEOUT", 60.0, float)
 
 # Bug text is untrusted input: it is wrapped as data, and the answer is
 # allowlist-validated afterwards regardless of what the text tries to say.
@@ -1006,7 +1024,9 @@ def clean(value, cap=MAX_FIELD):
     if value is None or isinstance(value, (dict, list, bool)):
         return ""
     text = str(value)
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    # Lone surrogates too: json.loads accepts them and they cannot be written out as UTF-8, which
+    # would lose the whole paid-for analysis over one bad character.
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > cap:
         text = text[:cap].rstrip() + " [...]"
@@ -1018,7 +1038,7 @@ def block(value, cap=MAX_FIELD * 2):
     if value is None or isinstance(value, (dict, list, bool)):
         return ""
     text = str(value).replace("\r\n", "\n").replace("\r", "\n").expandtabs(2)
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]", "", text)
     lines = [line.rstrip() for line in text.split("\n")]
     if len(lines) > MAX_FIX_LINES:
         lines = lines[:MAX_FIX_LINES] + ["[...]"]
@@ -1165,7 +1185,8 @@ def line_url(host, org, repo, ref, anchor):
     path, _, line = anchor.rpartition(":")
     if not path or not line.isdigit():
         path, line = anchor, ""
-    return (f"https://{host}/{org}/{repo}/src/branch/{ref}/{path}"
+    # Quoted: a space or "#" in a path ends the link at that character in a plain-text comment.
+    return (f"https://{host}/{org}/{repo}/src/branch/{urllib.parse.quote(ref, safe='/')}/{urllib.parse.quote(path, safe='/')}"
             + (f"#L{line}" if line else ""))
 
 
@@ -1475,9 +1496,9 @@ def main_render():
                               statuses, args.pr_url)
 
     if args.output:
-        with open(args.output, "w", encoding="utf-8", newline="\n") as handle:
+        with open(args.output, "w", encoding="utf-8", errors="replace", newline="\n") as handle:
             handle.write(text)
-    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stdout.write(text)
     return 0
 
@@ -1501,11 +1522,18 @@ DENIED = [
     (re.compile(r"\.(pem|key|p12|pfx|kdbx|jks|keystore)$", re.I), "key material"),
     (re.compile(r"(^|/)(id_rsa|id_ed25519|credentials|secrets?)(/|\.|$)", re.I), "something that looks like a secret"),
 ]
+# Matched case-insensitively: a checkout on a case-insensitive filesystem would run .GITHUB/ too, and
+# lowering the path instead would miss the patterns that spell capitals (Jenkinsfile, Gemfile.lock).
+DENIED = [(re.compile(pattern.pattern, pattern.flags | re.I), what) for pattern, what in DENIED]
 # Header lines git writes for a rename, a copy or a mode change. They only ever start a line in the
 # header: a line inside a hunk begins with a space, "+" or "-".
 RENAME_OR_COPY = re.compile(rb"^(rename (from|to)|copy (from|to)|similarity index|dissimilarity index) ", re.M)
 MODE_CHANGE = re.compile(rb"^(old mode|new mode) ", re.M)
 NEW_FILE_MODE = re.compile(rb"^(new|deleted) file mode (\d+)", re.M)
+# "index <old>..<new> <mode>" is the only place git states the mode of an entry that is neither added
+# nor removed: retargeting a tracked symlink (120000) or bumping a submodule pointer (160000) shows
+# up nowhere else, and `git apply --summary` prints nothing for either.
+INDEX_MODE = re.compile(rb"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ (\d+)\s*$", re.M)
 NUMSTAT = re.compile(r"^(\d+|-)\t(\d+|-)\t(.*)$", re.S)
 
 
@@ -1570,6 +1598,9 @@ def main_check_patch():
     for _, mode in NEW_FILE_MODE.findall(patch):
         if mode != b"100644":
             return refuse(f"the patch adds or removes a file with mode {mode.decode()}, not a plain 100644 file")
+    for mode in INDEX_MODE.findall(patch):
+        if mode not in (b"100644", b"100755"):
+            return refuse(f"the patch touches an entry of mode {mode.decode()} (a symlink or a submodule pointer)")
 
     stat = git(repo, "apply", "--numstat", "-z", "-", data=patch)
     if stat.returncode != 0:
@@ -1587,7 +1618,7 @@ def main_check_patch():
             return refuse(f"{path} is binary")
         problem = path_problem(path)
         if problem:
-            return refuse(f"{path} is {problem}")
+            return refuse(f"{path!r} is {problem}")
         total += int(added) + int(deleted)
     if total > MAX_LINES:
         return refuse(f"{total} changed lines, over the {MAX_LINES} limit")
@@ -1683,7 +1714,7 @@ def main_line_origin():
     except (urllib.error.URLError, ValueError, OSError) as error:
         print(f"::warning::line-origin: no commit list for {args.repo} ({error})", file=sys.stderr)
         return 0
-    if not isinstance(commits, list) or len(commits) < 2:
+    if not isinstance(commits, list) or not commits:
         return 0
 
     def content(sha):
@@ -1737,11 +1768,20 @@ def main_line_origin():
 # ----------------------------------------------------------------------------
 
 def run_fetch_attachments():
-    sys.exit(main_fetch_attachments())
+    # A triage without attachments is still a triage: nothing here may fail the caller.
+    try:
+        sys.exit(main_fetch_attachments())
+    except Exception as error:  # noqa: BLE001 - deliberately total
+        print(f"::warning::triage-attachments: fetch failed ({type(error).__name__})", file=sys.stderr)
+        sys.exit(0)
 
 
 def run_expand_attachments():
-    sys.exit(main_expand_attachments())
+    try:
+        sys.exit(main_expand_attachments())
+    except Exception as error:  # noqa: BLE001 - deliberately total
+        print(f"::warning::triage-attachments: unpacking failed ({type(error).__name__})", file=sys.stderr)
+        sys.exit(0)
 
 
 def run_select_repos():

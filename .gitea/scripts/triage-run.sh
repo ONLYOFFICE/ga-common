@@ -110,7 +110,12 @@ _fetch_bug_metadata() {
           | if . != "" and . != "---" then "cf_security=" + . else empty end),
         ((($bug.security // "") | tostring | ascii_downcase)
           | if . != "" and . != "---" then "security=" + . else empty end) ]
-    | join("; ")' <<< "$BUG_JSON" | tr -d '\r')
+    | join("; ")' <<< "$BUG_JSON" | tr -d '\r') || {
+    # This function is called as `f || ...`, which switches set -e off inside it: without this an
+    # error in the filter above would leave RESTRICTION empty and send a restricted bug to the model.
+    echo "::error::Could not evaluate the access restrictions of bug $BUG_ID - not analysing it"
+    return 1
+  }
   if [ -n "$RESTRICTION" ]; then
     _skip_run "access-restricted ($RESTRICTION) - its contents are not sent to the model"
     return 78
@@ -375,6 +380,11 @@ _resolve_branch() {
 
 _clone_repo() {
   local REPO="$1" BRANCH=""
+  # Already cloned (a routing entry listing a name twice, or two spellings of it): cloning again
+  # would fail on the existing directory, and the failure handler below would delete the first clone.
+  if [ -d "repos/$REPO" ]; then
+    return 0
+  fi
   BRANCH=$(_resolve_branch "$REPO")
   local CLONE_ARGS=(--depth=1 --quiet)
   [ -n "$BRANCH" ] && CLONE_ARGS+=(--branch "$BRANCH")
@@ -691,8 +701,15 @@ publish_triage_comment() {
   # discovered by the reader rather than by us. The first line of every message carries this
   # marker, so the existing one is found without a hidden tag - Bugzilla comments are plain text
   # and cannot hide anything.
-  local EXISTING
-  EXISTING=$(_bugzilla_get "bug/$BUG_ID/comment" 2>/dev/null | jq -r '[.bugs[]?.comments[]? | select(.text | contains("Claude Bug Triage"))] | length' 2>/dev/null || echo 0)
+  local EXISTING COMMENTS_JSON
+  COMMENTS_JSON=$(_bugzilla_get "bug/$BUG_ID/comment" 2>/dev/null) || {
+    echo "::warning::Could not read the comments of bug $BUG_ID to check for an earlier triage comment - not posting"
+    return 0
+  }
+  EXISTING=$(jq -r '[.bugs[]?.comments[]? | select(.text | contains("Claude Bug Triage"))] | length' <<< "$COMMENTS_JSON" 2>/dev/null) || {
+    echo "::warning::Could not parse the comments of bug $BUG_ID - not posting"
+    return 0
+  }
   if [ "${EXISTING:-0}" != "0" ]; then
     echo "Bug $BUG_ID already carries a Claude triage comment - not posting another"
     return 0
@@ -783,7 +800,11 @@ report_triage_result() {
         [ -n "$FOUND" ] && printf '%s\t%s\n' "$LOC_INDEX" "$FOUND" >> line-history.txt
       fi
     done < <(jq -r '(.locations // [])[0:6][] | [(.repository // ""), (.path // ""), ((.line // "") | tostring)] | @tsv' claude-structured.json 2>/dev/null || true)
-    if [ -n "${GITEA_HOST:-}" ] && [ -n "$FIRST_REPO" ] && [ -n "$FIRST_REF" ] && [ -n "$FIRST_PATH" ]; then
+    # The three names come from model output and land in a markdown link, so only a plain path
+    # spelling is accepted: a "](https://..." in a path would otherwise define a link of its own.
+    local PLAIN_NAME='^[A-Za-z0-9._/@+-]+$'
+    if [ -n "${GITEA_HOST:-}" ] && [ -n "$FIRST_REPO" ] && [ -n "$FIRST_REF" ] && [ -n "$FIRST_PATH" ] \
+       && [[ "$FIRST_REPO" =~ $PLAIN_NAME ]] && [[ "$FIRST_REF" =~ $PLAIN_NAME ]] && [[ "$FIRST_PATH" =~ $PLAIN_NAME ]]; then
       FIRST_URL="https://$GITEA_HOST/${TRIAGE_ORG:-ONLYOFFICE}/$FIRST_REPO/src/branch/$FIRST_REF/$FIRST_PATH"
       if [[ "$FIRST_LINE" =~ ^[0-9]+$ ]]; then
         FIRST_URL="$FIRST_URL#L$FIRST_LINE"
@@ -866,6 +887,15 @@ name_triage_resources() {
 cleanup_triage_sandbox() {
   docker rm -f "$PROXY_NAME" "$SANDBOX_NAME" > /dev/null 2>&1 || true
   docker network rm "$NET_NAME" > /dev/null 2>&1 || true
+  scrub_claude_output
+}
+
+# /output is a bind mount the model can write to, and the artifact upload and the patch reader both
+# follow symlinks: a link to /proc/self/environ or a runner file would leave in a downloadable
+# artifact. Anything that is not a plain file or a directory is removed on every exit path.
+scrub_claude_output() {
+  [ -d claude-output ] || return 0
+  find claude-output \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete 2>/dev/null || true
 }
 
 # Resolves the host path backing $PWD (docker -v resolves on the HOST under DooD); empty HOST_OUTPUT_DIR means callers fall back to docker cp.
@@ -1024,7 +1054,7 @@ run_claude_triage() {
   # foreground command exits, so a cancelled job would otherwise keep the container running.
   trap 'docker stop -t 5 "$SANDBOX_NAME" > /dev/null 2>&1 || true' TERM INT
   wait "$TRIAGE_PID" || rc=$?
-  trap - TERM INT
+  trap 'exit 143' TERM; trap 'exit 130' INT
   kill "$HEARTBEAT_PID" 2>/dev/null || true
   wait "$HEARTBEAT_PID" 2>/dev/null || true
   echo "  [triage] finished after $((SECONDS - STARTED))s (exit $rc)"
@@ -1045,7 +1075,9 @@ run_claude_triage() {
     subtype=$(jq -r '.subtype // "unknown"' claude-output/claude-output.json 2>/dev/null || echo "unparsable")
     oom=$(docker inspect "$SANDBOX_NAME" --format '{{.State.OOMKilled}}' 2>/dev/null || echo "unknown")
     echo "::error::Triage failed (exit $rc, subtype: $subtype, OOMKilled: $oom)"
-    echo "Result excerpt: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | head -c 300 || true)"
+    # Flattened: the runner reads workflow commands (::set-env::, ::add-path::, ...) at the start of
+    # any log line, and the model's text is untrusted, so no line of it may begin at column 0.
+    echo "Result excerpt: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | head -c 300 | tr '\n\r' '  ' || true)"
     return 1
   fi
 }
@@ -1055,7 +1087,7 @@ summarize_claude_triage() {
   jq -r '.result' claude-output/claude-output.json \
     | EXTRACT_JSON_SCHEMA=triage/triage-schema.json python3 .gitea/scripts/common.py extract-json > claude-structured.json || {
     echo "::warning::Could not extract a valid triage JSON from the model's response - reporting fallback"
-    echo "Result tail: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | tail -c 500 || true)"
+    echo "Result tail: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | tail -c 500 | tr '\n\r' '  ' || true)"
   }
   local STATS LOCATIONS CONFIDENCE COST USAGE
   STATS=$(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' claude-output/claude-output.json)
@@ -1105,7 +1137,7 @@ run_claude_fix() {
   local FIX_PID=$!
   trap 'docker stop -t 5 "$SANDBOX_NAME" > /dev/null 2>&1 || true' TERM INT
   wait "$FIX_PID" || rc=$?
-  trap - TERM INT
+  trap 'exit 143' TERM; trap 'exit 130' INT
 
   docker cp "$SANDBOX_NAME":/output/fix-debug.log ./claude-output/fix-debug.log 2>/dev/null || true
   docker cp "$SANDBOX_NAME":/output/fix-output.json ./claude-output/fix-output.json 2>/dev/null || true
@@ -1291,6 +1323,7 @@ _fix_api() {
 # Turns the collected patch into a draft pull request. Its own step, and the only one that holds a
 # token able to push. Every early return is a quiet one: no patch is the normal outcome.
 open_fix_pr() {
+  scrub_claude_output
   if [ ! -s claude-output/fix.patch ] || [ ! -s claude-fix-structured.json ] || [ ! -s fix-target.txt ]; then
     echo "No fix patch to turn into a pull request"
     return 0
@@ -1312,8 +1345,8 @@ open_fix_pr() {
     return 0
   fi
   if [ "$CHECK_RC" != "0" ]; then
-    echo "::warning::Fix patch not accepted: $(cat fix-check.err)"
-    _fix_notice "fix patch for $REPO not accepted - $(head -1 fix-check.err | sed 's/^refused: //')"
+    echo "::warning::Fix patch not accepted: $(head -c 300 fix-check.err | tr '\n\r' '  ')"
+    _fix_notice "fix patch for $REPO not accepted - $(head -1 fix-check.err | tr -d '\r' | sed 's/^refused: //')"
     return 0
   fi
   echo "Fix patch accepted: $CHECK_OUT"
@@ -1384,13 +1417,13 @@ open_fix_pr() {
 
   local GIT_ID=(-c "user.name=${TRIAGE_GIT_NAME:-Claude Bug Triage}" -c "user.email=${TRIAGE_GIT_EMAIL:-claude-triage@noreply.$GITEA_HOST}")
   if ! git -C "fix-work/$REPO" apply --index --whitespace=nowarn "$PWD/claude-output/fix.patch" 2>fix-apply.err; then
-    echo "::warning::git apply failed after the check passed: $(head -c 200 fix-apply.err)"
+    echo "::warning::git apply failed after the check passed: $(head -c 200 fix-apply.err | tr '\n\r' '  ')"
     return 0
   fi
   git -C "fix-work/$REPO" checkout -q -b "$BRANCH"
   git -C "fix-work/$REPO" "${GIT_ID[@]}" commit -q -m "$SUBJECT"
   if ! git -C "fix-work/$REPO" push -q origin "$BRANCH" 2>fix-push.err; then
-    echo "::warning::Could not push $BRANCH: $(head -c 200 fix-push.err)"
+    echo "::warning::Could not push $BRANCH: $(head -c 200 fix-push.err | tr '\n\r' '  ')"
     _fix_notice "fix branch for $REPO could not be pushed"
     return 0
   fi
@@ -1412,7 +1445,7 @@ open_fix_pr() {
   RESPONSE=$(_fix_api POST "/repos/$TRIAGE_ORG/$REPO/pulls" -d "$PAYLOAD" || true)
   PR_URL=$(jq -r '.html_url // empty' <<< "$RESPONSE" 2>/dev/null | tr -d '\r' || true)
   if [ -z "$PR_URL" ]; then
-    echo "::warning::The branch was pushed but the pull request was not created: $(head -c 200 <<< "$RESPONSE")"
+    echo "::warning::The branch was pushed but the pull request was not created: $(head -c 200 <<< "$RESPONSE" | tr '\n\r' '  ')"
     _fix_notice "fix branch $BRANCH pushed to $REPO but the pull request was not created"
     return 0
   fi
@@ -1433,7 +1466,10 @@ triage_sandbox_step() {
   # DooD: the CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY, egress
   # restricted to npm + Anthropic - no GITEA_TOKEN, no BUGZILLA_API_KEY, no docker.sock.
   name_triage_resources
-  trap cleanup_triage_sandbox EXIT INT TERM
+  # EXIT does the cleanup; TERM and INT must end the script (a bare handler would run and carry on,
+  # and a cancelled job could go on to start the paid session).
+  trap cleanup_triage_sandbox EXIT
+  trap 'exit 143' TERM; trap 'exit 130' INT
   cleanup_triage_sandbox
 
   resolve_triage_output_dir

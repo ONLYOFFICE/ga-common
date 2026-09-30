@@ -74,7 +74,7 @@ Each workflow has one `<workflow>-run.sh` (what its steps execute, one subcomman
 - Bugzilla triage and bug-to-PR (`bugzilla-triage.yml`): `triage-run.sh prepare | sandbox | open-pr | report | publish`, one subcommand per workflow step; `triage-tools.py fetch-attachments | expand-attachments | select-repos | expand-repos | render | check-patch | line-origin` (`check-patch` validates the model's patch before anything is pushed, and refuses on any doubt).
 - Shared: `common.py bugzilla-context | extract-json` (bug data for a prompt; validating the model's JSON answer against a schema).
 
-Each subcommand keeps the exit-code contract its standalone script had: `check-patch` fails closed, `line-origin` and `review-tools.py discussion` never fail the caller.
+Each subcommand keeps the exit-code contract its standalone script had: `check-patch` fails closed (exit 0 only for an acceptable patch), `line-origin`, `fetch-attachments`, `expand-attachments` and `review-tools.py discussion` never fail the caller, and `review-tools.py check-english` uses exit 1 only for "violations found" (2 means the check itself could not run).
 
 ## Reusable GitHub workflows (`.github/workflows/`)
 

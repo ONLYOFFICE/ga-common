@@ -922,7 +922,7 @@ run_claude_review() {
   if [ "${rc:-0}" -eq 124 ]; then
     echo "::error::Review hit the ${REVIEW_CLI_TIMEOUT:-900}s CLI timeout - raise REVIEW_CLI_TIMEOUT or lower the effort"
   fi
-  trap - TERM INT
+  trap 'exit 143' TERM; trap 'exit 130' INT
   # If /output was bind-mounted from $HOST_OUTPUT_DIR, both sides already see the same files - no docker cp needed.
   if [ -z "$HOST_OUTPUT_DIR" ]; then
     docker cp "$SANDBOX_NAME":/output/claude-output.json ./claude-output/claude-output.json 2>/dev/null || true
@@ -963,16 +963,25 @@ summarize_claude_review() {
 # The "Non-ASCII comment check" step: passes or fails a commit status of its own and keeps one
 # comment up to date, independently of the review itself.
 check_english_comments() {
-  local NON_ASCII_COMMENT_ID count
+  local NON_ASCII_COMMENT_ID count check_rc=0
   NON_ASCII_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Non-ASCII-Check -->"))] | last | .id // empty')
-  if python3 .gitea/scripts/review-tools.py check-english repo/pr.diff > /tmp/english-check.md; then
+  python3 .gitea/scripts/review-tools.py check-english repo/pr.diff > /tmp/english-check.md || check_rc=$?
+  if [ "$check_rc" != "0" ] && [ "$check_rc" != "1" ]; then
+    # Exit 1 means violations; anything else means the check itself failed (no diff, a crash). Saying
+    # "failure, 0 violations" about that would be a claim the check never made.
+    echo "::warning::The Non-ASCII check could not run (exit $check_rc) - no status set"
+    return 0
+  fi
+  if [ "$check_rc" = "0" ]; then
     echo "Non-ASCII check passed"
     [ -n "$NON_ASCII_COMMENT_ID" ] && gitea_api_json "$ORG_NAME/$REPO_NAME/issues/comments/$NON_ASCII_COMMENT_ID" -X DELETE > /dev/null || true
     set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "success" "Ok" "Non-ASCII Check"
   else
     count=$(grep -c '^- \[' /tmp/english-check.md 2>/dev/null || true)
     echo "Non-ASCII check failed: $count violation(s)"
-    upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/english-check.md "$NON_ASCII_COMMENT_ID" "" "<!-- Non-ASCII-Check -->"
+    # A comment that fails to post must not stop the status below from being set.
+    upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/english-check.md "$NON_ASCII_COMMENT_ID" "" "<!-- Non-ASCII-Check -->" \
+      || echo "::warning::Could not post the Non-ASCII comment"
     set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "failure" "Failed: $count violation(s)" "Non-ASCII Check"
   fi
 }
@@ -986,7 +995,10 @@ review_sandbox_step() {
 
   # DooD: claude CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY and egress restricted to npm + Anthropic via a Squid proxy - that containment is what lets --allowedTools be dropped entirely below (full tool access).
   name_sandbox_resources
-  trap cleanup_sandbox EXIT INT TERM
+  # EXIT does the cleanup; TERM and INT must end the script (a bare handler would run and carry on,
+  # and a cancelled job could go on to start the paid review).
+  trap cleanup_sandbox EXIT
+  trap 'exit 143' TERM; trap 'exit 130' INT
   cleanup_sandbox
 
   resolve_host_output_dir

@@ -54,6 +54,15 @@ import urllib.request
 from pathlib import Path
 
 
+def env_number(name, default, cast=int):
+    """An environment number, or the default when it is unset, empty or not a number: a typo in a
+    tuning variable must not crash every subcommand of a module at import time."""
+    try:
+        return cast(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
 # ----------------------------------------------------------------------------
 # bugzilla-context
 # ----------------------------------------------------------------------------
@@ -64,11 +73,14 @@ API_KEY = os.environ.get("BUGZILLA_API_KEY", "")
 # PR referencing many bugs against a slow/unresponsive Bugzilla can eat into
 # the job's overall timeout during "Prepare review context", before the
 # review itself even starts - hence a cap, even a generous one.
-MAX_IDS = int(os.environ.get("BUGZILLA_MAX_IDS", "30"))
-MAXLEN = int(os.environ.get("BUGZILLA_COMMENT_MAXLEN", "2000"))
+MAX_IDS = env_number("BUGZILLA_MAX_IDS", 30)
+MAXLEN = env_number("BUGZILLA_COMMENT_MAXLEN", 2000)
+# Comments kept per bug (the description is always kept): a 500-comment bug would otherwise add
+# about a megabyte to the prompt, and up to MAX_IDS bugs can be referenced.
+MAX_BUG_COMMENTS = env_number("BUGZILLA_MAX_COMMENTS", 30)
 # MAX_IDS alone does not bound the damage: 30 ids x 2 requests x 20s is 20 minutes - the whole
 # job budget, spent before claude starts. Bugs that miss the budget degrade to a note.
-TOTAL_TIMEOUT = float(os.environ.get("BUGZILLA_TOTAL_TIMEOUT", "120"))
+TOTAL_TIMEOUT = env_number("BUGZILLA_TOTAL_TIMEOUT", 120.0, float)
 
 _deadline = None
 
@@ -189,7 +201,12 @@ def render(bug, comments, bug_id):
     # /rest/bug/<id>/comment -> {"bugs": {"<id>": {"comments": [...]}}}
     clist = (((comments or {}).get("bugs") or {}).get(bid) or {}).get("comments") or []
     has_comments = False
+    # Newest comments win: the description plus the last MAX_BUG_COMMENTS.
+    followups = [c for c in clist if c.get("count", 0) != 0]
+    dropped = {id(c) for c in followups[:max(0, len(followups) - MAX_BUG_COMMENTS)]}
     for c in clist:
+        if id(c) in dropped:
+            continue
         n = c.get("count", 0)
         text = sanitize(c.get("text", ""))
         if not text:
@@ -203,6 +220,8 @@ def render(bug, comments, bug_id):
                 has_comments = True
             lines.append(f"  - #{n}: {text}")
 
+    if dropped:
+        lines.append(f"  ({len(dropped)} earlier comments omitted)")
     lines.append("</bug>")
     return "\n".join(lines)
 
@@ -370,8 +389,9 @@ def validate(data, schema, path="root"):
     props = schema.get("properties", {})
 
     summary_schema = props.get("summary")
-    # Only when the schema declares an object: the fix schema's summary is a plain string.
-    if summary_schema and summary_schema.get("type") == "object" and data.get("summary") is not None:
+    # Only when the schema declares an object (the fix schema's summary is a plain string). A present
+    # "summary": null is checked too - a null used to pass here and crash the renderer.
+    if summary_schema and summary_schema.get("type") == "object" and "summary" in data:
         error = _validate_object(data["summary"], summary_schema, f"{path}.summary")
         if error:
             return error
@@ -386,6 +406,10 @@ def validate(data, schema, path="root"):
             if key in required:
                 return f"{path}.{key}: required array is null"
             continue
+        if not isinstance(value, list):
+            # Iterating a string or a dict here dropped every "item" one by one and left an empty
+            # list: a review whose findings were a sentence came out as APPROVE with none.
+            return f"{path}.{key}: expected an array, got {type(value).__name__}"
         item_schema = arr_schema.get("items", {})
         kept = []
         for i, item in enumerate(value):
@@ -417,7 +441,13 @@ def main_extract_json():
         print(f"::warning::extract-json: extracted JSON does not match {SCHEMA_PATH.name}'s required shape ({error})", file=sys.stderr)
         sys.exit(1)
 
-    json.dump(data, sys.stdout, ensure_ascii=False)
+    # Built first and written in one call: json.dump writes in chunks, so a character stdout cannot
+    # encode (a lone surrogate the model produced) left a truncated prefix behind and exit code 1.
+    payload = json.dumps(data, ensure_ascii=False)
+    try:
+        sys.stdout.write(payload)
+    except UnicodeEncodeError:
+        sys.stdout.write(json.dumps(data))
 
 
 # ----------------------------------------------------------------------------

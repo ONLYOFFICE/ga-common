@@ -47,6 +47,7 @@ Exits with 1 if non-ASCII characters are found in comments of included files.
 """
 import argparse
 import base64
+import codecs
 import json
 import os
 import re
@@ -56,6 +57,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from urllib.parse import quote
+
+
+def env_number(name, default, cast=int):
+    """An environment number, or the default when it is unset, empty or not a number: a typo in a
+    tuning variable must not crash every subcommand of a module at import time."""
+    try:
+        return cast(os.environ.get(name) or default)
+    except ValueError:
+        return default
 
 
 # ----------------------------------------------------------------------------
@@ -90,22 +100,37 @@ def esc(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def span(s):
+    """Text for a markdown code span: a backtick would close the span and let what follows become
+    markup (a link, for one), and entities are not decoded inside a span, so they cannot help."""
+    return esc(str(s).replace("`", "'"))
+
+
+def token(s):
+    """A short scalar the schema calls a number (a line, an id). Nothing enforces that type, so
+    anything else is reduced to plain characters rather than trusted."""
+    return re.sub(r"[^0-9A-Za-z_.-]", "", str(s))[:12]
+
+
 def render_locations(locations, file_link_base):
     # Second line of defense behind common.py extract-json - this module also runs standalone.
     groups = []
     for loc in locations:
         if not isinstance(loc, dict) or "path" not in loc or "line" not in loc:
             continue
-        if groups and groups[-1][0] == loc["path"]:
-            groups[-1][1].append(loc["line"])
+        path, line = str(loc["path"]), token(loc["line"])
+        if not line:
+            continue
+        if groups and groups[-1][0] == path:
+            groups[-1][1].append(line)
         else:
-            groups.append((loc["path"], [loc["line"]]))
+            groups.append((path, [line]))
     first_overall = True
     rendered_groups = []
     for path, lines in groups:
         # Sentinel for findings not tied to a file (PR title/commit style, §2.2) - never link it.
         if path == "PR metadata":
-            rendered_groups.append(f"`{esc(path)}`")
+            rendered_groups.append(f"`{span(path)}`")
             continue
         entries = []
         for i, line in enumerate(lines):
@@ -113,10 +138,10 @@ def render_locations(locations, file_link_base):
                 # quote(): path is model output - a stray ')' or similar would otherwise
                 # close the markdown link early and let trailing text define a new one.
                 url = f"{file_link_base}/{quote(path)}#L{line}"
-                entries.append(f"[`{esc(path)}:{line}`]({url})")
+                entries.append(f"[`{span(path)}:{line}`]({url})")
                 first_overall = False
             elif i == 0:
-                entries.append(f"`{esc(path)}:{line}`")
+                entries.append(f"`{span(path)}:{line}`")
             else:
                 entries.append(f"`:{line}`")
         rendered_groups.append(", ".join(entries))
@@ -151,7 +176,10 @@ def render_open_issue(item):
     if item.get("fix_summary"):
         lines.append(f"  - **Fix**: {esc(item['fix_summary'])}")
     if item.get("fix_code"):
-        lines.append(f"    {code_fence(item['fix_code'], item.get('fix_lang'))}".replace("\n", "\n    "))
+        # fix_code is the one field that is not escaped, and a state or review marker inside it would
+        # be found by the next run (and by truncation) as if this comment had written it.
+        fix_code = str(item["fix_code"]).replace("<!--", "<!\u200b--")
+        lines.append(f"    {code_fence(fix_code, item.get('fix_lang'))}".replace("\n", "\n    "))
     lines.append("")
     lines.append("  </details>")
     return "\n".join(lines)
@@ -167,20 +195,23 @@ def render_fixed_issue(item):
 
 
 def render_bug(bug):
+    bug_id = token(bug.get("id", ""))
     if bug.get("data_not_retrieved_reason"):
-        return f"⚠️ Bug {bug['id']}: data not retrieved ({esc(bug['data_not_retrieved_reason'])})."
+        return f"⚠️ Bug {bug_id}: data not retrieved ({esc(bug['data_not_retrieved_reason'])})."
     icon = FIXED_BY_PR_ICON.get(bug.get("fixed_by_pr"), "❓")
     title = esc(bug.get("title", ""))
     status = esc(bug.get("status", ""))
-    lines = [f"  <details><summary>[{icon}] Bug {bug['id']}: {title} — {status}</summary>", ""]
-    bug_line = f"Bug {bug['id']}"
+    lines = [f"  <details><summary>[{icon}] Bug {bug_id}: {title} — {status}</summary>", ""]
+    bug_line = f"Bug {bug_id}"
     bug_url = bug.get("url") or ""
+    if not isinstance(bug_url, str):
+        bug_url = ""
     # http(s)-only: bug_url is model output, and an unrestricted scheme (javascript:,
     # data:, ...) rendered as a clickable link is a needless risk for a field that
     # should only ever be a Bugzilla URL.
     if bug_url.startswith(("http://", "https://")):
         bug_line = f"[{bug_line}]({quote(bug_url, safe=':/?=&%')})"
-    meta = " · ".join(f"`{esc(v)}`" for v in (bug.get("severity_priority"), bug.get("product_component")) if v)
+    meta = " · ".join(f"`{span(v)}`" for v in (bug.get("severity_priority"), bug.get("product_component")) if v)
     lines.append(f"  - **Bug**: {bug_line}" + (f" · {meta}" if meta else ""))
     if bug.get("what_reported"):
         lines.append(f"  - **What's reported**: {esc(bug['what_reported'])}")
@@ -292,6 +323,8 @@ def build(structured, prev_state, max_state_bytes=None, pr_sha=None):
     reviewed_shas = reviewed_shas[-MAX_REVIEWED_SHAS:]
 
     for r in structured.get("resolved") or []:
+        if not isinstance(r.get("id"), (int, str)):  # unhashable ids would raise below
+            continue
         item = prev_open_by_id.get(r["id"])
         if item is None:
             print(f"::warning::review-render: resolved id {r.get('id')} not found in previous open findings - skipping", file=sys.stderr)
@@ -310,7 +343,7 @@ def build(structured, prev_state, max_state_bytes=None, pr_sha=None):
     # State only needs enough to number a finding next run and, if resolved, build
     # its Fixed "was" - never fix_code/fix_lang/confidence, and why is capped.
     def slim(f):
-        why = f["why"]
+        why = str(f["why"])
         if len(why) > 300:
             why = why[:300].rsplit(" ", 1)[0] + "…"
         return {"id": f["id"], "category": f["category"], "severity": f["severity"],
@@ -382,7 +415,9 @@ def truncate_preserving_state(output, max_bytes, run_url):
     """Gitea rejects comments over ~64KB. Truncates only the visible part - the
     trailing state comment and closing </details> are never touched/corrupted."""
     marker = "<!-- claude-review-state:"
-    idx = output.index(marker)
+    # The last one: the real state comment is appended at the very end, and an earlier occurrence
+    # can only be text that came from the model.
+    idx = output.rindex(marker)
     head, tail = output[:idx], output[idx:]
     note = f"\n\n_… review truncated: output exceeded the comment size limit; see the [workflow run]({run_url}) for the full text …_\n\n"
     budget = max_bytes - len(tail.encode("utf-8")) - len(note.encode("utf-8"))
@@ -431,10 +466,10 @@ ORG = os.environ.get("ORG_NAME", "")
 REPO = os.environ.get("REPO_NAME", "")
 PR = os.environ.get("PR_NUMBER", "")
 
-MAX_COMMENTS = int(os.environ.get("REVIEW_DISCUSSION_MAX_COMMENTS", "12"))
-MAX_REVIEWS = int(os.environ.get("REVIEW_DISCUSSION_MAX_REVIEWS", "12"))
-MAX_INLINE = int(os.environ.get("REVIEW_DISCUSSION_MAX_INLINE", "30"))
-MAXLEN = int(os.environ.get("REVIEW_DISCUSSION_COMMENT_MAXLEN", "400"))
+MAX_COMMENTS = env_number("REVIEW_DISCUSSION_MAX_COMMENTS", 12)
+MAX_REVIEWS = env_number("REVIEW_DISCUSSION_MAX_REVIEWS", 12)
+MAX_INLINE = env_number("REVIEW_DISCUSSION_MAX_INLINE", 30)
+MAXLEN = env_number("REVIEW_DISCUSSION_COMMENT_MAXLEN", 400)
 
 NO_DISCUSSION = "No prior discussion or review comments found."
 # Every marker this pipeline stamps on its own comments - the non-ASCII report included,
@@ -493,13 +528,14 @@ def author(entry):
 
 def render_comments(pr_number):
     try:
-        comments = paginate(f"issues/{pr_number}/comments", max_items=MAX_COMMENTS * 4)
+        # Wide enough to reach the recent end of a long thread: the newest explanation is the point.
+        comments = paginate(f"issues/{pr_number}/comments", max_items=MAX_COMMENTS * 20)
     except Exception:  # noqa: BLE001 - network/API hiccup, never fatal
         return []
     human = [c for c in comments
              if not any(marker in (c.get("body") or "") for marker in BOT_MARKERS)]
     lines = []
-    for c in human[:MAX_COMMENTS]:
+    for c in human[-MAX_COMMENTS:]:
         body = sanitize(c.get("body", ""))
         if body:
             lines.append(f"- @{author(c)}: {body}")
@@ -745,6 +781,20 @@ def extract_comment_text(content: str, state: dict) -> str | None:
     return None
 
 
+def header_path(raw: str) -> str:
+    """The new path from the text after "+++ ", or "" for a deletion. Git quotes a path with
+    non-ASCII or unusual characters ("b/\\321\\202.py") and appends a TAB to one with spaces."""
+    raw = raw.split("\t", 1)[0].strip()
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        try:
+            raw = codecs.escape_decode(raw[1:-1].encode("latin-1", "backslashreplace"))[0].decode("utf-8", "replace")
+        except ValueError:
+            raw = raw[1:-1]
+    if raw == "/dev/null":
+        return ""
+    return raw[2:] if raw[:2] in ("a/", "b/") else raw
+
+
 def parse_diff(diff_text: str) -> list[tuple[str, int, str]]:
     """Return list of (filename, line_number, comment_text) for violations."""
     results = []
@@ -753,13 +803,22 @@ def parse_diff(diff_text: str) -> list[tuple[str, int, str]]:
     excluded = False
     state = new_scan_state()
 
-    for line in diff_text.splitlines():
-        if line.startswith("+++ b/"):
-            current_file = line[6:]
+    previous = ""
+    # Split on "\n" only: str.splitlines() also breaks on U+2028, U+0085 and form feed, which turned
+    # the rest of such a line into a bare "context" line (hiding a violation) and shifted every
+    # later line number in the hunk.
+    for line in diff_text.split("\n"):
+        line = line.rstrip("\r")
+        # A file header is a "+++ " line right after its "--- " line. Matching on "+++ b/" alone missed
+        # quoted (non-ASCII) paths and paths with spaces, and let the previous file's exclusions stick.
+        if line.startswith("+++ ") and previous.startswith("--- "):
+            current_file = header_path(line[4:])
             current_line = 0
-            excluded = is_excluded(current_file)
+            excluded = not current_file or is_excluded(current_file)
             state = new_scan_state()
+            previous = line
             continue
+        previous = line
 
         hunk = HUNK_RE.match(line)
         if hunk:
@@ -775,13 +834,13 @@ def parse_diff(diff_text: str) -> list[tuple[str, int, str]]:
             continue
 
         if excluded:
-            if line.startswith("+") and not line.startswith("+++"):
+            if line.startswith("+"):
                 current_line += 1
             elif not line.startswith("-"):
                 current_line += 1
             continue
 
-        if line.startswith("+") and not line.startswith("+++"):
+        if line.startswith("+"):
             current_line += 1
             content = line[1:].strip()
             comment = extract_comment_text(content, state)
@@ -802,14 +861,20 @@ def parse_diff(diff_text: str) -> list[tuple[str, int, str]]:
     return results
 
 
+def defang(text: str) -> str:
+    """Breaks an HTML comment opener, so text from a diff cannot spell a review or state marker."""
+    return text.replace("<!--", "<!\u200b--")
+
+
 def main_check_english() -> None:
     diff_path = sys.argv[1] if len(sys.argv) > 1 else "pr.diff"
     try:
         with open(diff_path, encoding="utf-8", errors="replace") as f:
             diff_text = f.read()
     except FileNotFoundError:
-        print(f"Diff file not found: {diff_path}")
-        sys.exit(1)
+        # Exit 2, not 1: 1 means "violations found", and a missing diff is a check that could not run.
+        print(f"Diff file not found: {diff_path}", file=sys.stderr)
+        sys.exit(2)
 
     violations = parse_diff(diff_text)
     if violations:
@@ -817,7 +882,7 @@ def main_check_english() -> None:
         prev_file = None
         for filename, lineno, content in violations:
             if filename != prev_file:
-                lines.append(f"\n**{filename}**\n")
+                lines.append(f"\n**{defang(filename)}**\n")
                 prev_file = filename
             # A backslash does not escape a backtick inside a code span, so the old replace()
             # left the span breakable by any backtick in the flagged line. Size the fence past
@@ -825,7 +890,7 @@ def main_check_english() -> None:
             fence = "`" * (max_backtick_run(content) + 1)
             # The inner spaces are required: content starting or ending with a backtick would
             # merge into the fence. CommonMark strips the pair, so the text renders unchanged.
-            lines.append(f"- {file_link(filename, lineno)}: {fence} {content} {fence}\n")
+            lines.append(f"- {file_link(defang(filename), lineno)}: {fence} {defang(content)} {fence}\n")
         lines.append("\nPlease use ASCII-only characters in code comments before merging.")
         print("".join(lines))
         sys.exit(1)
@@ -854,7 +919,11 @@ def run_discussion():
 
 
 def run_check_english():
-    main_check_english()
+    try:
+        main_check_english()
+    except Exception as error:  # noqa: BLE001 - exit 1 is reserved for "violations found"
+        print(f"the check could not run ({type(error).__name__}: {error})", file=sys.stderr)
+        sys.exit(2)
 
 
 RUNNERS = {"render": run_render, "discussion": run_discussion, "check-english": run_check_english}

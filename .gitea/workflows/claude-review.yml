@@ -185,7 +185,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
-          bash .gitea/scripts/review-run.sh sandbox
+          exec bash .gitea/scripts/review-run.sh sandbox
 
       - name: Upload review artifacts
         # v4/v7 (@actions/artifact v2+) intermittently failed here with GHESNotSupportedError - v3 predates that non-github.com host check.
