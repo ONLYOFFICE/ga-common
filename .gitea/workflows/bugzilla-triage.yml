@@ -66,8 +66,6 @@ concurrency:
 
 jobs:
   triage:
-    # Temporarily disabled; remove this line to allow manual triage runs again.
-    if: ${{ false }}
     runs-on: ubuntu-latest
     # Generous next to the review job: several repositories get cloned before the model starts,
     # and the fix session that can follow the analysis has its own 10 minutes on top of its 15.
