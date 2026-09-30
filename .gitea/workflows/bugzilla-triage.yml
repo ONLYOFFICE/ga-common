@@ -111,14 +111,13 @@ jobs:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
           BUGZILLA_API_KEY: ${{ secrets.BUGZILLA_API_KEY }}
           BUGZILLA_HOST: ${{ secrets.BUGZILLA_HOST }}
-          # Used only for the repository-selection call (see select-repos.py), never inside the sandbox.
+          # Used only for the repository-selection call (see triage-tools.py select-repos), never inside the sandbox.
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
           SELECT_MODEL: ${{ inputs.model }}
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
-          source .gitea/scripts/triage-steps.sh
-          prepare_triage_context
+          bash .gitea/scripts/triage-run.sh prepare
 
       - name: Run triage (isolated container)
         # A bug the prepare step deliberately skipped (unrouted product, access-restricted) has no
@@ -140,23 +139,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
-          source .gitea/scripts/triage-sandbox.sh
-
-          # DooD: the CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY, egress
-          # restricted to npm + Anthropic - no GITEA_TOKEN, no BUGZILLA_API_KEY, no docker.sock.
-          name_triage_resources
-          trap cleanup_triage_sandbox EXIT INT TERM
-          cleanup_triage_sandbox
-
-          resolve_triage_output_dir
-          setup_triage_sandbox
-          run_claude_triage
-          summarize_claude_triage
-
-          # Only when the analysis is confident, the bug is open and the repository is allowlisted;
-          # never fatal. The sandbox is still up here, which is the only reason this is not its own step.
-          source .gitea/scripts/fix-steps.sh
-          attempt_fix
+          bash .gitea/scripts/triage-run.sh sandbox
 
       - name: Upload triage artifacts
         # v3: v4/v7 intermittently fail against a non-github.com host (GHESNotSupportedError).
@@ -181,28 +164,27 @@ jobs:
       - name: Open fix PR
         # Its own step and the only one with a token that can push: the model that wrote the change
         # never sees it. Runs before Report result so the pull request link is part of the message.
-        if: always() && steps.prepare.outputs.skip != 'true'
+        # Not always(): a run an operator cancelled must not go on to push a branch.
+        if: (success() || failure()) && steps.prepare.outputs.skip != 'true'
         continue-on-error: true
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
           TRIAGE_FIX_PR: ${{ inputs.fix_pr }}
         run: |
           set -euo pipefail
-          source .gitea/scripts/fix-steps.sh
-          open_fix_pr
+          bash .gitea/scripts/triage-run.sh open-pr
 
       - name: Report result
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
-          # Read-only use: line-history.py asks this repository for the commits and the file
+          # Read-only use: triage-tools.py line-origin asks this repository for the commits and the file
           # contents around the line the analysis named. Without it the script returns on its
           # first check and the "last touched" line silently never appears.
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
           set -euo pipefail
-          source .gitea/scripts/triage-steps.sh
-          report_triage_result
+          bash .gitea/scripts/triage-run.sh report
 
       - name: Publish to Bugzilla
         # After Report result, so the message exists and has already been logged; the comment is an
@@ -216,8 +198,7 @@ jobs:
           TRIAGE_PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
-          source .gitea/scripts/triage-steps.sh
-          publish_triage_comment
+          bash .gitea/scripts/triage-run.sh publish
 
       - name: Notify
         # Self-contained on purpose: no source, no repository files. The earliest steps run

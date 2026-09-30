@@ -1,9 +1,125 @@
 #!/usr/bin/env bash
+# Everything the claude-review.yml workflow runs on the runner, one subcommand per step:
+#
+#   review-run.sh prepare        resolve the PR, pick the effort, fetch bug and discussion context
+#   review-run.sh english-check  the non-ASCII comment gate (its own commit status)
+#   review-run.sh sandbox        run the review in the isolated container
+#   review-run.sh post           render the review, post the comment and set the commit status
+#
+# Run as `bash .gitea/scripts/review-run.sh <subcommand>`. It can also be sourced to reach the
+# functions below directly.
+#
+# Sections: Gitea API helpers, then prepare/post, then the sandbox.
+
+set -euo pipefail
+
+# ============================================================================
+# Gitea API helpers
+# ============================================================================
+# Helper for Gitea API calls. Requires $GITEA_TOKEN and $GITEA_HOST to be set.
+
+_gitea_raw() {
+  local retry="$1" endpoint="$2"; shift 2
+  local body http_code
+  body=$(curl -s --retry "$retry" -w "\n%{http_code}" \
+    -H "Authorization: token $GITEA_TOKEN" \
+    "https://$GITEA_HOST/api/v1/repos/$endpoint" \
+    "$@")
+  http_code=$(printf '%s' "$body" | tail -1)
+  body=$(printf '%s' "$body" | head -n -1)
+  if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+    echo "Gitea API error $http_code for $endpoint: $(echo "$body" | jq -r '.message // empty' 2>/dev/null || echo "$body")" >&2; return 1
+  fi
+  printf '%s' "$body"
+}
+
+gitea_api()      { _gitea_raw 3 "$@"; }
+gitea_api_json() { _gitea_raw 0 "$1" -H "Content-Type: application/json" "${@:2}"; }
+
+_run_url() { echo "https://$GITEA_HOST/${WORKFLOW_REPO:-$ORG_NAME/ga-common}/actions/runs/$GITHUB_RUN_ID"; }
+
+fetch_all_comments() {
+  local endpoint="$1" all="[]" page=1
+  while true; do
+    local batch; batch=$(gitea_api "$endpoint?limit=50&page=$page") || { echo "Error fetching page $page of $endpoint" >&2; return 1; }
+    local count; count=$(echo "$batch" | jq 'length') || return 1
+    [ "$count" -eq 0 ] && break
+    all=$(jq -n --argjson a "$all" --argjson b "$batch" '$a + $b') || return 1
+    [ "$count" -lt 50 ] && break
+    (( page++ ))
+  done
+  echo "$all"
+}
+
+post_working_comment() {
+  local repo="$1" pr="$2" comment_id="${3:-}" previous_review_file="${4:-}"
+  local body
+  body="**Claude Code Review** • [View run →]($(_run_url))
+
+<img src=\"https://raw.githubusercontent.com/markwylde/claude-code-gitea-action/refs/heads/gitea/assets/spinner.gif\" width=\"20\" align=\"absmiddle\" /> Analyzing Pull Request..."
+  # Skip the wrap if the previous comment is itself a stuck spinner (a run that crashed before
+  # ever reaching post_review_and_set_status to replace it) - otherwise each such crash nests
+  # another "Previous review" wrapper inside the last one, forever.
+  if [ -n "$previous_review_file" ] && [ -f "$previous_review_file" ] \
+     && ! grep -q 'Analyzing Pull Request\.\.\.' "$previous_review_file"; then
+    local prev_verdict=""
+    grep -q "✅ APPROVE" "$previous_review_file" && prev_verdict=" - ✅ APPROVE"
+    grep -q "❌ BLOCKED" "$previous_review_file" && prev_verdict=" - ❌ BLOCKED"
+    body="$body
+
+---
+
+<details><summary>💬 Previous review$prev_verdict</summary>
+
+$(cat "$previous_review_file")
+
+</details>"
+  fi
+  local payload; payload=$(printf '%s\n\n<!-- Claude-Review: -->' "$body" | jq -Rs .)
+  # id + updated_at (tab-separated) - the caller persists updated_at so post_review_and_set_status
+  # can later detect whether anything else touched this comment before it posts the real result.
+  local resp
+  if [ -n "$comment_id" ]; then
+    resp=$(gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "{\"body\": $payload}")
+  else
+    resp=$(gitea_api_json "$repo/issues/$pr/comments" -X POST -d "{\"body\": $payload}")
+  fi
+  jq -r '[.id, .updated_at] | @tsv' <<< "$resp"
+}
+
+upsert_review_comment() {
+  local repo="$1" pr="$2" file="$3" comment_id="${4:-}" sha="${5:-}" marker="${6:-}"
+  local end_marker="${marker:-<!-- Claude-Review:${sha} -->}"
+  local body; body="$(printf '%s\n\n%s' "$(cat "$file")" "$end_marker")"
+  local payload; payload="{\"body\": $(echo "$body" | jq -Rs .)}"
+  local rc=0
+  if [ -n "$comment_id" ]; then
+    # Fall back to POST when the tracked comment was deleted mid-run (stale id)
+    # so the finished review is never silently dropped.
+    if ! gitea_api_json "$repo/issues/comments/$comment_id" -X PATCH -d "$payload" > /dev/null; then
+      echo "PATCH of comment #$comment_id failed — posting a new comment" >&2
+      gitea_api_json "$repo/issues/$pr/comments" -X POST -d "$payload" > /dev/null || rc=1
+    fi
+  else
+    gitea_api_json "$repo/issues/$pr/comments" -X POST -d "$payload" > /dev/null || rc=1
+  fi
+  return "$rc"
+}
+
+set_commit_status() {
+  local repo="$1" sha="$2" state="$3" context="${5:-Claude Code Review}"
+  local desc="/ $4"; desc="${desc:0:140}"
+  gitea_api_json "$repo/statuses/$sha" -X POST \
+    -d "$(jq -n --arg state "$state" --arg desc "$desc" --arg url "$(_run_url)" --arg ctx "$context" \
+           '{state:$state,context:$ctx,description:$desc,target_url:$url}')" > /dev/null || true
+}
+
+# ============================================================================
+# Prepare and post
+# ============================================================================
 # Review pipeline helpers.
 # All env vars (ORG_NAME, REPO_NAME, PR_NUMBER, PR_SHA, PR_BRANCH, BASE_BRANCH,
 # GITEA_TOKEN, BUGZILLA_API_KEY, BUGZILLA_HOST) come from the workflow job env.
-
-source "$(dirname "${BASH_SOURCE[0]}")/gitea-api.sh"
 
 # ---------------------------------------------------------------------------
 # Character-accurate length caps, replacing `cut -c` (which counts BYTES): for this org's
@@ -29,7 +145,7 @@ sys.stdout.buffer.write(text.encode("utf-8"))' "$1"
 _unwrap_previous_review() {
   python3 -c 'import re, sys
 text = sys.stdin.buffer.read().decode("utf-8", "replace").strip()
-# render-review.py always opens with "<details>\n<summary>[<verdict>] - Claude Code Review".
+# review-tools.py render always opens with "<details>\n<summary>[<verdict>] - Claude Code Review".
 REAL = re.compile(r"^<details>\s*\n<summary>\[")
 INNER = re.compile(r"<details><summary>[^<]*Previous review[^<]*</summary>\s*\n(.*)\n\s*</details>\s*$", re.DOTALL)
 for _ in range(10):
@@ -198,7 +314,7 @@ prepare_review_context() {
     # multi-line, breaking rev-parse and leaking a newline into previous-sha.txt.
     PREVIOUS_SHA=$(grep -oP '(?<=<!-- Claude-Review:)[a-f0-9]+(?= -->)' <<< "$PREVIOUS_REVIEW" | tail -1 || true)
 
-    # Decode the persisted open/fixed state (base64 JSON, see render-review.py) so
+    # Decode the persisted open/fixed state (base64 JSON, see review-tools.py render) so
     # incremental review works off a numbered findings list, not re-parsed markdown.
     local STATE_B64
     STATE_B64=$(grep -oP '(?<=<!-- claude-review-state:)[A-Za-z0-9+/=]+(?= -->)' <<< "$PREVIOUS_REVIEW" | tail -1 || true)
@@ -227,7 +343,7 @@ prepare_review_context() {
   # A force-push that only rewrites the tip (the common `commit --amend` + push -f case) moves
   # the marker's single last-reviewed SHA out from under us, even though every earlier commit -
   # already reviewed in a previous round - is still a perfectly good ancestor of the new HEAD.
-  # previous-state.json's reviewed_shas (see render-review.py) is the full history of every SHA
+  # previous-state.json's reviewed_shas (see review-tools.py render) is the full history of every SHA
   # this pipeline has actually posted a completed review for, newest last - walk it backwards and
   # reuse the newest one still resolvable in this clone, instead of giving up straight to a full
   # origin/$BASE_BRANCH...HEAD review.
@@ -397,12 +513,12 @@ prepare_review_context() {
   # Bug refs on this org's PRs often live only in commit subjects ("fix Bug 1,
   # 2, 3"), not the PR title/body - scan all three.
   BUGZILLA_CONTEXT=$(printf '%s\n%s\n%s' "$PR_TITLE_RAW" "$PR_BODY_RAW" "$COMMIT_SUBJECTS_RAW" \
-    | python3 .gitea/scripts/bugzilla-api.py --from-text || true)
+    | python3 .gitea/scripts/common.py bugzilla-context --from-text || true)
   grep -q '^<bug ' <<< "$BUGZILLA_CONTEXT" && echo "Bugzilla: referenced bug(s) attached" || true
 
   # --- prior discussion/review comments (human context; own comments excluded) ---
   local REVIEW_DISCUSSION
-  REVIEW_DISCUSSION=$(python3 .gitea/scripts/review-discussion.py 2>/dev/null | _trim_chars 8000)
+  REVIEW_DISCUSSION=$(python3 .gitea/scripts/review-tools.py discussion 2>/dev/null | _trim_chars 8000)
   [ -n "$REVIEW_DISCUSSION" ] || REVIEW_DISCUSSION="No prior discussion or review comments found."
   grep -q '^## ' <<< "$REVIEW_DISCUSSION" && echo "Review discussion: prior comments/review threads attached" || true
 
@@ -519,7 +635,7 @@ post_review_and_set_status() {
     DURATION="[$((elapsed/60))m $((elapsed%60))s]"
   fi
 
-  # render-review.py computes verdict/counters/sections from claude-structured.json - nothing to reconcile here.
+  # review-tools.py render computes verdict/counters/sections from claude-structured.json - nothing to reconcile here.
   local FILE_LINK_BASE="https://$GITEA_HOST/$ORG_NAME/$REPO_NAME/src/commit/$PR_SHA"
   local CORRECT_VERDICT=""
   # Exactly review-schema.json's required set, nothing more: 'resolved' is optional there and the
@@ -527,7 +643,7 @@ post_review_and_set_status() {
   if [ -s claude-structured.json ] && jq -e '.summary and (.findings | type == "array")' claude-structured.json > /dev/null 2>&1; then
     local PREV_STATE_ARGS=()
     [ -f repo/previous-state.json ] && PREV_STATE_ARGS=(--previous-state repo/previous-state.json)
-    if python3 .gitea/scripts/render-review.py \
+    if python3 .gitea/scripts/review-tools.py render \
          --structured claude-structured.json \
          "${PREV_STATE_ARGS[@]}" \
          --pr-sha "$PR_SHA" \
@@ -541,7 +657,7 @@ post_review_and_set_status() {
         CORRECT_VERDICT="APPROVE"
       fi
     else
-      echo "::warning::render-review.py failed — posting fallback"
+      echo "::warning::review-tools.py render failed — posting fallback"
     fi
   else
     echo "::warning::claude-structured.json missing or invalid — posting fallback"
@@ -572,7 +688,7 @@ post_review_and_set_status() {
 
   # notify-workflows.sh's Claude Review stats digest scrapes THIS job's log for the
   # counter line ("Critical...Fixed") and per-entry "Fixed [emoji]" lines - it has no
-  # other way to see what got posted, since render-review.py builds claude-output.md
+  # other way to see what got posted, since review-tools.py render builds claude-output.md
   # without ever echoing it. Printing it here is what the digest depends on.
   cat claude-output.md
   echo "Posting review ($(wc -l < claude-output.md) lines)"
@@ -638,3 +754,261 @@ post_review_and_set_status() {
   echo "Job: $JOB_STATUS | Verdict: ${CORRECT_VERDICT:-none} | Status: $STATE $DURATION"
   set_commit_status "$REPO_PATH" "$PR_SHA" "$STATE" "$DESC"
 }
+
+# ============================================================================
+# Isolated-container sandbox
+# ============================================================================
+# Isolated-container review sandbox helpers for claude-review.yml's "Run review" step; expects ANTHROPIC_API_KEY/CLAUDE_MODEL/CLAUDE_CODE_VERSION/CLAUDE_EFFORT/CLAUDE_MAX_BUDGET_USD from the job env.
+# Optional tuning: SANDBOX_PIDS_LIMIT (default 1024), SANDBOX_MEMORY (unset = no ceiling, see setup_sandbox).
+
+# Names this run's sandbox resources (per-run, not fixed - fixed names let one concurrent PR's cleanup kill another's still-live sandbox) and pre-creates claude-output/.
+name_sandbox_resources() {
+  local RUN_TAG="${GITHUB_RUN_ID:-$$}"
+  NET_NAME="claude-internal-$RUN_TAG"
+  PROXY_NAME="egress-proxy-$RUN_TAG"
+  SANDBOX_NAME="claude-review-$RUN_TAG"
+
+  mkdir -p claude-output
+  # Pre-create both files before anything below can fail and exit early under `set -e`, so Upload/Post always find real (if empty) files instead of none at all.
+  touch claude-output/claude-output.json claude-output/claude-debug.log
+}
+
+# The sandbox/proxy are sibling containers on the HOST daemon, not child processes of this job, so cancelling the job doesn't stop them by itself - clean up on any exit path, signalled or not.
+cleanup_sandbox() {
+  docker rm -f "$PROXY_NAME" "$SANDBOX_NAME" > /dev/null 2>&1 || true
+  docker network rm "$NET_NAME" > /dev/null 2>&1 || true
+}
+
+# Resolves the host path backing $PWD via self-inspect (docker run -v resolves on the HOST under DooD); sets HOST_OUTPUT_DIR empty if unresolved, so callers fall back to docker cp.
+resolve_host_output_dir() {
+  HOST_OUTPUT_DIR=""
+  # Self-inspect by container ID, not hostname: this runner sets a custom --hostname unrelated to the container's real ID, so `docker inspect "$(hostname)"` never matched - the cgroup path always encodes the real ID regardless of hostname.
+  local SELF_ID
+  SELF_ID=$(grep -oE '[0-9a-f]{64}' /proc/self/cgroup 2>/dev/null | head -1 || true)
+  [ -n "$SELF_ID" ] || SELF_ID="$(hostname)"
+  # `?` on `.[]`/`.Destination` skips anything non-iterable/non-object instead of erroring, so an unexpected `.Mounts` shape just yields no match.
+  local HOST_PWD
+  HOST_PWD=$(docker inspect "$SELF_ID" --format '{{json .Mounts}}' 2>/dev/null | jq -er --arg pwd "$PWD" '
+    [.[]? | select(.Destination? as $d | $pwd == $d or ($pwd | startswith($d + "/")))]
+    | sort_by(-(.Destination | length)) | .[0]
+    | if . then .Source + ($pwd | ltrimstr(.Destination)) else empty end
+  ' 2>/dev/null || true)
+  if [ -n "$HOST_PWD" ]; then
+    HOST_OUTPUT_DIR="$HOST_PWD/claude-output"
+  else
+    echo "::warning::Could not resolve the host path backing $PWD via docker inspect - using docker cp instead of a bind mount for /output"
+  fi
+}
+
+# Builds the isolated network + egress-restricted proxy + claude container, copies repo/review in, installs the CLI, hands it to the unprivileged "node" user. Expects NET_NAME/PROXY_NAME/SANDBOX_NAME/HOST_OUTPUT_DIR already set.
+setup_sandbox() {
+  docker network create --internal "$NET_NAME" > /dev/null
+  mkdir -p /tmp/squid
+  cat > /tmp/squid/squid.conf << 'EOF'
+http_port 3128
+acl allowed_dst dstdomain .npmjs.org api.anthropic.com
+http_access allow allowed_dst
+http_access deny all
+EOF
+  docker create --name "$PROXY_NAME" --network "$NET_NAME" ubuntu/squid:latest > /dev/null
+  # `docker cp` streams content over the API, so it works under DooD regardless of whose filesystem the source is on, unlike `-v`.
+  docker cp /tmp/squid/squid.conf "$PROXY_NAME":/etc/squid/squid.conf
+  docker start "$PROXY_NAME" > /dev/null
+  docker network connect bridge "$PROXY_NAME"
+  # Wait for squid to actually accept connections rather than guessing at a fixed sleep: the npm
+  # install below is the first thing through the proxy and fails outright if it is not listening.
+  # The probe needs bash for /dev/tcp - the image's `sh` is dash, which has no such thing - so
+  # confirm bash exists first and fall back to the old fixed wait instead of burning the timeout.
+  local WAITED=0
+  if docker exec "$PROXY_NAME" bash -c 'true' 2>/dev/null; then
+    until docker exec "$PROXY_NAME" bash -c 'exec 3<>/dev/tcp/127.0.0.1/3128' 2>/dev/null; do
+      WAITED=$((WAITED + 1))
+      if [ "$WAITED" -ge 30 ]; then
+        echo "::warning::Egress proxy still not listening on :3128 after ${WAITED}s - continuing anyway"
+        break
+      fi
+      sleep 1
+    done
+    [ "$WAITED" -lt 30 ] && echo "Egress proxy ready after ${WAITED}s"
+  else
+    echo "::warning::No bash in the proxy image to probe :3128 with - falling back to a fixed wait"
+    sleep 2
+  fi
+
+  # /output is the ONLY bind mount into the sandbox (when HOST_OUTPUT_DIR resolved) - a dedicated empty dir, not the job's real workspace; falls back to no mount (docker cp afterward) otherwise.
+  local OUTPUT_MOUNT_ARGS=()
+  [ -n "$HOST_OUTPUT_DIR" ] && OUTPUT_MOUNT_ARGS=(-v "$HOST_OUTPUT_DIR:/output")
+  # Hardening. A review is untrusted-input processing by definition, so drop the default
+  # capability set and keep only what setup below actually needs: CHOWN/FOWNER/DAC_OVERRIDE for
+  # the `chown -R node:node` and npm's file-mode work as root. That still removes NET_RAW,
+  # MKNOD, SYS_CHROOT, KILL and friends. --pids-limit bounds a runaway (or deliberately
+  # fork-bombing) session to this container instead of the shared runner host.
+  # --memory is deliberately opt-in via $SANDBOX_MEMORY: an OOM kill has already been seen here
+  # live, so imposing a ceiling by default would make it more frequent, not less.
+  local HARDENING_ARGS=(
+    --cap-drop=ALL
+    --cap-add=CHOWN --cap-add=FOWNER --cap-add=DAC_OVERRIDE
+    --security-opt=no-new-privileges
+    --pids-limit="${SANDBOX_PIDS_LIMIT:-1024}"
+  )
+  [ -n "${SANDBOX_MEMORY:-}" ] && HARDENING_ARGS+=(--memory="$SANDBOX_MEMORY")
+
+  docker run -d --name "$SANDBOX_NAME" --network "$NET_NAME" \
+    "${OUTPUT_MOUNT_ARGS[@]}" \
+    "${HARDENING_ARGS[@]}" \
+    -e ANTHROPIC_API_KEY \
+    -e CLAUDE_CODE_VERSION \
+    -e CLAUDE_MODEL \
+    -e CLAUDE_EFFORT \
+    -e CLAUDE_MAX_BUDGET_USD \
+    -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    -e "HTTP_PROXY=http://$PROXY_NAME:3128" \
+    -e "HTTPS_PROXY=http://$PROXY_NAME:3128" \
+    -e "http_proxy=http://$PROXY_NAME:3128" \
+    -e "https_proxy=http://$PROXY_NAME:3128" \
+    -e NO_PROXY=localhost,127.0.0.1 \
+    -w /workspace \
+    node:24 sleep infinity > /dev/null
+
+  docker exec "$SANDBOX_NAME" mkdir -p /workspace /output
+  docker cp repo/. "$SANDBOX_NAME":/workspace/
+  # REVIEW.md does `Read ../review/UNCOVERED-REVIEW.md` relative to /workspace, so review/ has to be copied in too, as a sibling, or that Read fails.
+  docker cp review/. "$SANDBOX_NAME":/review/
+  echo "Files inside container: $(docker exec "$SANDBOX_NAME" sh -c 'find /workspace -type f | wc -l')"
+
+  docker exec "$SANDBOX_NAME" npm install -g --no-fund --no-audit --no-update-notifier --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
+  docker exec "$SANDBOX_NAME" sh -c 'echo "Running review with model: $CLAUDE_MODEL, effort: $CLAUDE_EFFORT (claude-code $(claude --version || echo unknown))"'
+  # --dangerously-skip-permissions refuses to run as root, and docker cp leaves files root-owned - hand them to the built-in unprivileged "node" user.
+  docker exec "$SANDBOX_NAME" chown -R node:node /workspace /output
+  # Pre-accept the trust dialog for /workspace as the node user - otherwise the CLI ignores the reviewed repo's own .claude/settings.json permissions.allow/additionalDirectories entries and warns about it (moot for permissions.allow under --dangerously-skip-permissions, but additionalDirectories genuinely affects file-tool scope).
+  echo '{"projects":{"/workspace":{"hasTrustDialogAccepted":true}}}' > /tmp/claude-trust.json
+  docker cp /tmp/claude-trust.json "$SANDBOX_NAME":/home/node/.claude.json
+  docker exec "$SANDBOX_NAME" chown node:node /home/node/.claude.json
+}
+
+# Runs claude -p unprivileged, pulls /output out (docker cp fallback if not bind-mounted), validates the result; returns non-zero (after an ::error::) on failure.
+run_claude_review() {
+  local rc=0
+  # Single attempt: --max-budget-usd bounds cost, REVIEW_CLI_TIMEOUT below bounds wall-clock, and
+  # --debug-file is uploaded by the next step for post-mortem.
+  # --disallowedTools Task: full access is a sandbox-safety call, not a cost one - a spawned subagent
+  # starts with a fresh context instead of reusing the cheap cached one, and this trades money for wall-clock
+  # (confirmed live: a 2-level-deep subagent fork drove one review's cost to $4.70 vs. the usual $0.15-0.30).
+  docker exec --user node -w /workspace -e REVIEW_CLI_TIMEOUT "$SANDBOX_NAME" bash -c '
+    set -euo pipefail
+    # timeout inside the container, mirroring triage-run.sh: without it a hung session sits
+    # there until the job timeout kills the whole runner, and that kill takes the step log and
+    # every later step with it - including the notify step, so the failure is never reported.
+    # An exit 124 is a clean step failure that the reporting and notify steps still get to see.
+    # Forces the final answer to validate against review-schema.json - the CLI re-prompts the model
+    # on a mismatch instead of silently accepting whatever text it stopped on (confirmed live: a
+    # session that ended right after a Skill call left .result holding that skills raw output, no
+    # JSON at all - common.py extract-json caught it, but only after the fact, with no chance to self-correct).
+    timeout "${REVIEW_CLI_TIMEOUT:-900}" \
+    claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
+      --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions --permission-prompts none \
+      --disallowedTools "Task" \
+      --json-schema "$(cat /review/review-schema.json)" \
+      < claude-prompt.txt > /output/claude-output.json
+  ' &
+  local REVIEW_PID=$!
+  # Backgrounded + waited-on, not a blocking foreground call: POSIX defers a shell's own trap
+  # delivery until the current foreground command exits, so a plain `docker exec` here would sit
+  # through a job cancellation for as long as claude keeps running inside the container (confirmed
+  # live: a cancelled run's "Run review" step kept going for 5-8 more minutes). `wait` returns as
+  # soon as a trapped signal arrives instead, so this can react by stopping the container directly.
+  trap 'docker stop -t 5 "$SANDBOX_NAME" > /dev/null 2>&1 || true' TERM INT
+  wait "$REVIEW_PID" || rc=$?
+  if [ "${rc:-0}" -eq 124 ]; then
+    echo "::error::Review hit the ${REVIEW_CLI_TIMEOUT:-900}s CLI timeout - raise REVIEW_CLI_TIMEOUT or lower the effort"
+  fi
+  trap - TERM INT
+  # If /output was bind-mounted from $HOST_OUTPUT_DIR, both sides already see the same files - no docker cp needed.
+  if [ -z "$HOST_OUTPUT_DIR" ]; then
+    docker cp "$SANDBOX_NAME":/output/claude-output.json ./claude-output/claude-output.json 2>/dev/null || true
+    docker cp "$SANDBOX_NAME":/output/claude-debug.log ./claude-output/claude-debug.log 2>/dev/null || true
+  fi
+  [ -s claude-output/claude-output.json ] || echo '{}' > claude-output/claude-output.json
+
+  if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' claude-output/claude-output.json > /dev/null 2>&1; then
+    local subtype oom
+    subtype=$(jq -r '.subtype // "unknown"' claude-output/claude-output.json 2>/dev/null || echo "unparsable")
+    # rc 137 = SIGKILL (128+9) - the OOM killer, or (before per-run names) another job's cleanup; the sandbox is still alive here (cleanup_sandbox runs on the caller's EXIT trap, after this returns).
+    oom=$(docker inspect "$SANDBOX_NAME" --format '{{.State.OOMKilled}}' 2>/dev/null || echo "unknown")
+    echo "::error::Review failed (exit $rc, subtype: $subtype, OOMKilled: $oom)"
+    echo "Result excerpt: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | head -c 300 || true)"
+    return 1
+  fi
+}
+
+# Extracts+validates the model's fenced JSON into claude-structured.json (best-effort - post_review_and_set_status has its own fallback) and echoes a one-line summary.
+summarize_claude_review() {
+  jq -r '.result' claude-output/claude-output.json | python3 .gitea/scripts/common.py extract-json > claude-structured.json || {
+    echo "::warning::Could not extract a valid review JSON from the model's response — posting fallback"
+    echo "Result tail: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | tail -c 500 || true)"
+  }
+  local STATS FINDINGS COST USAGE
+  STATS=$(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' claude-output/claude-output.json)
+  FINDINGS=$([ -s claude-structured.json ] && jq '.findings | length' claude-structured.json 2>/dev/null || echo '?')
+  COST=$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' claude-output/claude-output.json)
+  USAGE=$(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' claude-output/claude-output.json 2>/dev/null || echo "n/a")
+  echo "Review OK: $STATS, $FINDINGS findings, \$$COST ($USAGE)"
+}
+
+
+# =====================================================================
+# Entry points
+# =====================================================================
+
+# The "Non-ASCII comment check" step: passes or fails a commit status of its own and keeps one
+# comment up to date, independently of the review itself.
+check_english_comments() {
+  local NON_ASCII_COMMENT_ID count
+  NON_ASCII_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Non-ASCII-Check -->"))] | last | .id // empty')
+  if python3 .gitea/scripts/review-tools.py check-english repo/pr.diff > /tmp/english-check.md; then
+    echo "Non-ASCII check passed"
+    [ -n "$NON_ASCII_COMMENT_ID" ] && gitea_api_json "$ORG_NAME/$REPO_NAME/issues/comments/$NON_ASCII_COMMENT_ID" -X DELETE > /dev/null || true
+    set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "success" "Ok" "Non-ASCII Check"
+  else
+    count=$(grep -c '^- \[' /tmp/english-check.md 2>/dev/null || true)
+    echo "Non-ASCII check failed: $count violation(s)"
+    upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/english-check.md "$NON_ASCII_COMMENT_ID" "" "<!-- Non-ASCII-Check -->"
+    set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "failure" "Failed: $count violation(s)" "Non-ASCII Check"
+  fi
+}
+
+# The whole "Run review" step body after the API key is masked.
+review_sandbox_step() {
+  # post_review_and_set_status reads this to put the review duration in the commit
+  # status description; without it every status silently rendered "Approved" with no
+  # timing at all (the write was lost when the sandbox was wired in).
+  date +%s > review-start.txt
+
+  # DooD: claude CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY and egress restricted to npm + Anthropic via a Squid proxy - that containment is what lets --allowedTools be dropped entirely below (full tool access).
+  name_sandbox_resources
+  trap cleanup_sandbox EXIT INT TERM
+  cleanup_sandbox
+
+  resolve_host_output_dir
+  setup_sandbox
+  run_claude_review
+  summarize_claude_review
+}
+
+review_main() {
+  case "${1:-}" in
+    prepare)        prepare_review_context ;;
+    english-check)  check_english_comments ;;
+    sandbox)        review_sandbox_step ;;
+    post)           post_review_and_set_status ;;
+    *)
+      echo "usage: review-run.sh {prepare|english-check|sandbox|post}" >&2
+      return 2
+      ;;
+  esac
+}
+
+# Sourcing only defines the functions; running the file dispatches.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  review_main "$@"
+fi

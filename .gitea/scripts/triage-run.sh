@@ -1,14 +1,30 @@
 #!/usr/bin/env bash
-# Sourced helper library for bugzilla-triage.yml. Two entry points:
-#   prepare_triage_context  - fetch the bug, run the guards, pick and clone repositories, render the prompt
-#   report_triage_result    - render the result into the job log and step summary
+# Everything the bugzilla-triage.yml workflow runs on the runner, one subcommand per step:
+#
+#   triage-run.sh prepare   fetch the bug, run the guards, choose and clone repositories, render the prompt
+#   triage-run.sh sandbox   run the analysis in the isolated container and, when it is confident, the fix session
+#   triage-run.sh open-pr   validate the fix patch and open a draft pull request (the only step that can push)
+#   triage-run.sh report    render the result into the job log and step summary
+#   triage-run.sh publish   post the result to Bugzilla
+#
+# Run as `bash .gitea/scripts/triage-run.sh <subcommand>`. It can also be sourced to reach the functions
+# below directly, which is how the local tests drive them.
+#
+# The sections are kept in the order the steps run: prepare/report, sandbox, fix.
+
+set -euo pipefail
+
+# ============================================================================
+# Prepare, report and publish
+# ============================================================================
+# Prepare and report: fetch the bug, run the guards, pick and clone repositories, render the prompt
+# (prepare_triage_context), then render the result into the job log and step summary
+# (report_triage_result) and post it to Bugzilla (publish_triage_comment).
 #
 # Expects from the job env: BUG_ID, BUGZILLA_HOST, BUGZILLA_API_KEY, GITEA_HOST, GITEA_TOKEN,
 # ANTHROPIC_API_KEY (for the repository-selection call). Optional: TRIAGE_ORG (default ONLYOFFICE),
 # TRIAGE_ALLOWED_PRODUCTS (default empty - product-repos.json is what admits a product),
-# SELECT_MAX_REPOS (see select-repos.py).
-
-set -euo pipefail
+# SELECT_MAX_REPOS (see triage-tools.py select-repos).
 
 TRIAGE_ORG="${TRIAGE_ORG:-ONLYOFFICE}"
 # Empty by default: product-repos.json is what admits a product. This is only for products
@@ -17,7 +33,7 @@ TRIAGE_ALLOWED_PRODUCTS="${TRIAGE_ALLOWED_PRODUCTS:-}"
 
 # Caps by characters, not bytes: bash's own ${var:0:n} slices bytes under a non-UTF-8 locale, which
 # both halves the cap and can sever a codepoint mid-sequence on this org's routinely-Cyrillic bug
-# text. Kept identical to review-steps.sh's helper of the same name.
+# text. Kept identical to review-run.sh's helper of the same name.
 _trim_chars() {
   python3 -c 'import sys
 limit = int(sys.argv[1])
@@ -144,14 +160,14 @@ _fetch_bug_metadata() {
   echo "  $BUG_SUMMARY"
 }
 
-# Renders the <bug> data block (bugzilla-api.py does its own sanitizing and mojibake repair).
+# Renders the <bug> data block (common.py bugzilla-context does its own sanitizing and mojibake repair).
 _render_bug_context() {
-  python3 .gitea/scripts/bugzilla-api.py "$BUG_ID" > bug-context.txt || true
-  # bugzilla-api.py never exits non-zero: a failed fetch still prints a "data not retrieved" stub
+  python3 .gitea/scripts/common.py bugzilla-context "$BUG_ID" > bug-context.txt || true
+  # common.py bugzilla-context never exits non-zero: a failed fetch still prints a "data not retrieved" stub
   # and returns 0, and that stub is non-empty, so testing the exit status (or just -s) would feed
   # an empty bug report into a full-budget analysis. The rendered Summary line is the real signal.
   if ! grep -q '^- Summary: .' bug-context.txt; then
-    echo "::warning::bugzilla-api.py returned no usable bug data - falling back to the metadata already fetched"
+    echo "::warning::common.py bugzilla-context returned no usable bug data - falling back to the metadata already fetched"
     printf '<bug id="%s">\n- URL: %s\n- Summary: %s\n- Product / Component / Version: %s / %s / %s\n</bug>\n' \
       "$BUG_ID" "$BUG_URL" "$BUG_SUMMARY" "$PRODUCT" "$COMPONENT" "$BUG_VERSION" > bug-context.txt
   fi
@@ -178,7 +194,7 @@ _fetch_similar_bugs() {
   LIST=$(_bugzilla_get "bug" '--data-urlencode' "product=$PRODUCT" '--data-urlencode' "component=$COMPONENT" '--data-urlencode' "include_fields=id,summary,status,resolution" '--data-urlencode' "limit=${TRIAGE_SIMILAR_LIMIT:-40}" '--data-urlencode' "order=bug_id DESC") || return 0
   # The bug being triaged is in its own component listing; dropping it here keeps the model from
   # solemnly reporting that the bug resembles itself. Angle brackets are escaped for the same
-  # reason bugzilla-api.py escapes them: these summaries are text a reporter wrote, they go into a
+  # reason common.py bugzilla-context escapes them: these summaries are text a reporter wrote, they go into a
   # data-only <related_bugs> block, and one containing that closing tag would walk straight out of
   # it.
   jq -r --arg self "$BUG_ID" '.bugs // [] | map(select((.id | tostring) != $self))
@@ -223,7 +239,7 @@ _list_candidate_repos() {
     [ "$COUNT" = "0" ] && break
     # "name<TAB>language": this Gitea has descriptions on 2 of ~200 repositories, so the primary
     # language is the only extra signal available to the selection call. Only the name is ever
-    # used as a clone target (select-repos.py takes field one).
+    # used as a clone target (triage-tools.py select-repos takes field one).
     jq -r '.[] | select(.archived == false) | [.name, (.language // "")] | @tsv' <<< "$BATCH" | tr -d '\r' >> repos-available.txt
     # Kept separately, not discarded: _enrich_candidates unions the routing map back in, and
     # without this an entry that was archived after somebody described it would quietly become
@@ -374,7 +390,7 @@ _clone_repo() {
   echo "  cloned $REPO ($ACTUAL_BRANCH)"
 }
 
-# Model-driven selection (see select-repos.py) followed by the clones; at least one repo must land.
+# Model-driven selection (see triage-tools.py select-repos) followed by the clones; at least one repo must land.
 # A product listed in the routing map skips the model call and uses the listed repositories instead.
 _select_and_clone_repos() {
   mkdir -p repos
@@ -425,7 +441,7 @@ _select_and_clone_repos() {
       echo "::error::the repositories - but the $TRIAGE_ORG listing could not be read, so there is nothing to choose from"
       return 1
     fi
-    SELECTED=$(python3 .gitea/scripts/select-repos.py \
+    SELECTED=$(python3 .gitea/scripts/triage-tools.py select-repos \
       --repos-file repos-available.txt --bug-file bug-context.txt --product "$PRODUCT") || {
       echo "::error::Repository selection failed for bug $BUG_ID"
       return 1
@@ -449,11 +465,11 @@ _select_and_clone_repos() {
 # Clones the repositories the already-cloned code declares (vendored tarballs, submodule targets).
 # This is the deterministic half of repository discovery: the selection call reliably finds the
 # product's own repositories but not the libraries it pulls in, and those are named outright in
-# package.json / .gitmodules - see expand-repos.py for the measured case (Bug 83616).
+# package.json / .gitmodules - see triage-tools.py expand-repos for the measured case (Bug 83616).
 _expand_and_clone_declared_repos() {
   local EXTRA
   sed 's/@[^@]*$//' repos-cloned.txt > repos-cloned-names.txt
-  EXTRA=$(python3 .gitea/scripts/expand-repos.py \
+  EXTRA=$(python3 .gitea/scripts/triage-tools.py expand-repos \
     --repos-dir repos --repos-file repos-available.txt \
     --exclude-file repos-cloned-names.txt --max "${TRIAGE_MAX_EXTRA_REPOS:-3}") || {
     echo "::warning::Dependency expansion failed - continuing with the selected repositories only"
@@ -579,15 +595,15 @@ prepare_triage_context() {
   _render_bug_context
   _fetch_similar_bugs
   # Screenshots the reporter attached. 18 of the first 28 bugs had attachments, and a screenshot
-  # is regularly the only place the symptom is actually visible - see fetch-attachments.py.
+  # is regularly the only place the symptom is actually visible - see triage-tools.py fetch-attachments.
   rm -rf attachments; : > attachments.txt
-  python3 .gitea/scripts/fetch-attachments.py --bug-id "$BUG_ID" --out-dir attachments > attachments.txt || true
+  python3 .gitea/scripts/triage-tools.py fetch-attachments --bug-id "$BUG_ID" --out-dir attachments > attachments.txt || true
   # Unpacks any zip/tar among them in place, on this runner and before the sandbox exists - see
-  # expand-attachments.py for why that order matters. Extracted paths are appended to the same
+  # triage-tools.py expand-attachments for why that order matters. Extracted paths are appended to the same
   # manifest the model sees, right after the archive that produced them.
-  ATTACHMENTS_EXTRACTED=$(python3 .gitea/scripts/expand-attachments.py attachments 2>attachments-expand.log || true)
+  ATTACHMENTS_EXTRACTED=$(python3 .gitea/scripts/triage-tools.py expand-attachments attachments 2>attachments-expand.log || true)
   # Tolerated, not required: a listed product already knows its repositories, and the listing only
-  # validates their spelling and feeds expand-repos.py. It is mandatory solely for model selection,
+  # validates their spelling and feeds triage-tools.py expand-repos. It is mandatory solely for model selection,
   # which _select_and_clone_repos checks for itself. Seen live: PAT_GITEA_TOKEN can clone but may
   # lack read:organization, and that must not stop a bug whose repositories are already known.
   : > repos-available.txt
@@ -722,7 +738,7 @@ report_triage_result() {
   if [ -s repos-cloned.txt ]; then
     ARGS+=(--repos-file repos-cloned.txt)
   fi
-  # Same shape as gitea-api.sh's _run_url. Gives the reader the artifacts and the debug log behind
+  # Same shape as review-run.sh's _run_url. Gives the reader the artifacts and the debug log behind
   # this message, which is the only way to tell a thin analysis from a broken run.
   if [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITEA_HOST:-}" ]; then
     ARGS+=(--run-url "https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID")
@@ -741,7 +757,7 @@ report_triage_result() {
 
   # Who last changed the exact line each location points at, plus the host and org the renderer
   # needs to build links. Extra API calls, no model spend, silent per location when it cannot be
-  # established - see line-history.py for why the line and not the file.
+  # established - see triage-tools.py line-origin for why the line and not the file.
   #
   # Guarded as a whole, and not merely per command: under set -euo pipefail a jq or awk reading a
   # file that is not there fails the assignment and takes the whole function with it - and the
@@ -762,7 +778,7 @@ report_triage_result() {
       fi
       if [ -n "$LOC_REPO" ] && [ -n "$LOC_PATH" ] && [ -n "$LOC_REF" ] && [[ "$LOC_LINE" =~ ^[0-9]+$ ]]; then
         local FOUND
-        FOUND=$(python3 .gitea/scripts/line-history.py --repo "$LOC_REPO" --ref "$LOC_REF" \
+        FOUND=$(python3 .gitea/scripts/triage-tools.py line-origin --repo "$LOC_REPO" --ref "$LOC_REF" \
           --path "$LOC_PATH" --line "$LOC_LINE" 2>/dev/null || true)
         [ -n "$FOUND" ] && printf '%s\t%s\n' "$LOC_INDEX" "$FOUND" >> line-history.txt
       fi
@@ -798,7 +814,7 @@ report_triage_result() {
     ARGS+=(--pr-url "$(cat fix-pr-url.txt)")
   fi
 
-  python3 .gitea/scripts/render-triage.py "${ARGS[@]}" --output triage-message.txt > /dev/null
+  python3 .gitea/scripts/triage-tools.py render "${ARGS[@]}" --output triage-message.txt > /dev/null
 
   echo "--- triage message ---"
   cat triage-message.txt
@@ -820,3 +836,630 @@ report_triage_result() {
       echo '```text'; cat triage-message.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
   fi
 }
+
+# ============================================================================
+# Isolated-container sandbox
+# ============================================================================
+# Isolated-container sandbox helpers for bugzilla-triage.yml's "Run triage" step; expects
+# ANTHROPIC_API_KEY/CLAUDE_MODEL/CLAUDE_CODE_VERSION/CLAUDE_EFFORT/CLAUDE_MAX_BUDGET_USD from the job env.
+# Optional tuning: SANDBOX_PIDS_LIMIT (default 1024), SANDBOX_MEMORY (unset = no ceiling).
+#
+# Deliberately a sibling of review-run.sh rather than a shared refactor of it: that file is the
+# battle-tested path for every repo's PR review, and the differences here are structural (several
+# repositories side by side under /workspace instead of one, its own prompt/schema paths), not
+# parameters. Fixes that apply to both - the DooD host-path resolution, the backgrounded exec so
+# traps fire, the capability drop - are worth porting by hand in both directions.
+
+# Names this run's resources (per-run, never fixed: a fixed name lets one run's cleanup kill another's live sandbox) and pre-creates claude-output/.
+name_triage_resources() {
+  local RUN_TAG="${GITHUB_RUN_ID:-$$}"
+  NET_NAME="triage-internal-$RUN_TAG"
+  PROXY_NAME="triage-proxy-$RUN_TAG"
+  SANDBOX_NAME="claude-triage-$RUN_TAG"
+
+  mkdir -p claude-output
+  # Pre-create both before anything below can fail under `set -e`, so the upload/report steps always find real (if empty) files.
+  touch claude-output/claude-output.json claude-output/claude-debug.log
+}
+
+# Sandbox and proxy are siblings on the HOST daemon, not children of this job, so a cancelled job does not stop them - clean up on every exit path.
+cleanup_triage_sandbox() {
+  docker rm -f "$PROXY_NAME" "$SANDBOX_NAME" > /dev/null 2>&1 || true
+  docker network rm "$NET_NAME" > /dev/null 2>&1 || true
+}
+
+# Resolves the host path backing $PWD (docker -v resolves on the HOST under DooD); empty HOST_OUTPUT_DIR means callers fall back to docker cp.
+resolve_triage_output_dir() {
+  HOST_OUTPUT_DIR=""
+  # By container ID from cgroup, not hostname: this runner sets a custom --hostname unrelated to the real container ID.
+  local SELF_ID
+  SELF_ID=$(grep -oE '[0-9a-f]{64}' /proc/self/cgroup 2>/dev/null | head -1 || true)
+  [ -n "$SELF_ID" ] || SELF_ID="$(hostname)"
+  local HOST_PWD
+  HOST_PWD=$(docker inspect "$SELF_ID" --format '{{json .Mounts}}' 2>/dev/null | jq -er --arg pwd "$PWD" '
+    [.[]? | select(.Destination? as $d | $pwd == $d or ($pwd | startswith($d + "/")))]
+    | sort_by(-(.Destination | length)) | .[0]
+    | if . then .Source + ($pwd | ltrimstr(.Destination)) else empty end
+  ' 2>/dev/null || true)
+  if [ -n "$HOST_PWD" ]; then
+    HOST_OUTPUT_DIR="$HOST_PWD/claude-output"
+  else
+    echo "::warning::Could not resolve the host path backing $PWD via docker inspect - using docker cp instead of a bind mount for /output"
+  fi
+}
+
+# Builds the isolated network + egress-restricted proxy + sandbox, copies the cloned repos and triage/ in, installs the CLI.
+# Expects NET_NAME/PROXY_NAME/SANDBOX_NAME/HOST_OUTPUT_DIR set, repos under ./repos/<name>, and claude-prompt.txt in $PWD.
+setup_triage_sandbox() {
+  docker network create --internal "$NET_NAME" > /dev/null
+  mkdir -p /tmp/squid-triage
+  cat > /tmp/squid-triage/squid.conf << 'EOF'
+http_port 3128
+acl allowed_dst dstdomain .npmjs.org api.anthropic.com
+http_access allow allowed_dst
+http_access deny all
+EOF
+  docker create --name "$PROXY_NAME" --network "$NET_NAME" ubuntu/squid:latest > /dev/null
+  # docker cp streams over the API, so it works under DooD regardless of whose filesystem the source is on, unlike -v.
+  docker cp /tmp/squid-triage/squid.conf "$PROXY_NAME":/etc/squid/squid.conf
+  docker start "$PROXY_NAME" > /dev/null
+  docker network connect bridge "$PROXY_NAME"
+  # Wait for squid to actually accept connections: the npm install below is the first thing through
+  # the proxy and fails outright if it is not listening. /dev/tcp needs bash - the image's sh is dash.
+  local WAITED=0
+  if docker exec "$PROXY_NAME" bash -c 'true' 2>/dev/null; then
+    until docker exec "$PROXY_NAME" bash -c 'exec 3<>/dev/tcp/127.0.0.1/3128' 2>/dev/null; do
+      WAITED=$((WAITED + 1))
+      if [ "$WAITED" -ge 30 ]; then
+        echo "::warning::Egress proxy still not listening on :3128 after ${WAITED}s - continuing anyway"
+        break
+      fi
+      sleep 1
+    done
+    [ "$WAITED" -lt 30 ] && echo "Egress proxy ready after ${WAITED}s"
+  else
+    echo "::warning::No bash in the proxy image to probe :3128 with - falling back to a fixed wait"
+    sleep 2
+  fi
+
+  # /output is the ONLY bind mount (when resolved) - a dedicated empty dir, never the job's workspace.
+  local OUTPUT_MOUNT_ARGS=()
+  [ -n "$HOST_OUTPUT_DIR" ] && OUTPUT_MOUNT_ARGS=(-v "$HOST_OUTPUT_DIR:/output")
+  # Triage is untrusted-input processing by definition (the bug report is written by anyone who can
+  # file a bug), so drop the default capability set and keep only what the chown/npm work needs.
+  local HARDENING_ARGS=(
+    --cap-drop=ALL
+    --cap-add=CHOWN --cap-add=FOWNER --cap-add=DAC_OVERRIDE
+    --security-opt=no-new-privileges
+    --pids-limit="${SANDBOX_PIDS_LIMIT:-1024}"
+  )
+  [ -n "${SANDBOX_MEMORY:-}" ] && HARDENING_ARGS+=(--memory="$SANDBOX_MEMORY")
+
+  docker run -d --name "$SANDBOX_NAME" --network "$NET_NAME" \
+    "${OUTPUT_MOUNT_ARGS[@]}" \
+    "${HARDENING_ARGS[@]}" \
+    -e ANTHROPIC_API_KEY \
+    -e CLAUDE_CODE_VERSION \
+    -e CLAUDE_MODEL \
+    -e CLAUDE_EFFORT \
+    -e CLAUDE_MAX_BUDGET_USD \
+    -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    -e "HTTP_PROXY=http://$PROXY_NAME:3128" \
+    -e "HTTPS_PROXY=http://$PROXY_NAME:3128" \
+    -e "http_proxy=http://$PROXY_NAME:3128" \
+    -e "https_proxy=http://$PROXY_NAME:3128" \
+    -e NO_PROXY=localhost,127.0.0.1 \
+    -w /workspace \
+    node:24 sleep infinity > /dev/null
+
+  docker exec "$SANDBOX_NAME" mkdir -p /workspace /output
+  # Each selected repository lands as its own directory under /workspace, matching the names
+  # TRIAGE.md lists in <repositories> so the model's `repository` field is directly usable.
+  local REPO_PATH REPO_NAME
+  for REPO_PATH in repos/*; do
+    [ -d "$REPO_PATH" ] || continue
+    REPO_NAME=$(basename "$REPO_PATH")
+    docker cp "$REPO_PATH" "$SANDBOX_NAME":/workspace/
+    echo "Copied $REPO_NAME into the sandbox"
+  done
+  docker cp claude-prompt.txt "$SANDBOX_NAME":/workspace/claude-prompt.txt
+  # The sandbox cannot reach Bugzilla - egress is npm and Anthropic only - so the attachments have
+  # to arrive the same way the repositories do. Already vetted: triage-tools.py expand-attachments unpacked any
+  # zip among them on the runner, before this copy, so nothing here runs an extractor on untrusted
+  # bytes itself.
+  if [ -d attachments ] && [ -n "$(ls -A attachments 2>/dev/null)" ]; then
+    docker cp attachments "$SANDBOX_NAME":/workspace/
+    # find, not ls: an extracted archive's files sit in a subdirectory, and a top-level-only count
+    # would silently stop mentioning them the moment triage-tools.py expand-attachments had anything to unpack.
+    echo "Copied $(find attachments -type f | wc -l | tr -d ' ') attachment file(s) into the sandbox"
+  fi
+  # TRIAGE.md references /triage/triage-schema.json, and run_claude_triage reads the schema from there.
+  docker cp triage/. "$SANDBOX_NAME":/triage/
+  echo "Files inside container: $(docker exec "$SANDBOX_NAME" sh -c 'find /workspace -type f | wc -l')"
+
+  docker exec "$SANDBOX_NAME" npm install -g --no-fund --no-audit --no-update-notifier --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION:-latest}"
+  docker exec "$SANDBOX_NAME" sh -c 'echo "Running triage with model: $CLAUDE_MODEL, effort: $CLAUDE_EFFORT (claude-code $(claude --version || echo unknown))"'
+  # --dangerously-skip-permissions refuses to run as root, and docker cp leaves files root-owned.
+  docker exec "$SANDBOX_NAME" chown -R node:node /workspace /output
+  echo '{"projects":{"/workspace":{"hasTrustDialogAccepted":true}}}' > /tmp/claude-trust-triage.json
+  docker cp /tmp/claude-trust-triage.json "$SANDBOX_NAME":/home/node/.claude.json
+  docker exec "$SANDBOX_NAME" chown node:node /home/node/.claude.json
+}
+
+# Runs claude -p unprivileged, pulls /output out, validates the envelope; returns non-zero (after an ::error::) on failure.
+run_claude_triage() {
+  local rc=0
+  # --disallowedTools Task: a spawned subagent starts with a fresh context instead of reusing the
+  # cheap cached one, which trades money for wall-clock (see review-run.sh for the measured case).
+  #
+  # timeout inside the container: without it a hung session just sits there until something outside
+  # kills the job, and that kill takes the step's whole log with it (seen live - 12 minutes of
+  # silence, then every remaining step failed in the same second, including one with if: always()).
+  # An exit 124 here is a clean failure the reporting step can still describe.
+  docker exec --user node -w /workspace -e TRIAGE_CLI_TIMEOUT "$SANDBOX_NAME" bash -c '
+    set -euo pipefail
+    timeout "${TRIAGE_CLI_TIMEOUT:-900}" \
+    claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "$CLAUDE_MAX_BUDGET_USD" \
+      --debug-file /output/claude-debug.log --output-format json --dangerously-skip-permissions --permission-prompts none \
+      --disallowedTools "Task" \
+      --json-schema "$(cat /triage/triage-schema.json)" \
+      < claude-prompt.txt > /output/claude-output.json
+  ' &
+  local TRIAGE_PID=$!
+
+  # Heartbeat into the step log while the analysis runs. The debug file lives inside the container
+  # and is only copied out at the end, so without this a run that dies mid-flight leaves nothing at
+  # all to look at - which is exactly what happened on the first long run.
+  local STARTED=$SECONDS
+  (
+    while kill -0 "$TRIAGE_PID" 2>/dev/null; do
+      sleep "${TRIAGE_HEARTBEAT_SECS:-60}"
+      kill -0 "$TRIAGE_PID" 2>/dev/null || break
+      local_tail=$(docker exec "$SANDBOX_NAME" sh -c 'tail -c 300 /output/claude-debug.log 2>/dev/null | tr "\n" " "' 2>/dev/null || true)
+      echo "  [triage +$((SECONDS - STARTED))s] still running${local_tail:+ | ...${local_tail: -160}}"
+    done
+  ) &
+  local HEARTBEAT_PID=$!
+  # Backgrounded + waited on, not foreground: POSIX defers trap delivery until the current
+  # foreground command exits, so a cancelled job would otherwise keep the container running.
+  trap 'docker stop -t 5 "$SANDBOX_NAME" > /dev/null 2>&1 || true' TERM INT
+  wait "$TRIAGE_PID" || rc=$?
+  trap - TERM INT
+  kill "$HEARTBEAT_PID" 2>/dev/null || true
+  wait "$HEARTBEAT_PID" 2>/dev/null || true
+  echo "  [triage] finished after $((SECONDS - STARTED))s (exit $rc)"
+  # Pull the debug log out before anything else can fail: on a bad run it is the only evidence.
+  docker cp "$SANDBOX_NAME":/output/claude-debug.log ./claude-output/claude-debug.log 2>/dev/null || true
+  if [ "$rc" -eq 124 ]; then
+    echo "::error::Triage hit the ${TRIAGE_CLI_TIMEOUT:-900}s CLI timeout - raise TRIAGE_CLI_TIMEOUT or lower the effort"
+    echo "Debug tail: $(tail -c 400 claude-output/claude-debug.log 2>/dev/null | tr '\n' ' ' || true)"
+  fi
+  if [ -z "$HOST_OUTPUT_DIR" ]; then
+    docker cp "$SANDBOX_NAME":/output/claude-output.json ./claude-output/claude-output.json 2>/dev/null || true
+    docker cp "$SANDBOX_NAME":/output/claude-debug.log ./claude-output/claude-debug.log 2>/dev/null || true
+  fi
+  [ -s claude-output/claude-output.json ] || echo '{}' > claude-output/claude-output.json
+
+  if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' claude-output/claude-output.json > /dev/null 2>&1; then
+    local subtype oom
+    subtype=$(jq -r '.subtype // "unknown"' claude-output/claude-output.json 2>/dev/null || echo "unparsable")
+    oom=$(docker inspect "$SANDBOX_NAME" --format '{{.State.OOMKilled}}' 2>/dev/null || echo "unknown")
+    echo "::error::Triage failed (exit $rc, subtype: $subtype, OOMKilled: $oom)"
+    echo "Result excerpt: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | head -c 300 || true)"
+    return 1
+  fi
+}
+
+# Extracts+validates the model's JSON into claude-structured.json (best-effort - the report step has a fallback) and echoes one summary line.
+summarize_claude_triage() {
+  jq -r '.result' claude-output/claude-output.json \
+    | EXTRACT_JSON_SCHEMA=triage/triage-schema.json python3 .gitea/scripts/common.py extract-json > claude-structured.json || {
+    echo "::warning::Could not extract a valid triage JSON from the model's response - reporting fallback"
+    echo "Result tail: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | tail -c 500 || true)"
+  }
+  local STATS LOCATIONS CONFIDENCE COST USAGE
+  STATS=$(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' claude-output/claude-output.json)
+  LOCATIONS=$([ -s claude-structured.json ] && jq '.locations | length' claude-structured.json 2>/dev/null || echo '?')
+  CONFIDENCE=$([ -s claude-structured.json ] && jq -r '.summary.confidence // "?"' claude-structured.json 2>/dev/null || echo '?')
+  COST=$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' claude-output/claude-output.json)
+  USAGE=$(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' claude-output/claude-output.json 2>/dev/null || echo "n/a")
+  echo "Triage OK: $STATS, $LOCATIONS location(s), confidence $CONFIDENCE, \$$COST ($USAGE)"
+}
+
+# Runs the fix session in the sandbox that already holds the repositories, then pulls the result out
+# as a patch. A second session rather than a continuation of the analysis: the analysis was asked to
+# change nothing and its context is full of searching, while this one is asked to change exactly the
+# thing the analysis found, starting from a clean checkout.
+#
+# Expects FIX_REPO, fix-prompt.txt and the sandbox variables (SANDBOX_NAME, HOST_OUTPUT_DIR) set.
+# Optional: FIX_MAX_BUDGET_USD (default 1), FIX_CLI_TIMEOUT (default 600).
+run_claude_fix() {
+  local rc=0 CONTAINER_REPO="/workspace/$FIX_REPO"
+
+  # Restore the untouched checkout: the analysis session had full tool access and may have left
+  # scratch files behind, and the patch must contain the fix and nothing else.
+  # Every step returns on failure: this function is called as `run_claude_fix || ...`, which turns
+  # set -e off inside it, and a paid session must never start on a half-restored checkout.
+  docker exec "$SANDBOX_NAME" rm -rf "$CONTAINER_REPO" || return 1
+  docker cp "repos/$FIX_REPO" "$SANDBOX_NAME":/workspace/ || return 1
+  docker exec "$SANDBOX_NAME" chown -R node:node "$CONTAINER_REPO" || return 1
+  # A throwaway repository with one commit: the diff against it, not a file comparison, is what
+  # leaves the sandbox. The clone had its .git removed, so there is no history to collide with.
+  docker exec --user node -w "$CONTAINER_REPO" "$SANDBOX_NAME" bash -c \
+    'git init -q && git add -A && git -c user.name=baseline -c user.email=baseline@localhost commit -q -m baseline' || return 1
+  docker cp fix-prompt.txt "$SANDBOX_NAME":/workspace/fix-prompt.txt || return 1
+  docker exec "$SANDBOX_NAME" chown node:node /workspace/fix-prompt.txt || return 1
+
+  # Same containment as the analysis session, with the timeout inside the container for the same
+  # reason: a hung session must end as a clean exit 124 the step can describe, not as a job kill
+  # that takes the step log with it.
+  docker exec --user node -w /workspace -e FIX_MAX_BUDGET_USD -e FIX_CLI_TIMEOUT "$SANDBOX_NAME" bash -c '
+    set -euo pipefail
+    timeout "${FIX_CLI_TIMEOUT:-600}" \
+    claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "${FIX_MAX_BUDGET_USD:-1}" \
+      --debug-file /output/fix-debug.log --output-format json --dangerously-skip-permissions --permission-prompts none \
+      --disallowedTools "Task" \
+      --json-schema "$(cat /triage/fix-schema.json)" \
+      < fix-prompt.txt > /output/fix-output.json
+  ' &
+  local FIX_PID=$!
+  trap 'docker stop -t 5 "$SANDBOX_NAME" > /dev/null 2>&1 || true' TERM INT
+  wait "$FIX_PID" || rc=$?
+  trap - TERM INT
+
+  docker cp "$SANDBOX_NAME":/output/fix-debug.log ./claude-output/fix-debug.log 2>/dev/null || true
+  docker cp "$SANDBOX_NAME":/output/fix-output.json ./claude-output/fix-output.json 2>/dev/null || true
+  # A session that timed out or errored leaves a half-finished edit in the tree. That edit would
+  # still be a valid-looking patch, and a plausible broken fix is the one outcome worse than none,
+  # so it is discarded unread rather than collected and hoped about.
+  if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' claude-output/fix-output.json > /dev/null 2>&1; then
+    if [ "$rc" -eq 124 ]; then
+      echo "::warning::The fix session hit the ${FIX_CLI_TIMEOUT:-600}s timeout - its edit is discarded"
+    else
+      echo "::warning::The fix session did not finish cleanly (exit $rc) - its edit is discarded"
+    fi
+    return 1
+  fi
+
+  docker exec --user node -w "$CONTAINER_REPO" "$SANDBOX_NAME" bash -c \
+    'git add -A && git diff --cached --binary --no-color HEAD > /output/fix.patch' || true
+  docker cp "$SANDBOX_NAME":/output/fix.patch ./claude-output/fix.patch 2>/dev/null || true
+
+  jq -r '.result' claude-output/fix-output.json \
+    | EXTRACT_JSON_SCHEMA=triage/fix-schema.json python3 .gitea/scripts/common.py extract-json > claude-fix-structured.json || {
+    echo "::warning::Could not extract a valid fix description from the model's response - no pull request"
+    rm -f claude-fix-structured.json
+  }
+  local STATS COST
+  STATS=$(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' claude-output/fix-output.json 2>/dev/null || echo "?")
+  COST=$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' claude-output/fix-output.json 2>/dev/null || echo "?")
+  echo "Fix session OK: $STATS, \$$COST, patch $(wc -c < claude-output/fix.patch 2>/dev/null | tr -d ' ' || echo 0) bytes"
+}
+
+# ============================================================================
+# Bug -> draft pull request
+# ============================================================================
+# Runner-side helpers for the "bug -> pull request" stage of bugzilla-triage.yml. Used by two steps:
+#   attempt_fix   (inside "Run triage", where the sandbox is still alive) - decides whether a fix is
+#                 worth attempting, and if so runs the fix session and collects its patch;
+#   open_fix_pr   (its own step, the only one holding a token that can push) - validates that patch
+#                 and turns it into a draft pull request.
+#
+# The split is the point. The model that writes the change works in the sandbox with no token, no
+# Bugzilla key and no route to Gitea; everything it produces crosses to this side as a patch, and the
+# patch is judged by triage-tools.py check-patch before anything is pushed. Nothing here trusts the sandbox.
+#
+# Expects from the job env: BUG_ID, GITEA_HOST. Optional: TRIAGE_ORG (default ONLYOFFICE),
+# TRIAGE_FIX_PR (must be "true" for anything to happen), TRIAGE_FIX_MAX_OPEN (default 5).
+
+FIX_BRANCH_PREFIX="bugfix/claude-bug-"
+
+# Sets FIX_REPO / FIX_REF and returns 0 when a fix is worth attempting; otherwise sets FIX_WHY to a
+# one-line reason and returns 1. Every condition is a reason to spend nothing: a fix session costs
+# several times an analysis, and a pull request nobody asked for costs a reviewer's attention.
+fix_eligibility() {
+  FIX_WHY=""
+  FIX_REPO=""
+  FIX_REF=""
+  if [ "${TRIAGE_FIX_PR:-false}" != "true" ]; then
+    FIX_WHY="fix_pr is off"
+    return 1
+  fi
+  if [ -s fix-disabled.txt ]; then
+    FIX_WHY="$(head -1 fix-disabled.txt)"
+    return 1
+  fi
+  if [ ! -s claude-structured.json ]; then
+    FIX_WHY="the analysis produced no structured result"
+    return 1
+  fi
+
+  local CONFIDENCE NOTE_KIND MISSING SIMILAR REPO
+  CONFIDENCE=$(jq -r '.summary.confidence // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+  NOTE_KIND=$(jq -r '.summary.note_kind // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+  MISSING=$(jq -r '.missing_repository // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+  SIMILAR=$(jq -r '(.similar_bugs // []) | length' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+  REPO=$(jq -r '(.locations // [])[0].repository // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+
+  if [ "$CONFIDENCE" != "high" ]; then
+    FIX_WHY="confidence is '${CONFIDENCE:-unstated}', not high"
+    return 1
+  fi
+  # Any note_kind at all is the analysis saying "this is not a plain defect in code I could read":
+  # the cause is elsewhere, or it may be intended, or the report is too thin.
+  if [ -n "$NOTE_KIND" ]; then
+    FIX_WHY="the analysis flagged '$NOTE_KIND'"
+    return 1
+  fi
+  if [ -n "$MISSING" ]; then
+    FIX_WHY="the analysis places the cause in code it was not given ($MISSING)"
+    return 1
+  fi
+  # Resembling an existing bug is the analysis saying somebody may already have dealt with this.
+  if [ "${SIMILAR:-0}" != "0" ]; then
+    FIX_WHY="the analysis found a resembling bug"
+    return 1
+  fi
+  if [ -z "$REPO" ]; then
+    FIX_WHY="the analysis named no repository"
+    return 1
+  fi
+
+  # Only an open bug: a fix proposed for one already resolved is noise on a closed thread.
+  local STATUS_WORD="${BUG_STATUS%%/*}"
+  case "${STATUS_WORD^^}" in
+    NEW|UNCONFIRMED|CONFIRMED|ASSIGNED|IN_PROGRESS|REOPENED) ;;
+    *)
+      FIX_WHY="the bug is ${BUG_STATUS:-of unknown status}, not open"
+      return 1
+      ;;
+  esac
+
+  # The allowlist lives in the private routing map, beside the routing itself, so widening it is one
+  # edit there and never a change to this public repository.
+  if ! jq -e --arg repo "$REPO" '(.pr_repos // []) | map(ascii_downcase) | index($repo | ascii_downcase)' \
+       product-repos.json > /dev/null 2>&1; then
+    FIX_WHY="$REPO is not on the pr_repos list"
+    return 1
+  fi
+
+  local CLONED_NAME CLONED_REF
+  CLONED_NAME=$(awk -F@ -v r="$REPO" 'tolower($1) == tolower(r) { print $1; exit }' repos-cloned.txt 2>/dev/null || true)
+  CLONED_REF=$(awk -F@ -v r="$REPO" 'tolower($1) == tolower(r) { print substr($0, index($0, "@") + 1); exit }' repos-cloned.txt 2>/dev/null || true)
+  if [ -z "$CLONED_NAME" ] || [ -z "$CLONED_REF" ] || [ "$CLONED_REF" = "unknown" ]; then
+    FIX_WHY="$REPO was not cloned on a known branch"
+    return 1
+  fi
+
+  FIX_REPO="$CLONED_NAME"
+  FIX_REF="$CLONED_REF"
+  return 0
+}
+
+# The fix prompt, rendered like the analysis one. The analysis is model output that was itself
+# shaped by the bug text, so it goes in escaped and inside a data-only block, same as everything
+# else that reaches a prompt from outside.
+render_fix_prompt() {
+  local ANALYSIS BUGZILLA_CONTEXT
+  ANALYSIS=$(jq -r '
+    "Cause (" + (.summary.confidence // "?") + " confidence): " + (.summary.probable_cause // "")
+    + "\n\nLocations, best first:\n"
+    + ((.locations // []) | map("- " + (.repository // "?") + " " + (.path // "?")
+        + (if .line then ":" + (.line | tostring) else "" end)
+        + (if .why then "  " + .why else "" end)) | join("\n"))
+    + (if .next_steps then "\n\nChecks suggested: " + .next_steps else "" end)
+    | gsub("<"; "&lt;") | gsub(">"; "&gt;")' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+  if [ -z "$ANALYSIS" ]; then
+    echo "::warning::Could not read the analysis back for the fix prompt"
+    return 1
+  fi
+  BUGZILLA_CONTEXT=$(cat bug-context.txt 2>/dev/null || true)
+  export BUG_ID BUG_URL PRODUCT COMPONENT BUGZILLA_CONTEXT ANALYSIS FIX_REPO FIX_REF
+  envsubst '$BUG_ID $BUG_URL $PRODUCT $COMPONENT $BUGZILLA_CONTEXT $ANALYSIS $FIX_REPO $FIX_REF' \
+    < triage/FIX.md > fix-prompt.txt
+  echo "Fix prompt rendered: $(wc -c < fix-prompt.txt | tr -d ' ') bytes"
+}
+
+# Never fatal: the analysis is already written, and a fix that cannot be attempted changes nothing
+# about it. Runs in the "Run triage" step, so the sandbox and its trap are still in place.
+attempt_fix() {
+  if ! fix_eligibility; then
+    echo "No fix attempted: $FIX_WHY"
+    return 0
+  fi
+  echo "Attempting a fix in $FIX_REPO @ $FIX_REF"
+  if ! render_fix_prompt; then
+    return 0
+  fi
+  printf '%s\t%s\n' "$FIX_REPO" "$FIX_REF" > fix-target.txt
+  run_claude_fix || echo "::warning::The fix attempt failed - the analysis stands on its own"
+  return 0
+}
+
+# One line per problem, appended: several stages can each have something a person should hear.
+_fix_notice() {
+  echo "$1" >> pipeline-notice.txt
+}
+
+_fix_api() {
+  local METHOD="$1" API_PATH="$2"
+  shift 2
+  curl -s --max-time 30 -X "$METHOD" -H "Authorization: token $GITEA_TOKEN" \
+    -H "Content-Type: application/json" "https://$GITEA_HOST/api/v1$API_PATH" "$@"
+}
+
+# Turns the collected patch into a draft pull request. Its own step, and the only one that holds a
+# token able to push. Every early return is a quiet one: no patch is the normal outcome.
+open_fix_pr() {
+  if [ ! -s claude-output/fix.patch ] || [ ! -s claude-fix-structured.json ] || [ ! -s fix-target.txt ]; then
+    echo "No fix patch to turn into a pull request"
+    return 0
+  fi
+  local REPO REF
+  REPO=$(cut -f1 fix-target.txt)
+  REF=$(cut -f2 fix-target.txt)
+
+  rm -rf fix-work
+  if ! git clone --depth=1 --quiet --branch "$REF" "https://$GITEA_HOST/$TRIAGE_ORG/$REPO" "fix-work/$REPO" 2>/dev/null; then
+    echo "::warning::Could not clone $REPO@$REF for the fix pull request"
+    return 0
+  fi
+
+  local CHECK_RC=0 CHECK_OUT
+  CHECK_OUT=$(python3 .gitea/scripts/triage-tools.py check-patch claude-output/fix.patch "fix-work/$REPO" 2> fix-check.err) || CHECK_RC=$?
+  if [ "$CHECK_RC" = "3" ]; then
+    echo "The fix session changed nothing - no pull request"
+    return 0
+  fi
+  if [ "$CHECK_RC" != "0" ]; then
+    echo "::warning::Fix patch not accepted: $(cat fix-check.err)"
+    _fix_notice "fix patch for $REPO not accepted - $(head -1 fix-check.err | sed 's/^refused: //')"
+    return 0
+  fi
+  echo "Fix patch accepted: $CHECK_OUT"
+
+  local BRANCH="${FIX_BRANCH_PREFIX}${BUG_ID}" BRANCH_ENC
+  BRANCH_ENC=${BRANCH//\//%2F}
+  # Only a clear 404 lets the branch be created: any other answer, including none, means the state
+  # is unknown, and pushing on an unknown state is how a second proposal for one bug appears.
+  local EXISTS
+  EXISTS=$(_fix_api GET "/repos/$TRIAGE_ORG/$REPO/branches/$BRANCH_ENC" -o /dev/null -w '%{http_code}' || true)
+  if [ "$EXISTS" = "200" ]; then
+    echo "Branch $BRANCH already exists in $REPO - not opening a second pull request"
+    return 0
+  fi
+  if [ "$EXISTS" != "404" ]; then
+    echo "::warning::Could not tell whether $BRANCH exists in $REPO (HTTP ${EXISTS:-none}) - not opening a pull request"
+    _fix_notice "no fix pull request opened for $REPO: the branch check failed (HTTP ${EXISTS:-none})"
+    return 0
+  fi
+  # A cap on open proposals per repository: if nobody is reading them, more of them is not help.
+  # Paged until an empty page, as the repository listing is: this Gitea's page sizes vary, so a short
+  # page proves nothing. An unreadable page is an unknown count, which refuses rather than passes.
+  local OPEN_COUNT=0 PAGE=1 PAGE_JSON PAGE_COUNT
+  while [ "$PAGE" -le 10 ]; do
+    PAGE_JSON=$(_fix_api GET "/repos/$TRIAGE_ORG/$REPO/pulls?state=open&limit=50&page=$PAGE" || true)
+    if ! jq -e 'type == "array"' <<< "$PAGE_JSON" > /dev/null 2>&1; then
+      echo "::warning::Could not read the open pull requests of $REPO - not opening another"
+      _fix_notice "no fix pull request opened for $REPO: its open pull requests could not be counted"
+      return 0
+    fi
+    [ "$(jq 'length' <<< "$PAGE_JSON")" = "0" ] && break
+    PAGE_COUNT=$(jq -r --arg p "$FIX_BRANCH_PREFIX" '[.[] | select((.head.ref // "") | startswith($p))] | length' <<< "$PAGE_JSON")
+    OPEN_COUNT=$((OPEN_COUNT + PAGE_COUNT))
+    PAGE=$((PAGE + 1))
+  done
+  if [ "$PAGE" -gt 10 ]; then
+    echo "::warning::$REPO has more than ten pages of open pull requests - not opening another"
+    _fix_notice "no fix pull request opened for $REPO: too many open pull requests to count"
+    return 0
+  fi
+  if [ "$OPEN_COUNT" -ge "${TRIAGE_FIX_MAX_OPEN:-5}" ]; then
+    echo "$REPO already has $OPEN_COUNT open proposals from this pipeline - not adding another"
+    _fix_notice "no fix pull request opened for $REPO: $OPEN_COUNT proposals from this pipeline are still open"
+    return 0
+  fi
+
+  local TITLE SUMMARY UNVERIFIED SUBJECT FIX_CONFIDENCE
+  # The schema's enum and maxLength are requests to the model, not guarantees: extract-json checks
+  # required keys, not these. So the value is checked here, and the lengths are enforced here, by
+  # characters (a byte cut severs a Cyrillic letter and leaves an invalid byte in the commit subject).
+  FIX_CONFIDENCE=$(jq -r '.confidence // ""' claude-fix-structured.json | tr -d '\r')
+  if [ "$FIX_CONFIDENCE" != "high" ] && [ "$FIX_CONFIDENCE" != "medium" ]; then
+    echo "The fix session rated its own edit '${FIX_CONFIDENCE:-unstated}' - no pull request"
+    _fix_notice "fix for $REPO not proposed: the fix session rated its own edit '${FIX_CONFIDENCE:-unstated}'"
+    return 0
+  fi
+  TITLE=$(jq -r '.title // ""' claude-fix-structured.json | tr -d '\r' | tr '\n' ' ' | _trim_chars 90 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  SUMMARY=$(jq -r '.summary // ""' claude-fix-structured.json | tr -d '\r' | _trim_chars 600)
+  UNVERIFIED=$(jq -r '.not_verified // ""' claude-fix-structured.json | tr -d '\r' | _trim_chars 300)
+  if [ -z "$TITLE" ] || [ -z "$SUMMARY" ]; then
+    echo "::warning::The fix result has no title or summary - not opening a pull request"
+    return 0
+  fi
+  # The commit subject follows the repositories' own convention for a bug fix. It is all the commit
+  # carries on purpose: these repositories can be mirrored to a public host, and history travels
+  # with the mirror while a pull request body does not.
+  SUBJECT="fix Bug $BUG_ID - $TITLE"
+
+  local GIT_ID=(-c "user.name=${TRIAGE_GIT_NAME:-Claude Bug Triage}" -c "user.email=${TRIAGE_GIT_EMAIL:-claude-triage@noreply.$GITEA_HOST}")
+  if ! git -C "fix-work/$REPO" apply --index --whitespace=nowarn "$PWD/claude-output/fix.patch" 2>fix-apply.err; then
+    echo "::warning::git apply failed after the check passed: $(head -c 200 fix-apply.err)"
+    return 0
+  fi
+  git -C "fix-work/$REPO" checkout -q -b "$BRANCH"
+  git -C "fix-work/$REPO" "${GIT_ID[@]}" commit -q -m "$SUBJECT"
+  if ! git -C "fix-work/$REPO" push -q origin "$BRANCH" 2>fix-push.err; then
+    echo "::warning::Could not push $BRANCH: $(head -c 200 fix-push.err)"
+    _fix_notice "fix branch for $REPO could not be pushed"
+    return 0
+  fi
+
+  local RUN_URL="" BODY PAYLOAD RESPONSE PR_URL
+  if [ -n "${GITHUB_RUN_ID:-}" ]; then
+    RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
+  fi
+  BODY=$(printf '%s\n\n%s\n%s\n%s\n%s\n' \
+    "**Automated proposal for Bug $BUG_ID.** Written by the Claude Bug Triage pipeline and **not reviewed by a person**; treat it as a suggestion to check, not a change to trust." \
+    "**What it does:** $SUMMARY (the fix session's own confidence: $FIX_CONFIDENCE)" \
+    "${UNVERIFIED:+**Not verified:** $UNVERIFIED}" \
+    "**Analysed at:** \`$REPO@$REF\` - this branch is based on it; port it to another line if the fix belongs there." \
+    "${RUN_URL:+**Run:** $RUN_URL}")
+  # The WIP: prefix is what makes Gitea treat this as a draft, which it will not let anyone merge
+  # until the prefix is removed - a deliberate second step by a person.
+  PAYLOAD=$(jq -n --arg title "WIP: $SUBJECT" --arg head "$BRANCH" --arg base "$REF" --arg body "$BODY" \
+    '{title: $title, head: $head, base: $base, body: $body}')
+  RESPONSE=$(_fix_api POST "/repos/$TRIAGE_ORG/$REPO/pulls" -d "$PAYLOAD" || true)
+  PR_URL=$(jq -r '.html_url // empty' <<< "$RESPONSE" 2>/dev/null | tr -d '\r' || true)
+  if [ -z "$PR_URL" ]; then
+    echo "::warning::The branch was pushed but the pull request was not created: $(head -c 200 <<< "$RESPONSE")"
+    _fix_notice "fix branch $BRANCH pushed to $REPO but the pull request was not created"
+    return 0
+  fi
+  echo "$PR_URL" > fix-pr-url.txt
+  echo "Opened draft pull request: $PR_URL"
+  _fix_notice "opened a draft pull request with a proposed fix: $PR_URL"
+  return 0
+}
+
+
+# =====================================================================
+# Entry points
+# =====================================================================
+
+# The whole "Run triage" step. The sandbox is still alive when the fix is attempted, which is the only
+# reason the fix is not a step of its own.
+triage_sandbox_step() {
+  # DooD: the CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY, egress
+  # restricted to npm + Anthropic - no GITEA_TOKEN, no BUGZILLA_API_KEY, no docker.sock.
+  name_triage_resources
+  trap cleanup_triage_sandbox EXIT INT TERM
+  cleanup_triage_sandbox
+
+  resolve_triage_output_dir
+  setup_triage_sandbox
+  run_claude_triage
+  summarize_claude_triage
+
+  # Only when the analysis is confident, the bug is open and the repository is allowlisted; never fatal.
+  attempt_fix
+}
+
+triage_main() {
+  case "${1:-}" in
+    prepare) prepare_triage_context ;;
+    sandbox) triage_sandbox_step ;;
+    open-pr) open_fix_pr ;;
+    report)  report_triage_result ;;
+    publish) publish_triage_comment ;;
+    *)
+      echo "usage: triage-run.sh {prepare|sandbox|open-pr|report|publish}" >&2
+      return 2
+      ;;
+  esac
+}
+
+# Sourcing (tests) only defines the functions; running the file dispatches.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  triage_main "$@"
+fi

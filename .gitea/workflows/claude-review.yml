@@ -52,7 +52,7 @@ env:
 concurrency:
   group: Claude-Review-${{ inputs.pr_url }}
   # false (queue, don't cancel): true proved unreliable live - a "cancelled" run kept running
-  # long enough to clobber a finished run's comment. review-steps.sh's is_pr_stale() stays as backup.
+  # long enough to clobber a finished run's comment. review-run.sh's is_pr_stale() stays as backup.
   cancel-in-progress: false
 
 jobs:
@@ -157,8 +157,7 @@ jobs:
           BUGZILLA_HOST: ${{ secrets.BUGZILLA_HOST }}
         run: |
           set -euo pipefail
-          source .gitea/scripts/review-steps.sh
-          prepare_review_context
+          bash .gitea/scripts/review-run.sh prepare
 
       - name: Non-ASCII comment check
         if: steps.prepare.outputs.skip != 'true'
@@ -167,18 +166,7 @@ jobs:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
           set -euo pipefail
-          source .gitea/scripts/gitea-api.sh
-          NON_ASCII_COMMENT_ID=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r '[.[] | select(.body | contains("<!-- Non-ASCII-Check -->"))] | last | .id // empty')
-          if python3 .gitea/scripts/check-english-comments.py repo/pr.diff > /tmp/english-check.md; then
-            echo "Non-ASCII check passed"
-            [ -n "$NON_ASCII_COMMENT_ID" ] && gitea_api_json "$ORG_NAME/$REPO_NAME/issues/comments/$NON_ASCII_COMMENT_ID" -X DELETE > /dev/null || true
-            set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "success" "Ok" "Non-ASCII Check"
-          else
-            count=$(grep -c '^- \[' /tmp/english-check.md 2>/dev/null || true)
-            echo "Non-ASCII check failed: $count violation(s)"
-            upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/english-check.md "$NON_ASCII_COMMENT_ID" "" "<!-- Non-ASCII-Check -->"
-            set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "failure" "Failed: $count violation(s)" "Non-ASCII Check"
-          fi
+          bash .gitea/scripts/review-run.sh english-check
 
       - name: Run review (isolated container)
         if: steps.prepare.outputs.skip != 'true'
@@ -197,21 +185,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
-          # post_review_and_set_status reads this to put the review duration in the commit
-          # status description; without it every status silently rendered "Approved" with no
-          # timing at all (the write was lost when the sandbox was wired in).
-          date +%s > review-start.txt
-          source .gitea/scripts/review-sandbox.sh
-
-          # DooD: claude CLI runs in a throwaway nested container with only ANTHROPIC_API_KEY and egress restricted to npm + Anthropic via a Squid proxy - that containment is what lets --allowedTools be dropped entirely below (full tool access).
-          name_sandbox_resources
-          trap cleanup_sandbox EXIT INT TERM
-          cleanup_sandbox
-
-          resolve_host_output_dir
-          setup_sandbox
-          run_claude_review
-          summarize_claude_review
+          bash .gitea/scripts/review-run.sh sandbox
 
       - name: Upload review artifacts
         # v4/v7 (@actions/artifact v2+) intermittently failed here with GHESNotSupportedError - v3 predates that non-github.com host check.
@@ -233,8 +207,7 @@ jobs:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
           set -euo pipefail
-          source .gitea/scripts/review-steps.sh
-          post_review_and_set_status
+          bash .gitea/scripts/review-run.sh post
 
       - name: Notify on failure
         # Self-contained on purpose: no source, no repository files. The earliest steps run
