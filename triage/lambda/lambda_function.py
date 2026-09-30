@@ -25,15 +25,13 @@ ALLOWED_ACTIONS = tuple(
     for value in os.getenv("ALLOWED_ACTIONS", "create").split(",")
     if value.strip()
 )
-# "*" by default: which products are actually routable is decided by the routing map the workflow
-# fetches (buildserver:claude_bugzilla_triage/product-repos.json), and keeping a second copy of
-# that list here only lets the two drift apart. A bug in
-# an unmapped product therefore starts a run that stops at the workflow's own product gate, before
-# the sandbox and before any model spend. Set an explicit comma-separated list here when you would
-# rather such a bug never start a run at all.
+# Temporarily "Install" only, so bugs in other products never start a run at all. Set ALLOWED_PRODUCTS
+# to "*" (or change this default back) to lift the limit: which products are then routable is decided
+# by the routing map the workflow fetches (buildserver:claude_bugzilla_triage/product-repos.json), and
+# a bug in an unmapped product starts a run that stops at the workflow's own product gate.
 ALLOWED_PRODUCTS = tuple(
     value.strip()
-    for value in os.getenv("ALLOWED_PRODUCTS", "*").split(",")
+    for value in os.getenv("ALLOWED_PRODUCTS", "Install").split(",")
     if value.strip()
 )
 ALLOWED_COMPONENTS = tuple(
