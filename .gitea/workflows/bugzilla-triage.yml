@@ -12,7 +12,7 @@ on:
         description: 'Post the analysis as a comment on the bug'
         required: false
         type: string
-        default: 'false'
+        default: 'true'
       fix_pr:
         # After a high-confidence analysis of an open bug in a repository on the routing map's
         # pr_repos list, a second session drafts the change and a draft pull request is opened.
