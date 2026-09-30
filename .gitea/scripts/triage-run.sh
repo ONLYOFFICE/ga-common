@@ -67,7 +67,7 @@ _bugzilla_get() {
 # unroutable products are a steady trickle (UI.iOS alone files about two bugs a day), so the run
 # ends green with the reason stated instead. Mirrors claude-review.yml's steps.prepare.outputs.skip.
 _skip_run() {
-  local REASON="$1"
+  local REASON="$1" QUIET="${2:-}"
   echo "::notice::Skipping bug $BUG_ID: $REASON"
   echo "$REASON" > triage-skip-reason.txt
   # A skip is not a failure - the run stays green - but it is the one outcome nobody finds out
@@ -75,7 +75,9 @@ _skip_run() {
   # routing map, and holes only get filled if somebody hears about them. pipeline-notice.txt is
   # read by the workflow's last step; the name is spelled out there too, since that step cannot
   # source this file.
-  echo "skipped - $REASON" >> pipeline-notice.txt
+  # "quiet" is for skips that are expected rather than a hole to fix (the rollout limit below): an
+  # alert per bug outside the rollout would bury the ones that matter.
+  [ "$QUIET" = "quiet" ] || echo "skipped - $REASON" >> pipeline-notice.txt
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "skip=true" >> "$GITHUB_OUTPUT"
   return 0
 }
@@ -127,6 +129,28 @@ _fetch_bug_metadata() {
   BUG_STATUS=$(_sanitize "$(jq -r '[.bugs[0].status, .bugs[0].resolution] | map(select(. != null and . != "")) | join("/")' <<< "$BUG_JSON")" 40)
   BUG_SUMMARY=$(_sanitize "$(jq -r '.bugs[0].summary // ""' <<< "$BUG_JSON")" 300)
   BUG_URL="https://$BUGZILLA_HOST/show_bug.cgi?id=$BUG_ID"
+
+  # Rollout limit, checked first: a product outside TRIAGE_ONLY_PRODUCTS is skipped even when the
+  # routing map lists it, before anything is spent. Comma-separated like TRIAGE_ALLOWED_PRODUCTS,
+  # case-insensitive; empty means no limit.
+  if [ -n "${TRIAGE_ONLY_PRODUCTS:-}" ]; then
+    local ONLY_MATCH=false ONLY_ITEM
+    local IFS=,
+    set -f
+    for ONLY_ITEM in $TRIAGE_ONLY_PRODUCTS; do
+      ONLY_ITEM=$(printf '%s' "$ONLY_ITEM" | sed 's/^ *//; s/ *$//')
+      if [ "${ONLY_ITEM,,}" = "${PRODUCT,,}" ]; then
+        ONLY_MATCH=true
+        break
+      fi
+    done
+    set +f
+    unset IFS
+    if [ "$ONLY_MATCH" != "true" ]; then
+      _skip_run "product '$PRODUCT' is outside the current rollout (TRIAGE_ONLY_PRODUCTS=$TRIAGE_ONLY_PRODUCTS)" quiet
+      return 78
+    fi
+  fi
 
   # Product gate. A product listed in product-repos.json is allowed by that fact alone - the entry
   # is what makes the bug routable - so adding a product is one edit in one place. TRIAGE_ALLOWED_

@@ -112,6 +112,9 @@ jobs:
           # Used only for the repository-selection call (see triage-tools.py select-repos), never inside the sandbox.
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
           SELECT_MODEL: ${{ inputs.model }}
+          # Rollout limit: a bug of any other product is skipped here, before anything is spent, whatever
+          # the Lambda lets through. Comma-separated; empty lifts the limit.
+          TRIAGE_ONLY_PRODUCTS: 'Install'
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
