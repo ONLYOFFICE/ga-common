@@ -117,7 +117,8 @@ def validate(data, schema, path="root"):
     props = schema.get("properties", {})
 
     summary_schema = props.get("summary")
-    if summary_schema and data.get("summary") is not None:
+    # Only when the schema declares an object: the fix schema's summary is a plain string.
+    if summary_schema and summary_schema.get("type") == "object" and data.get("summary") is not None:
         error = _validate_object(data["summary"], summary_schema, f"{path}.summary")
         if error:
             return error

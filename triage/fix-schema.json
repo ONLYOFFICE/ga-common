@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "summary", "confidence"],
+  "properties": {
+    "title": { "type": "string", "maxLength": 90, "description": "The commit subject after 'fix Bug N - ': an imperative phrase saying what changed, about 60 characters. No bug number, no trailing period, no prefix." },
+    "summary": { "type": "string", "maxLength": 600, "description": "Two or three sentences for the reviewer: what was wrong, what the change does, and why that is enough. Specific to this change, not a restatement of the bug." },
+    "confidence": { "type": "string", "enum": ["high", "medium", "low"], "description": "high = the edit removes the mechanism the analysis found and nothing else depends on the old behaviour. medium = it plausibly fixes the symptom but a caller or a platform variant was not checked. low = a best attempt." },
+    "not_verified": { "type": "string", "maxLength": 300, "description": "What you could not check here and a reviewer should - a build, a platform, a caller you did not open. Omit when nothing applies; an empty note is better than a filler one." }
+  }
+}

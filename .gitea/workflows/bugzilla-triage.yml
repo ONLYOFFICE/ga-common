@@ -13,6 +13,19 @@ on:
         required: false
         type: string
         default: 'false'
+      fix_pr:
+        # After a high-confidence analysis of an open bug in a repository on the routing map's
+        # pr_repos list, a second session drafts the change and a draft pull request is opened.
+        # Every other case costs nothing extra: the gate is checked before anything is spent.
+        description: 'Open a draft pull request with a proposed fix when the analysis is confident'
+        required: false
+        type: string
+        default: 'true'
+      fix_max_budget_usd:
+        description: 'Hard cap on API spend for the fix session (USD), on top of the analysis budget'
+        required: false
+        type: string
+        default: '1'
       model:
         description: 'Claude model'
         required: false
@@ -56,8 +69,9 @@ jobs:
     # Temporarily disabled; remove this line to allow manual triage runs again.
     if: ${{ false }}
     runs-on: ubuntu-latest
-    # Generous next to the review job: several repositories get cloned before the model starts.
-    timeout-minutes: 30
+    # Generous next to the review job: several repositories get cloned before the model starts,
+    # and the fix session that can follow the analysis has its own 10 minutes on top of its 15.
+    timeout-minutes: 45
     env:
       BUG_ID: ${{ inputs.bug_id }}
     steps:
@@ -117,9 +131,12 @@ jobs:
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
           CLAUDE_EFFORT: ${{ inputs.effort }}
           CLAUDE_MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
-          # Well inside the job's own 30 minutes, so a hung session fails with a message and a
+          # Well inside the job's own 45 minutes, so a hung session fails with a message and a
           # debug tail instead of being killed along with the whole step log.
           TRIAGE_CLI_TIMEOUT: '900'
+          TRIAGE_FIX_PR: ${{ inputs.fix_pr }}
+          FIX_MAX_BUDGET_USD: ${{ inputs.fix_max_budget_usd }}
+          FIX_CLI_TIMEOUT: '600'
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
@@ -136,6 +153,11 @@ jobs:
           run_claude_triage
           summarize_claude_triage
 
+          # Only when the analysis is confident, the bug is open and the repository is allowlisted;
+          # never fatal. The sandbox is still up here, which is the only reason this is not its own step.
+          source .gitea/scripts/fix-steps.sh
+          attempt_fix
+
       - name: Upload triage artifacts
         # v3: v4/v7 intermittently fail against a non-github.com host (GHESNotSupportedError).
         uses: actions/upload-artifact@v3.2.2
@@ -146,10 +168,28 @@ jobs:
           path: |
             claude-output/claude-debug.log
             claude-output/claude-output.json
+            claude-output/fix-debug.log
+            claude-output/fix-output.json
+            claude-output/fix.patch
+            claude-fix-structured.json
             claude-prompt.txt
+            fix-prompt.txt
             triage-message.txt
           retention-days: 1
           if-no-files-found: ignore
+
+      - name: Open fix PR
+        # Its own step and the only one with a token that can push: the model that wrote the change
+        # never sees it. Runs before Report result so the pull request link is part of the message.
+        if: always() && steps.prepare.outputs.skip != 'true'
+        continue-on-error: true
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          TRIAGE_FIX_PR: ${{ inputs.fix_pr }}
+        run: |
+          set -euo pipefail
+          source .gitea/scripts/fix-steps.sh
+          open_fix_pr
 
       - name: Report result
         if: always()
@@ -207,7 +247,7 @@ jobs:
                          # should know - a bug nobody analysed, or an analysis pointing at code the
                          # routing map never supplied. Both are holes in the map, and a hole nobody
                          # hears about stays open.
-                         REASON=$(tr -d "\r" < pipeline-notice.txt | head -1); KIND="notice"
+                         REASON=$(tr -d "\r" < pipeline-notice.txt | head -5); KIND="notice"
                        fi ;;
           esac
           [ -n "$REASON" ] || exit 0

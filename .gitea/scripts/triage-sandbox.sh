@@ -224,3 +224,71 @@ summarize_claude_triage() {
   USAGE=$(jq -r '.modelUsage // {} | to_entries | map("\(.key): \(.value.inputTokens // 0)in/\(.value.outputTokens // 0)out") | join(", ")' claude-output/claude-output.json 2>/dev/null || echo "n/a")
   echo "Triage OK: $STATS, $LOCATIONS location(s), confidence $CONFIDENCE, \$$COST ($USAGE)"
 }
+
+# Runs the fix session in the sandbox that already holds the repositories, then pulls the result out
+# as a patch. A second session rather than a continuation of the analysis: the analysis was asked to
+# change nothing and its context is full of searching, while this one is asked to change exactly the
+# thing the analysis found, starting from a clean checkout.
+#
+# Expects FIX_REPO, fix-prompt.txt and the sandbox variables (SANDBOX_NAME, HOST_OUTPUT_DIR) set.
+# Optional: FIX_MAX_BUDGET_USD (default 1), FIX_CLI_TIMEOUT (default 600).
+run_claude_fix() {
+  local rc=0 CONTAINER_REPO="/workspace/$FIX_REPO"
+
+  # Restore the untouched checkout: the analysis session had full tool access and may have left
+  # scratch files behind, and the patch must contain the fix and nothing else.
+  docker exec "$SANDBOX_NAME" rm -rf "$CONTAINER_REPO"
+  docker cp "repos/$FIX_REPO" "$SANDBOX_NAME":/workspace/
+  docker exec "$SANDBOX_NAME" chown -R node:node "$CONTAINER_REPO"
+  # A throwaway repository with one commit: the diff against it, not a file comparison, is what
+  # leaves the sandbox. The clone had its .git removed, so there is no history to collide with.
+  docker exec --user node -w "$CONTAINER_REPO" "$SANDBOX_NAME" bash -c \
+    'git init -q && git add -A && git -c user.name=baseline -c user.email=baseline@localhost commit -q -m baseline'
+  docker cp fix-prompt.txt "$SANDBOX_NAME":/workspace/fix-prompt.txt
+  docker exec "$SANDBOX_NAME" chown node:node /workspace/fix-prompt.txt
+
+  # Same containment as the analysis session, with the timeout inside the container for the same
+  # reason: a hung session must end as a clean exit 124 the step can describe, not as a job kill
+  # that takes the step log with it.
+  docker exec --user node -w /workspace -e FIX_MAX_BUDGET_USD -e FIX_CLI_TIMEOUT "$SANDBOX_NAME" bash -c '
+    set -euo pipefail
+    timeout "${FIX_CLI_TIMEOUT:-600}" \
+    claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "${FIX_MAX_BUDGET_USD:-1}" \
+      --debug-file /output/fix-debug.log --output-format json --dangerously-skip-permissions --permission-prompts none \
+      --disallowedTools "Task" \
+      --json-schema "$(cat /triage/fix-schema.json)" \
+      < fix-prompt.txt > /output/fix-output.json
+  ' &
+  local FIX_PID=$!
+  trap 'docker stop -t 5 "$SANDBOX_NAME" > /dev/null 2>&1 || true' TERM INT
+  wait "$FIX_PID" || rc=$?
+  trap - TERM INT
+
+  docker cp "$SANDBOX_NAME":/output/fix-debug.log ./claude-output/fix-debug.log 2>/dev/null || true
+  docker cp "$SANDBOX_NAME":/output/fix-output.json ./claude-output/fix-output.json 2>/dev/null || true
+  # A session that timed out or errored leaves a half-finished edit in the tree. That edit would
+  # still be a valid-looking patch, and a plausible broken fix is the one outcome worse than none,
+  # so it is discarded unread rather than collected and hoped about.
+  if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' claude-output/fix-output.json > /dev/null 2>&1; then
+    if [ "$rc" -eq 124 ]; then
+      echo "::warning::The fix session hit the ${FIX_CLI_TIMEOUT:-600}s timeout - its edit is discarded"
+    else
+      echo "::warning::The fix session did not finish cleanly (exit $rc) - its edit is discarded"
+    fi
+    return 1
+  fi
+
+  docker exec --user node -w "$CONTAINER_REPO" "$SANDBOX_NAME" bash -c \
+    'git add -A && git diff --cached --binary --no-color HEAD > /output/fix.patch' || true
+  docker cp "$SANDBOX_NAME":/output/fix.patch ./claude-output/fix.patch 2>/dev/null || true
+
+  jq -r '.result' claude-output/fix-output.json \
+    | EXTRACT_JSON_SCHEMA=triage/fix-schema.json python3 .gitea/scripts/extract-json.py > claude-fix-structured.json || {
+    echo "::warning::Could not extract a valid fix description from the model's response - no pull request"
+    rm -f claude-fix-structured.json
+  }
+  local STATS COST
+  STATS=$(jq -r '"\(.num_turns // "?") turns / \((.duration_ms // 0) / 1000 | round)s"' claude-output/fix-output.json 2>/dev/null || echo "?")
+  COST=$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' claude-output/fix-output.json 2>/dev/null || echo "?")
+  echo "Fix session OK: $STATS, \$$COST, patch $(wc -c < claude-output/fix.patch 2>/dev/null | tr -d ' ' || echo 0) bytes"
+}

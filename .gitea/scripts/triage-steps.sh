@@ -59,7 +59,7 @@ _skip_run() {
   # routing map, and holes only get filled if somebody hears about them. pipeline-notice.txt is
   # read by the workflow's last step; the name is spelled out there too, since that step cannot
   # source this file.
-  echo "skipped - $REASON" > pipeline-notice.txt
+  echo "skipped - $REASON" >> pipeline-notice.txt
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "skip=true" >> "$GITHUB_OUTPUT"
   return 0
 }
@@ -527,8 +527,11 @@ _fetch_product_map() {
 # The CLI validates triage-schema.json in strict mode, and a keyword outside the JSON Schema
 # vocabulary kills the run - but only after the repositories have been cloned and the container
 # built. Seen live: a "//" key added as a comment cost a full run. Checking here costs milliseconds.
+#
+# Takes the schema path and, optionally, "warning" as a second argument: the fix schema is optional
+# machinery, and a mistake in it must not be reported as an error in an otherwise good analysis run.
 _validate_triage_schema() {
-  python3 - triage/triage-schema.json <<'PY' || return 1
+  python3 - "${1:-triage/triage-schema.json}" "${2:-error}" <<'PY' || return 1
 import json, sys
 ALLOWED = {"type", "properties", "required", "additionalProperties", "items",
            "description", "enum", "minItems", "maxItems", "maxLength"}
@@ -549,11 +552,11 @@ def walk(node, path):
 try:
     schema = json.load(open(sys.argv[1], encoding="utf-8"))
 except (OSError, ValueError) as error:
-    print(f"::error::triage-schema.json is unreadable ({error})")
+    print(f"::{sys.argv[2]}::{sys.argv[1]} is unreadable ({error})")
     raise SystemExit(1)
 offenders = walk(schema, "root")
 if offenders:
-    print("::error::triage-schema.json has keywords the CLI rejects in strict mode: "
+    print(f"::{sys.argv[2]}::{sys.argv[1]} has keywords the CLI rejects in strict mode: "
           + ", ".join(offenders))
     raise SystemExit(1)
 PY
@@ -561,6 +564,10 @@ PY
 
 prepare_triage_context() {
   _validate_triage_schema
+  rm -f fix-disabled.txt
+  if ! _validate_triage_schema triage/fix-schema.json warning; then
+    echo "the fix schema is invalid" > fix-disabled.txt
+  fi
   _fetch_product_map
   _validate_product_map
   # 78 is _skip_run's signal: the bug is deliberately not analysed. Nothing failed, so the step
@@ -625,7 +632,7 @@ prepare_triage_context() {
   echo "Prompt rendered: $(wc -c < claude-prompt.txt | tr -d ' ') bytes"
 
   # Read back by report_triage_result, which runs in a later step with a fresh shell.
-  { echo "PRODUCT=$PRODUCT"; echo "COMPONENT=$COMPONENT"; echo "BUG_URL=$BUG_URL"; } >> "$GITHUB_ENV"
+  { echo "PRODUCT=$PRODUCT"; echo "COMPONENT=$COMPONENT"; echo "BUG_URL=$BUG_URL"; echo "BUG_STATUS=$BUG_STATUS"; } >> "$GITHUB_ENV"
 }
 
 # Posts the rendered analysis as a comment on the bug. Called by its own step, after the message
@@ -688,7 +695,7 @@ publish_triage_comment() {
     echo "::warning::Could not post the comment on bug $BUG_ID (HTTP $CODE): $(head -c 200 publish-response.json | tr -d '\n')"
     # A finished analysis that never reached the bug is worth a message: nothing outside this
     # step sees it otherwise, since the step is continue-on-error and the run still ends green.
-    echo "could not post the comment on bug $BUG_ID (HTTP $CODE)" > pipeline-notice.txt
+    echo "could not post the comment on bug $BUG_ID (HTTP $CODE)" >> pipeline-notice.txt
   fi
 }
 
@@ -777,7 +784,7 @@ report_triage_result() {
     local WANTED
     WANTED=$(jq -r '.missing_repository // ""' claude-structured.json 2>/dev/null | tr -d '\r' | head -c 120 || true)
     if [ -n "$WANTED" ] && [ "$WANTED" != "null" ]; then
-      echo "analysis places the cause in $WANTED, which the routing map did not supply" > pipeline-notice.txt
+      echo "analysis places the cause in $WANTED, which the routing map did not supply" >> pipeline-notice.txt
     fi
   fi
   ARGS+=(--gitea-host "${GITEA_HOST:-}" --org "${TRIAGE_ORG:-ONLYOFFICE}")
@@ -785,6 +792,10 @@ report_triage_result() {
   # is a fact already fetched, and one the answer should not get a chance to restate wrongly.
   if [ -s related-bugs.txt ]; then
     ARGS+=(--related-file related-bugs.txt)
+  fi
+
+  if [ -s fix-pr-url.txt ]; then
+    ARGS+=(--pr-url "$(cat fix-pr-url.txt)")
   fi
 
   python3 .gitea/scripts/render-triage.py "${ARGS[@]}" --output triage-message.txt > /dev/null

@@ -26,7 +26,7 @@ real, already-paid-for analysis over one bad field.
 Usage:
   render-triage.py --structured <file> --bug-id <id>
                    [--product NAME] [--component NAME] [--repos-file FILE]
-                   [--run-url URL] [--output FILE]
+                   [--run-url URL] [--pr-url URL] [--output FILE]
   render-triage.py --fallback "<reason>" --bug-id <id> [--run-url URL] [--output FILE]
 
 The message never links to the bug it is about. It becomes a comment on that bug, where a link back
@@ -384,7 +384,7 @@ def render_similar(data, statuses):
 
 
 def render(data, bug_id, product, component, analysed=(), refs=None, run_url="",
-           host="", org="", history=None, statuses=None):
+           host="", org="", history=None, statuses=None, pr_url=""):
     refs = refs or {}
     summary = as_dict(data.get("summary"))
     entries = usable_locations(data)
@@ -446,6 +446,10 @@ def render(data, bug_id, product, component, analysed=(), refs=None, run_url="",
         out += [f"FIX{f' ({lang})' if lang else ''}:"]
         out += [f"  {line}" if line else "" for line in fix.split("\n")]
         out += [""]
+
+    if pr_url:
+        out.append("PR".ljust(LABEL_WIDTH) + clean(pr_url, 300) + "  (draft, not reviewed)")
+        out.append("")
 
     # Never wrapped and never inside field(): wrapping is what would break these.
     for position, (number, link) in enumerate(links):
@@ -513,6 +517,7 @@ def main():
     parser.add_argument("--component", default="")
     parser.add_argument("--repos-file")
     parser.add_argument("--run-url", default="")
+    parser.add_argument("--pr-url", default="")
     parser.add_argument("--gitea-host", default="")
     parser.add_argument("--org", default="ONLYOFFICE")
     parser.add_argument("--line-history", help="file holding one 'sha date author | subject' line")
@@ -574,7 +579,7 @@ def main():
             else:
                 text = render(data, args.bug_id, args.product, args.component,
                               analysed, refs, args.run_url, args.gitea_host, args.org, history,
-                              statuses)
+                              statuses, args.pr_url)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8", newline="\n") as handle:
