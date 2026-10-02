@@ -14,7 +14,7 @@ on:
         type: string
         default: 'true'
       fix_pr:
-        # After a high-confidence analysis of an open bug in a repository on the routing map's
+        # After a high- or medium-confidence analysis of an open bug in a repository on the routing map's
         # pr_repos list, a second session drafts the change and a draft pull request is opened.
         # Every other case costs nothing extra: the gate is checked before anything is spent.
         description: 'Open a draft pull request with a proposed fix when the analysis is confident'
@@ -185,9 +185,8 @@ jobs:
           bash .gitea/scripts/triage-run.sh report
 
       - name: Publish to Bugzilla
-        # After Report result, so the message exists and has already been logged; the comment is an
-        # extra copy of it, not the only one. continue-on-error because a tracker that refuses the
-        # write must not turn a finished analysis red.
+        # After Open fix PR, whose link is all the comment carries; with no pull request nothing is posted.
+        # continue-on-error because a tracker that refuses the write must not turn a finished analysis red.
         if: always() && steps.prepare.outputs.skip != 'true'
         continue-on-error: true
         env:

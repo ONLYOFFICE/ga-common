@@ -588,6 +588,24 @@ if offenders:
 PY
 }
 
+# A bug that already has its fix branch in one of the cloned repositories gets no second fix session:
+# the pull request step would refuse to open one anyway, and by then the session would be paid for.
+# Only a clear answer counts; the pull request step still makes its own check before it pushes.
+_note_existing_fix_branch() {
+  if [ ! -s repos-cloned.txt ] || [ -s fix-disabled.txt ]; then return 0; fi
+  local NAME FOUND
+  while IFS= read -r NAME || [ -n "$NAME" ]; do
+    NAME="${NAME%%@*}"
+    if [ -z "$NAME" ]; then continue; fi
+    FOUND=$(timeout 30 git ls-remote --heads "https://$GITEA_HOST/$TRIAGE_ORG/$NAME" "refs/heads/${FIX_BRANCH_PREFIX}${BUG_ID}" 2>/dev/null || true)
+    if [ -n "$FOUND" ]; then
+      echo "a fix branch for this bug already exists in $NAME" > fix-disabled.txt
+      echo "A fix branch for bug $BUG_ID already exists in $NAME - no fix session will run"
+      return 0
+    fi
+  done < repos-cloned.txt
+}
+
 prepare_triage_context() {
   _validate_triage_schema
   rm -f fix-disabled.txt
@@ -634,6 +652,7 @@ prepare_triage_context() {
   fi
   _select_and_clone_repos
   _expand_and_clone_declared_repos
+  _note_existing_fix_branch
   _render_repositories_block
 
   BUGZILLA_CONTEXT=$(cat bug-context.txt)
@@ -1333,6 +1352,15 @@ _fix_api() {
     -H "Content-Type: application/json" "https://$GITEA_HOST/api/v1$API_PATH" "$@"
 }
 
+# Text written by a model that read the bug is shown as code, never as markup: a mention, a link or an
+# image in it would otherwise be live in the pull request. The fence is longer than any run of backticks
+# in the text, so the text cannot close it.
+_fenced_block() {
+  local TEXT="$1" FENCE='```'
+  while grep -qF -- "$FENCE" <<< "$TEXT"; do FENCE+='`'; done
+  printf '%s\n%s\n%s' "$FENCE" "$TEXT" "$FENCE"
+}
+
 # The analysis as the reader of the pull request should see it: the same message the run logs, in a fence
 # so that nothing in it is read as markup, without its closing disclaimer (it says nothing was changed, which
 # is the one thing a pull request contradicts). Prints nothing and fails when there is no analysis to show.
@@ -1345,12 +1373,10 @@ _pr_analysis_block() {
   python3 .gitea/scripts/triage-tools.py render "${RENDER_ARGS[@]}" > /dev/null 2>&1 || return 1
   [ -s pr-analysis.txt ] || return 1
 
-  local TEXT FENCE='```'
+  local TEXT
   TEXT=$(sed '/^--$/,$d' pr-analysis.txt | _trim_chars 12000)
   [ -n "$TEXT" ] || return 1
-  # A fence longer than any run of backticks in the text, so the text cannot close it.
-  while grep -qF "$FENCE" <<< "$TEXT"; do FENCE+='`'; done
-  printf '### Analysis (generated, not reviewed)\n\n%s\n%s\n%s\n' "$FENCE" "$TEXT" "$FENCE"
+  printf '### Analysis (generated, not reviewed)\n\n%s\n' "$(_fenced_block "$TEXT")"
 }
 
 # Turns the collected patch into a draft pull request. Its own step, and the only one that holds a
@@ -1467,13 +1493,16 @@ open_fix_pr() {
   if [ -n "${GITHUB_RUN_ID:-}" ]; then
     RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
   fi
-  BODY=$(printf '%s\n\n%s\n%s\n%s\n%s\n%s\n' \
-    "**Automated proposal for Bug $BUG_ID.** Written by the Claude Bug Triage pipeline and **not reviewed by a person**; treat it as a suggestion to check, not a change to trust." \
-    "**What it does:** $SUMMARY (the fix session's own confidence: $FIX_CONFIDENCE)" \
-    "**Analysis confidence:** ${ANALYSIS_CONFIDENCE:-unstated}" \
-    "${UNVERIFIED:+**Not verified:** $UNVERIFIED}" \
-    "**Analysed at:** \`$REPO@$REF\` - this branch is based on it; port it to another line if the fix belongs there." \
-    "${RUN_URL:+**Run:** $RUN_URL}")
+  BODY="**Automated proposal for Bug $BUG_ID.** Written by the Claude Bug Triage pipeline and **not reviewed by a person**; treat it as a suggestion to check, not a change to trust."
+  BODY+=$'\n\n'"**What it does** (the fix session's own confidence: $FIX_CONFIDENCE):"$'\n'"$(_fenced_block "$SUMMARY")"
+  BODY+=$'\n\n'"**Analysis confidence:** ${ANALYSIS_CONFIDENCE:-unstated}"
+  if [ -n "$UNVERIFIED" ]; then
+    BODY+=$'\n\n'"**Not verified:**"$'\n'"$(_fenced_block "$UNVERIFIED")"
+  fi
+  BODY+=$'\n\n'"**Analysed at:** \`$REPO@$REF\` - this branch is based on it; port it to another line if the fix belongs there."
+  if [ -n "$RUN_URL" ]; then
+    BODY+=$'\n\n'"**Run:** $RUN_URL"
+  fi
   if [ -n "$ANALYSIS_BLOCK" ]; then
     BODY="$BODY"$'\n\n'"$ANALYSIS_BLOCK"
   fi

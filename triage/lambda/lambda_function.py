@@ -353,6 +353,53 @@ def fetch_bug(config, bug_id):
     raise BugLookupError(last)
 
 
+# The run-name of bugzilla-triage.yml, which is how a run is told from the bug it was started for.
+RUN_TITLE = "Triage \u2022 Bug {bug_id}"
+RUN_LIST_PAGES = 5
+
+
+def already_triaged(config, bug_id):
+    """True when a run for this bug is waiting, running or finished well; False when there is none; None when
+    Gitea cannot be asked.
+
+    The webhook can arrive more than once for a bug, and a run that opened no pull request leaves nothing in
+    the bug to tell the next one apart, so the runs themselves are the record. A failed or cancelled run does
+    not count: it is worth another go. Starting the workflow by hand never passes through here."""
+    title = RUN_TITLE.format(bug_id=bug_id)
+    workflow_id = urllib.parse.quote(config["workflow_id"], safe="")
+    base = (
+        f"{config['gitea_url']}/api/v1/repos/{config['workflow_owner']}/{config['workflow_repo']}"
+        f"/actions/workflows/{workflow_id}/runs"
+    )
+    for page in range(1, RUN_LIST_PAGES + 1):
+        request = urllib.request.Request(
+            url=f"{base}?limit=50&page={page}",
+            headers={
+                "Authorization": "token " + config["gitea_token"],
+                "Accept": "application/json",
+                "User-Agent": "ga-common-bugzilla-triage-dispatch-lambda",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as result:
+                data = json.loads(result.read().decode("utf-8", errors="replace"))
+        except Exception:  # noqa: BLE001 - network, HTTP error, bad JSON: all mean "cannot tell"
+            return None
+
+        runs = data.get("workflow_runs") if isinstance(data, dict) else None
+        if not isinstance(runs, list):
+            return None
+        if not runs:
+            return False
+        for run in runs:
+            if not isinstance(run, dict) or run.get("display_title") != title:
+                continue
+            if run.get("status") != "completed" or run.get("conclusion") == "success":
+                return True
+
+    return False
+
+
 def log_event(name, **fields):
     """One JSON line to CloudWatch. Structure and decisions only: never a token, a body or a login."""
     print(json.dumps({"event": name, **fields}, default=str, sort_keys=True))
@@ -453,6 +500,13 @@ def handle_event(event):
     assignee = assignee_login(bug)
     if not is_allowed(assignee, config["only_assignees"]):
         return response(200, {"ok": True, "ignored": True, "reason": "assignee outside the current rollout", "assignee": assignee})
+
+    triaged = already_triaged(config, bug_id)
+    if triaged:
+        log_event("deduplicated", bug_id=bug_id)
+        return response(200, {"ok": True, "ignored": True, "reason": "already triaged", "bug_id": bug_id})
+    if triaged is None:
+        log_event("dedupe_unavailable", bug_id=bug_id)
 
     status, body = dispatch_workflow(config, {"bug_id": bug_id})
     if status < 200 or status >= 300:
