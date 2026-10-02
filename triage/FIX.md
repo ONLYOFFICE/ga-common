@@ -23,6 +23,8 @@ $ANALYSIS
 
 That is a hypothesis from a previous pass, not a fact. Read the code it points at and confirm the mechanism before editing. If it turns out to be wrong, say so in `not_verified` and make no change rather than editing something plausible.
 
+When the analysis confidence is medium, treat the cause as unconfirmed until the code shows it; if you cannot confirm it, leave the tree untouched.
+
 ## Where to work
 
 The repository is checked out at `/workspace/$FIX_REPO`, on branch `$FIX_REF`, and it is a git repository with one commit holding the untouched state. Edit files in that directory only. Screenshots and files the reporter attached are under `/workspace/attachments/`, if any.

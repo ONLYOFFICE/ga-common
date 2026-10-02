@@ -661,39 +661,33 @@ prepare_triage_context() {
   { echo "PRODUCT=$PRODUCT"; echo "COMPONENT=$COMPONENT"; echo "BUG_URL=$BUG_URL"; echo "BUG_STATUS=$BUG_STATUS"; } >> "$GITHUB_ENV"
 }
 
-# The body of the Bugzilla comment: a link to the Actions run and, when the fix stage opened one, a link
-# to the draft pull request. The analysis itself stays in the run, so nothing from the repositories (paths,
-# code, names) is copied into the tracker. Returns 1 when there is nothing to link to.
+# The body of the Bugzilla comment: the link to the draft pull request the fix stage opened, and nothing
+# else. What a bug needs from this pipeline is the proposed fix; the analysis stays in the run, so nothing
+# from the repositories (paths, code, names) is copied into the tracker. Returns 1 when there is no
+# pull request to link to.
 _publish_body() {
-  local RUN_URL="" PR_URL=""
-  if [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITEA_HOST:-}" ]; then
-    RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
-  fi
+  local PR_URL=""
   if [ -s fix-pr-url.txt ]; then
     PR_URL=$(head -1 fix-pr-url.txt | tr -d '\r' | tr -d ' ')
     # Only a plain https link goes into the tracker, whatever the file holds.
     case "$PR_URL" in https://*) ;; *) PR_URL="" ;; esac
   fi
-  if [ -z "$RUN_URL" ] && [ -z "$PR_URL" ]; then
+  if [ -z "$PR_URL" ]; then
     return 1
   fi
-  printf 'Claude Bug Triage \xc2\xb7 Bug %s\n' "$BUG_ID"
-  if [ -n "$RUN_URL" ]; then printf 'Analysis: %s\n' "$RUN_URL"; fi
-  if [ -n "$PR_URL" ]; then printf 'Pull request (draft, not reviewed): %s\n' "$PR_URL"; fi
+  printf 'Claude Bug Triage\n'
+  printf 'Pull request (draft, not reviewed): %s\n' "$PR_URL"
   return 0
 }
 
-# Posts a short comment on the bug: a link to this run and, if one was opened, to the draft pull request.
+# Posts a short comment on the bug with the link to the draft pull request, when the fix stage opened one.
 # Called by its own step, after the full message has already been written to the job log and the step summary.
 #
 # A comment, never the description: the description is the reporter's text and belongs to them.
 #
-# Links only, not the analysis: the run holds the full text, so the tracker never carries repository paths
-# or code, and nobody has to maintain two copies of the same message.
-#
-# Nothing is posted for a run that has nothing to say: a deliberate skip, a fallback where the
-# analysis should be, or an empty message. A bug thread is read by people, and "the pipeline could
-# not produce a result" is a line for the run log, not for the bug.
+# The pull request link only, not the analysis: a bug thread is read by people who want the fix, and the run
+# holds the analysis for anyone who wants it. A run that opened no pull request (a deliberate skip, a
+# low-confidence analysis, a refused patch, a failure) writes nothing into the bug.
 publish_triage_comment() {
   if [ "${TRIAGE_PUBLISH:-false}" != "true" ]; then
     echo "Publishing is off (TRIAGE_PUBLISH=${TRIAGE_PUBLISH:-false}) - the comment was not posted"
@@ -703,12 +697,8 @@ publish_triage_comment() {
     echo "Bug $BUG_ID was skipped - nothing to publish"
     return 0
   fi
-  if [ ! -s triage-message.txt ]; then
-    echo "::warning::No rendered message to publish for bug $BUG_ID"
-    return 0
-  fi
-  if grep -q "NO RESULT" triage-message.txt; then
-    echo "The run produced no analysis - not publishing a failure notice into the bug"
+  if ! _publish_body > /dev/null; then
+    echo "No pull request was opened for bug $BUG_ID - nothing to publish"
     return 0
   fi
   if [ -z "${BUGZILLA_API_KEY:-}" ] || [ -z "${BUGZILLA_HOST:-}" ]; then
@@ -736,10 +726,7 @@ publish_triage_comment() {
   fi
 
   local BODY CODE
-  if ! BODY=$(_publish_body); then
-    echo "::warning::No run or pull request link to publish for bug $BUG_ID"
-    return 0
-  fi
+  BODY=$(_publish_body)
   CODE=$(curl -s --max-time 45 --retry 2 --retry-delay 3 -o publish-response.json -w '%{http_code}' \
     -X POST -H "Content-Type: application/json" \
     "https://$BUGZILLA_HOST/rest/bug/$BUG_ID/comment?api_key=$BUGZILLA_API_KEY" \
@@ -747,7 +734,7 @@ publish_triage_comment() {
   # Never fatal. The analysis is already in the log, the summary and the artifacts; a tracker that
   # refuses the write must not turn a finished run red.
   if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
-    echo "Posted the run link as a comment on bug $BUG_ID (HTTP $CODE)"
+    echo "Posted the pull request link as a comment on bug $BUG_ID (HTTP $CODE)"
   else
     echo "::warning::Could not post the comment on bug $BUG_ID (HTTP $CODE): $(head -c 200 publish-response.json | tr -d '\n')"
     # A finished analysis that never reached the bug is worth a message: nothing outside this
@@ -1237,8 +1224,10 @@ fix_eligibility() {
   SIMILAR=$(jq -r '(.similar_bugs // []) | length' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   REPO=$(jq -r '(.locations // [])[0].repository // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
 
-  if [ "$CONFIDENCE" != "high" ]; then
-    FIX_WHY="confidence is '${CONFIDENCE:-unstated}', not high"
+  # High and medium both go ahead: a person reads the draft either way, and the analysis, with its stated
+  # confidence, is in the pull request description.
+  if [ "$CONFIDENCE" != "high" ] && [ "$CONFIDENCE" != "medium" ]; then
+    FIX_WHY="confidence is '${CONFIDENCE:-unstated}', not high or medium"
     return 1
   fi
   # Any note_kind at all is the analysis saying "this is not a plain defect in code I could read":
@@ -1342,6 +1331,26 @@ _fix_api() {
   shift 2
   curl -s --max-time 30 -X "$METHOD" -H "Authorization: token $GITEA_TOKEN" \
     -H "Content-Type: application/json" "https://$GITEA_HOST/api/v1$API_PATH" "$@"
+}
+
+# The analysis as the reader of the pull request should see it: the same message the run logs, in a fence
+# so that nothing in it is read as markup, without its closing disclaimer (it says nothing was changed, which
+# is the one thing a pull request contradicts). Prints nothing and fails when there is no analysis to show.
+_pr_analysis_block() {
+  [ -s claude-structured.json ] || return 1
+  local RENDER_ARGS=(--structured claude-structured.json --bug-id "$BUG_ID" --product "${PRODUCT:-}" --component "${COMPONENT:-}" --output pr-analysis.txt)
+  if [ -s repos-cloned.txt ]; then RENDER_ARGS+=(--repos-file repos-cloned.txt); fi
+  if [ -n "${GITEA_HOST:-}" ]; then RENDER_ARGS+=(--gitea-host "$GITEA_HOST" --org "$TRIAGE_ORG"); fi
+  if [ -s related-bugs.txt ]; then RENDER_ARGS+=(--related-file related-bugs.txt); fi
+  python3 .gitea/scripts/triage-tools.py render "${RENDER_ARGS[@]}" > /dev/null 2>&1 || return 1
+  [ -s pr-analysis.txt ] || return 1
+
+  local TEXT FENCE='```'
+  TEXT=$(sed '/^--$/,$d' pr-analysis.txt | _trim_chars 12000)
+  [ -n "$TEXT" ] || return 1
+  # A fence longer than any run of backticks in the text, so the text cannot close it.
+  while grep -qF "$FENCE" <<< "$TEXT"; do FENCE+='`'; done
+  printf '### Analysis (generated, not reviewed)\n\n%s\n%s\n%s\n' "$FENCE" "$TEXT" "$FENCE"
 }
 
 # Turns the collected patch into a draft pull request. Its own step, and the only one that holds a
@@ -1452,16 +1461,22 @@ open_fix_pr() {
     return 0
   fi
 
-  local RUN_URL="" BODY PAYLOAD RESPONSE PR_URL
+  local RUN_URL="" BODY PAYLOAD RESPONSE PR_URL ANALYSIS_BLOCK ANALYSIS_CONFIDENCE
+  ANALYSIS_BLOCK=$(_pr_analysis_block || true)
+  ANALYSIS_CONFIDENCE=$(jq -r '.summary.confidence // "unstated"' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   if [ -n "${GITHUB_RUN_ID:-}" ]; then
     RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
   fi
-  BODY=$(printf '%s\n\n%s\n%s\n%s\n%s\n' \
+  BODY=$(printf '%s\n\n%s\n%s\n%s\n%s\n%s\n' \
     "**Automated proposal for Bug $BUG_ID.** Written by the Claude Bug Triage pipeline and **not reviewed by a person**; treat it as a suggestion to check, not a change to trust." \
     "**What it does:** $SUMMARY (the fix session's own confidence: $FIX_CONFIDENCE)" \
+    "**Analysis confidence:** ${ANALYSIS_CONFIDENCE:-unstated}" \
     "${UNVERIFIED:+**Not verified:** $UNVERIFIED}" \
     "**Analysed at:** \`$REPO@$REF\` - this branch is based on it; port it to another line if the fix belongs there." \
     "${RUN_URL:+**Run:** $RUN_URL}")
+  if [ -n "$ANALYSIS_BLOCK" ]; then
+    BODY="$BODY"$'\n\n'"$ANALYSIS_BLOCK"
+  fi
   # The WIP: prefix is what makes Gitea treat this as a draft, which it will not let anyone merge
   # until the prefix is removed - a deliberate second step by a person.
   PAYLOAD=$(jq -n --arg title "WIP: $SUBJECT" --arg head "$BRANCH" --arg base "$REF" --arg body "$BODY" \
