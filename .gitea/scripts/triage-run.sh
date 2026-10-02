@@ -685,15 +685,35 @@ prepare_triage_context() {
   { echo "PRODUCT=$PRODUCT"; echo "COMPONENT=$COMPONENT"; echo "BUG_URL=$BUG_URL"; echo "BUG_STATUS=$BUG_STATUS"; } >> "$GITHUB_ENV"
 }
 
-# Posts the rendered analysis as a comment on the bug. Called by its own step, after the message
-# has already been written to the job log and the step summary.
+# The body of the Bugzilla comment: a link to the Actions run and, when the fix stage opened one, a link
+# to the draft pull request. The analysis itself stays in the run, so nothing from the repositories (paths,
+# code, names) is copied into the tracker. Returns 1 when there is nothing to link to.
+_publish_body() {
+  local RUN_URL="" PR_URL=""
+  if [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITEA_HOST:-}" ]; then
+    RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
+  fi
+  if [ -s fix-pr-url.txt ]; then
+    PR_URL=$(head -1 fix-pr-url.txt | tr -d '\r' | tr -d ' ')
+    # Only a plain https link goes into the tracker, whatever the file holds.
+    case "$PR_URL" in https://*) ;; *) PR_URL="" ;; esac
+  fi
+  if [ -z "$RUN_URL" ] && [ -z "$PR_URL" ]; then
+    return 1
+  fi
+  printf 'Claude Bug Triage \xc2\xb7 Bug %s\n' "$BUG_ID"
+  if [ -n "$RUN_URL" ]; then printf 'Analysis: %s\n' "$RUN_URL"; fi
+  if [ -n "$PR_URL" ]; then printf 'Pull request (draft, not reviewed): %s\n' "$PR_URL"; fi
+  return 0
+}
+
+# Posts a short comment on the bug: a link to this run and, if one was opened, to the draft pull request.
+# Called by its own step, after the full message has already been written to the job log and the step summary.
 #
 # A comment, never the description: the description is the reporter's text and belongs to them.
 #
-# The tracker is closed - show_bug.cgi serves a login page to an anonymous request and the REST
-# API answers 401 - so the private repository names and paths in the message stay inside. That is
-# the reason this is allowed to post at all, and the reason to check again before ever opening the
-# tracker up.
+# Links only, not the analysis: the run holds the full text, so the tracker never carries repository paths
+# or code, and nobody has to maintain two copies of the same message.
 #
 # Nothing is posted for a run that has nothing to say: a deliberate skip, a fallback where the
 # analysis should be, or an empty message. A bug thread is read by people, and "the pipeline could
@@ -739,15 +759,19 @@ publish_triage_comment() {
     return 0
   fi
 
-  local CODE
+  local BODY CODE
+  if ! BODY=$(_publish_body); then
+    echo "::warning::No run or pull request link to publish for bug $BUG_ID"
+    return 0
+  fi
   CODE=$(curl -s --max-time 45 --retry 2 --retry-delay 3 -o publish-response.json -w '%{http_code}' \
     -X POST -H "Content-Type: application/json" \
     "https://$BUGZILLA_HOST/rest/bug/$BUG_ID/comment?api_key=$BUGZILLA_API_KEY" \
-    -d "$(jq -Rs '{comment: .}' < triage-message.txt)")
+    -d "$(printf '%s\n' "$BODY" | jq -Rs '{comment: .}')")
   # Never fatal. The analysis is already in the log, the summary and the artifacts; a tracker that
   # refuses the write must not turn a finished run red.
   if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
-    echo "Posted the analysis as a comment on bug $BUG_ID (HTTP $CODE)"
+    echo "Posted the run link as a comment on bug $BUG_ID (HTTP $CODE)"
   else
     echo "::warning::Could not post the comment on bug $BUG_ID (HTTP $CODE): $(head -c 200 publish-response.json | tr -d '\n')"
     # A finished analysis that never reached the bug is worth a message: nothing outside this

@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       publish:
-        description: 'Post the analysis as a comment on the bug'
+        description: 'Post a link to this run (and to the pull request, if one is opened) as a comment on the bug'
         required: false
         type: string
         default: 'true'
