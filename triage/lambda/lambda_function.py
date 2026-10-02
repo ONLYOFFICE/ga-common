@@ -19,6 +19,11 @@ WORKFLOW_REPO = os.getenv("WORKFLOW_REPO", "ga-common")
 WORKFLOW_ID = os.getenv("WORKFLOW_ID", "bugzilla-triage.yml")
 WORKFLOW_REF = os.getenv("WORKFLOW_REF", "master")
 RETURN_RUN_DETAILS = os.getenv("RETURN_RUN_DETAILS", "false").lower() == "true"
+# The webhook is said to carry only the bug id. With both of these set, the bug is read from Bugzilla
+# before it is judged, and product, assignee and restrictions come from there; without either, the
+# payload is all there is. The key comes from the credentials secret (see bootstrap.py): read-only.
+BUGZILLA_HOST = os.getenv("BUGZILLA_HOST", "")
+BUGZILLA_LOOKUP_FIELDS = "id,product,component,assigned_to,groups,cf_security,status"
 
 ALLOWED_ACTIONS = tuple(
     value.strip()
@@ -71,6 +76,8 @@ def load_config():
             "RETURN_RUN_DETAILS",
             "true" if RETURN_RUN_DETAILS else "false",
         ).lower() == "true",
+        "bugzilla_host": os.getenv("BUGZILLA_HOST", BUGZILLA_HOST).strip(),
+        "bugzilla_api_key": os.getenv("BUGZILLA_API_KEY", ""),
         "allowed_actions": tuple(
             value.strip()
             for value in os.getenv("ALLOWED_ACTIONS", ",".join(ALLOWED_ACTIONS)).split(",")
@@ -299,6 +306,53 @@ def dispatch_workflow(config, inputs):
         return 599, str(error)
 
 
+class BugLookupError(Exception):
+    """The lookup failed. The message never holds the URL: it carries the API key."""
+
+
+def fetch_bug(config, bug_id):
+    """The bug as Bugzilla has it, or None when there is no such bug.
+
+    A bug the key cannot see (a restricted group) comes back as a bug with a group, so the confidentiality
+    check refuses it like any other restricted bug. Anything else that goes wrong raises BugLookupError."""
+    query = urllib.parse.urlencode({"api_key": config["bugzilla_api_key"], "include_fields": BUGZILLA_LOOKUP_FIELDS})
+    url = f"https://{config['bugzilla_host']}/rest/bug/{urllib.parse.quote(str(bug_id), safe='')}?{query}"
+    request = urllib.request.Request(
+        url=url,
+        headers={"Accept": "application/json", "User-Agent": "ga-common-bugzilla-triage-dispatch-lambda"},
+    )
+
+    last = "no attempt"
+    for _ in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=8) as result:
+                data = json.loads(result.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as error:
+            try:
+                code = json.loads(error.read().decode("utf-8", errors="replace")).get("code")
+            except (ValueError, AttributeError):
+                code = None
+            if code == 101:
+                return None
+            if code == 102:
+                return {"groups": ["not visible to the lookup key"]}
+            last = f"HTTP {error.code}" + (f" (Bugzilla code {code})" if code else "")
+            if error.code < 500:
+                break
+            continue
+        except Exception as error:  # noqa: BLE001 - network, DNS, timeout, bad JSON
+            last = type(error).__name__
+            continue
+
+        bugs = data.get("bugs") if isinstance(data, dict) else None
+        if not isinstance(bugs, list) or not bugs or not isinstance(bugs[0], dict):
+            return None
+
+        return bugs[0]
+
+    raise BugLookupError(last)
+
+
 def log_event(name, **fields):
     """One JSON line to CloudWatch. Structure and decisions only: never a token, a body or a login."""
     print(json.dumps({"event": name, **fields}, default=str, sort_keys=True))
@@ -356,13 +410,30 @@ def handle_event(event):
         log_event("received", action=action, target=target, payload_keys=sorted(payload) if isinstance(payload, dict) else None)
         return response(400, {"ok": False, "error": str(error)})
 
-    # What the webhook actually carries: the names of the fields, and whether product and assignee are in it.
+    payload_keys = sorted(bug)
+    lookup = "off"
+    if config["bugzilla_host"] and config["bugzilla_api_key"]:
+        try:
+            fetched = fetch_bug(config, bug_id)
+        except BugLookupError as error:
+            log_event("received", bug_id=bug_id, action=action, target=target, bug_keys=payload_keys, lookup="failed", error=str(error))
+            return response(502, {"ok": False, "error": "Bugzilla lookup failed", "bug_id": bug_id})
+
+        if fetched is None:
+            log_event("received", bug_id=bug_id, action=action, target=target, bug_keys=payload_keys, lookup="not found")
+            return response(200, {"ok": True, "ignored": True, "reason": "bug not found", "bug_id": bug_id})
+
+        bug = {**bug, **fetched}
+        lookup = "ok"
+
+    # What the webhook actually carries (the names of its fields), and what the judgement below is based on.
     log_event(
         "received",
         bug_id=bug_id,
         action=action,
         target=target,
-        bug_keys=sorted(bug),
+        bug_keys=payload_keys,
+        lookup=lookup,
         product=product_name(bug),
         component=component_name(bug),
         assignee_present=bool(assignee_login(bug)),
