@@ -25,13 +25,23 @@ ALLOWED_ACTIONS = tuple(
     for value in os.getenv("ALLOWED_ACTIONS", "create").split(",")
     if value.strip()
 )
-# Temporarily "Install" only, so bugs in other products never start a run at all. Set ALLOWED_PRODUCTS
-# to "*" (or change this default back) to lift the limit: which products are then routable is decided
-# by the routing map the workflow fetches (buildserver:claude_bugzilla_triage/product-repos.json), and
-# a bug in an unmapped product starts a run that stops at the workflow's own product gate.
+# "*" by default: which products are actually routable is decided by the routing map the workflow
+# fetches (buildserver:claude_bugzilla_triage/product-repos.json), and keeping a second copy of
+# that list here only lets the two drift apart. A bug in an unmapped product therefore starts a run
+# that stops at the workflow's own product gate, before the sandbox and before any model spend. Set
+# an explicit comma-separated list here when you would rather such a bug never start a run at all.
 ALLOWED_PRODUCTS = tuple(
     value.strip()
-    for value in os.getenv("ALLOWED_PRODUCTS", "Install").split(",")
+    for value in os.getenv("ALLOWED_PRODUCTS", "*").split(",")
+    if value.strip()
+)
+# Temporary rollout limit, unset by default (no limit): a comma-separated list of Bugzilla logins in
+# full, e.g. "first.last@example.com". A bug assigned to anyone else never starts a run; an
+# unassigned one does not either. Only this webhook is limited: the workflow itself can still be
+# started by hand for any bug.
+ONLY_ASSIGNEES = tuple(
+    value.strip()
+    for value in os.getenv("TRIAGE_ONLY_ASSIGNEES", "").split(",")
     if value.strip()
 )
 ALLOWED_COMPONENTS = tuple(
@@ -69,6 +79,11 @@ def load_config():
         "allowed_products": tuple(
             value.strip()
             for value in os.getenv("ALLOWED_PRODUCTS", ",".join(ALLOWED_PRODUCTS)).split(",")
+            if value.strip()
+        ),
+        "only_assignees": tuple(
+            value.strip()
+            for value in os.getenv("TRIAGE_ONLY_ASSIGNEES", ",".join(ONLY_ASSIGNEES)).split(",")
             if value.strip()
         ),
         "allowed_components": tuple(
@@ -222,6 +237,21 @@ def product_name(bug):
     return str(value or "")
 
 
+def assignee_login(bug):
+    """The assignee's Bugzilla login, whichever shape the webhook sends it in: a plain string, an object
+    with login/email/name, or the REST-style assigned_to_detail object."""
+    for key in ("assigned_to", "assigned_to_detail"):
+        value = bug.get(key)
+        if isinstance(value, dict):
+            for field in ("login", "email", "name"):
+                if value.get(field):
+                    return str(value[field]).strip()
+        elif value:
+            return str(value).strip()
+
+    return ""
+
+
 def component_name(bug):
     value = bug.get("component")
     if isinstance(value, dict):
@@ -312,6 +342,10 @@ def lambda_handler(event, context):
     component = component_name(bug)
     if not is_allowed(component, config["allowed_components"]):
         return response(200, {"ok": True, "ignored": True, "reason": "component not allowed", "component": component})
+
+    assignee = assignee_login(bug)
+    if not is_allowed(assignee, config["only_assignees"]):
+        return response(200, {"ok": True, "ignored": True, "reason": "assignee outside the current rollout", "assignee": assignee})
 
     status, body = dispatch_workflow(config, {"bug_id": bug_id})
     if status < 200 or status >= 300:
