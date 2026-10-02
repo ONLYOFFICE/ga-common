@@ -299,8 +299,31 @@ def dispatch_workflow(config, inputs):
         return 599, str(error)
 
 
+def log_event(name, **fields):
+    """One JSON line to CloudWatch. Structure and decisions only: never a token, a body or a login."""
+    print(json.dumps({"event": name, **fields}, default=str, sort_keys=True))
+
+
 def lambda_handler(event, context):
     del context
+    result = handle_event(event)
+    try:
+        outcome = json.loads(result["body"])
+    except (KeyError, TypeError, ValueError):
+        outcome = {}
+
+    log_event(
+        "outcome",
+        http=result.get("statusCode"),
+        status=outcome.get("status"),
+        reason=outcome.get("reason"),
+        error=outcome.get("error"),
+        bug_id=outcome.get("bug_id"),
+    )
+    return result
+
+
+def handle_event(event):
     config = load_config()
 
     for key in ("gitea_url", "gitea_token"):
@@ -330,7 +353,20 @@ def lambda_handler(event, context):
     try:
         bug, bug_id = extract_bug(payload)
     except ValueError as error:
+        log_event("received", action=action, target=target, payload_keys=sorted(payload) if isinstance(payload, dict) else None)
         return response(400, {"ok": False, "error": str(error)})
+
+    # What the webhook actually carries: the names of the fields, and whether product and assignee are in it.
+    log_event(
+        "received",
+        bug_id=bug_id,
+        action=action,
+        target=target,
+        bug_keys=sorted(bug),
+        product=product_name(bug),
+        component=component_name(bug),
+        assignee_present=bool(assignee_login(bug)),
+    )
 
     if is_confidential(bug):
         return response(200, {"ok": True, "ignored": True, "reason": "restricted bug", "bug_id": bug_id})
