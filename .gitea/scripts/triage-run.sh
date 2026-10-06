@@ -907,9 +907,8 @@ notify_result() {
     return 0
   fi
 
-  local CONFIDENCE NOTE PR_URL="" PR_LINE RUN_URL="" TEXT CHAT_ID CODE
+  local CONFIDENCE PR_URL="" PR_LINE RUN_URL="" TEXT CHAT_ID CODE
   CONFIDENCE=$(_plain_line "$(jq -r '.summary.confidence // "unstated"' claude-structured.json 2>/dev/null || true)" 20)
-  NOTE=$(_plain_line "$(jq -r '.summary.note_kind // ""' claude-structured.json 2>/dev/null || true)" 40)
 
   if [ -s fix-pr-url.txt ]; then
     PR_URL=$(head -1 fix-pr-url.txt | tr -d '\r ')
@@ -926,7 +925,7 @@ notify_result() {
     RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
   fi
 
-  TEXT=$(printf 'Bug %s · %s%s' "$BUG_ID" "$CONFIDENCE" "${NOTE:+ · $NOTE}")
+  TEXT=$(printf 'Bug %s · %s' "$BUG_ID" "$CONFIDENCE")
   TEXT+=$(printf '\n%s' "$PR_LINE")
   if [ -n "$RUN_URL" ]; then TEXT+=$(printf '\nRun: %s' "$RUN_URL"); fi
 
@@ -1305,10 +1304,12 @@ fix_eligibility() {
     FIX_WHY="confidence is '${CONFIDENCE:-unstated}', not high or medium"
     return 1
   fi
-  # Any note_kind at all is the analysis saying "this is not a plain defect in code I could read":
-  # the cause is elsewhere, or it may be intended, or the report is too thin.
-  if [ -n "$NOTE_KIND" ]; then
-    FIX_WHY="the analysis flagged '$NOTE_KIND'"
+  # A note_kind is the analysis saying "this is not a plain defect in code I could read": the cause is
+  # elsewhere, or it may be intended, or the report is too thin. several_repositories is the exception: it
+  # only says the bug reaches past one repository, and the first location is still a change worth proposing
+  # (the pull request says so). A cause in code it was not given is refused below through missing_repository.
+  if [ -n "$NOTE_KIND" ] && [ "$NOTE_KIND" != "several_repositories" ]; then
+    FIX_WHY="the analysis flagged '${NOTE_KIND//_/ }'"
     return 1
   fi
   if [ -n "$MISSING" ]; then
@@ -1544,7 +1545,8 @@ open_fix_pr() {
     return 0
   fi
 
-  local RUN_URL="" BODY PAYLOAD RESPONSE PR_URL ANALYSIS_BLOCK ANALYSIS_CONFIDENCE
+  local RUN_URL="" BODY PAYLOAD RESPONSE PR_URL ANALYSIS_BLOCK ANALYSIS_CONFIDENCE NOTE_KIND
+  NOTE_KIND=$(jq -r '.summary.note_kind // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   ANALYSIS_BLOCK=$(_pr_analysis_block || true)
   ANALYSIS_CONFIDENCE=$(jq -r '.summary.confidence // "unstated"' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   if [ -n "${GITHUB_RUN_ID:-}" ]; then
@@ -1553,6 +1555,9 @@ open_fix_pr() {
   BODY="**Automated proposal for Bug $BUG_ID.** Written by the Claude Bug Triage pipeline and **not reviewed by a person**; treat it as a suggestion to check, not a change to trust."
   BODY+=$'\n\n'"**What it does** (the fix session's own confidence: $FIX_CONFIDENCE):"$'\n'"$(_fenced_block "$SUMMARY")"
   BODY+=$'\n\n'"**Analysis confidence:** ${ANALYSIS_CONFIDENCE:-unstated}"
+  if [ "$NOTE_KIND" = "several_repositories" ]; then
+    BODY+=$'\n\n'"**Heads up:** the analysis found more than one repository involved in this bug. This change is only the part in \`$REPO\`."
+  fi
   if [ -n "$UNVERIFIED" ]; then
     BODY+=$'\n\n'"**Not verified:**"$'\n'"$(_fenced_block "$UNVERIFIED")"
   fi
