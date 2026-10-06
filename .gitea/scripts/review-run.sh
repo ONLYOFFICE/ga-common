@@ -369,6 +369,11 @@ prepare_review_context() {
     done
   fi
 
+  # A forced re-review of the same SHA has no delta (an empty range, "nothing new" to the guard below), so review the whole PR.
+  if [ "${FORCE_REVIEW:-false}" = "true" ] && [ "${PREVIOUS_SHA:-}" = "$PR_SHA" ]; then
+    PREV_AVAILABLE=false
+  fi
+
   # --- submodule-only guard: skip when the only changes are submodule gitlink bumps ---
   # A gitlink entry (mode 160000 both sides) is just a commit-pointer bump - the real change lives
   # in the submodule's own history/review, not this repo's diff. Strict: any other changed path
@@ -451,7 +456,8 @@ prepare_review_context() {
   # duplicate hasn't done yet) - if the tracked comment already shows a completed result for
   # $PR_SHA by the time we get here, a concurrent duplicate beat us to it; don't bury its real
   # result under our own "Analyzing..." placeholder just to do the same work over again.
-  if [ -n "$REVIEW_COMMENT_ID" ]; then
+  # An explicit force skips this: runs on one PR queue (no cancel-in-progress), so the completed result is the very one being redone.
+  if [ -n "$REVIEW_COMMENT_ID" ] && [ "${FORCE_REVIEW:-false}" != "true" ]; then
     local EXISTING_BODY
     EXISTING_BODY=$(gitea_api "$REPO_PATH/issues/comments/$REVIEW_COMMENT_ID" 2>/dev/null | jq -r '.body // empty')
     if grep -qF "<!-- Claude-Review:${PR_SHA} -->" <<< "$EXISTING_BODY" && grep -q '<!-- claude-review-state:' <<< "$EXISTING_BODY"; then
