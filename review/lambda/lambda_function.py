@@ -37,6 +37,11 @@ NOT_ALLOWED_REPOSITORIES = tuple(
     for value in os.getenv("NOT_ALLOWED_REPOSITORIES", "").split(",")
     if value.strip()
 )
+CHECK_ONLY_REPOSITORIES = tuple(
+    value.strip()
+    for value in os.getenv("CHECK_ONLY_REPOSITORIES", "").split(",")
+    if value.strip()
+)
 # Default WIP title prefixes (comma-separated string). Override with WIP_PREFIXES env var.
 # Matching is case-insensitive with an alphanumeric-continuation guard: a bare prefix like "WIP"
 # matches "WIP", "WIP:", "WIP - x", "WIP foo" but never "WIPe".
@@ -79,6 +84,14 @@ def load_config():
             for value in os.getenv(
                 "NOT_ALLOWED_REPOSITORIES",
                 ",".join(NOT_ALLOWED_REPOSITORIES),
+            ).split(",")
+            if value.strip()
+        ),
+        "check_only_repositories": tuple(
+            value.strip()
+            for value in os.getenv(
+                "CHECK_ONLY_REPOSITORIES",
+                ",".join(CHECK_ONLY_REPOSITORIES),
             ).split(",")
             if value.strip()
         ),
@@ -316,6 +329,13 @@ def lambda_handler(event, context):
             {"ok": True, "ignored": True, "reason": "repository explicitly not allowed"},
         )
 
+    # Review is skipped for these repositories, but the non-ASCII comment check still runs.
+    check_only = is_repository_not_allowed(
+        full_name,
+        inputs["repo_name"],
+        config["check_only_repositories"],
+    )
+
     if not is_repository_allowed(full_name, inputs["repo_name"], config["allowed_repositories"]):
         return response(200, {"ok": True, "ignored": True, "reason": "repository not allowed"})
 
@@ -323,7 +343,10 @@ def lambda_handler(event, context):
         return response(200, {"ok": True, "ignored": True, "reason": "base branch not allowed"})
 
     pr_url = f"{config['gitea_url']}/{full_name}/pulls/{inputs['pr_number']}"
-    status, body = dispatch_workflow(config, {"pr_url": pr_url})
+    dispatch_inputs = {"pr_url": pr_url}
+    if check_only:
+        dispatch_inputs["check_only"] = "true"
+    status, body = dispatch_workflow(config, dispatch_inputs)
     if status < 200 or status >= 300:
         return response(
             502,
@@ -340,6 +363,7 @@ def lambda_handler(event, context):
         "status": "dispatched",
         "repository": full_name,
         "pr_number": inputs["pr_number"],
+        "check_only": check_only,
         "workflow": f"{config['workflow_owner']}/{config['workflow_repo']}/{config['workflow_id']}",
         "ref": config["workflow_ref"],
     }

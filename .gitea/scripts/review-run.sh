@@ -2,6 +2,7 @@
 # Everything the claude-review.yml workflow runs on the runner, one subcommand per step:
 #
 #   review-run.sh prepare        resolve the PR, pick the effort, fetch bug and discussion context
+#   review-run.sh fetch-diff     check-only mode: just fetch the PR diff for the non-ASCII gate
 #   review-run.sh english-check  the non-ASCII comment gate (its own commit status)
 #   review-run.sh sandbox        run the review in the isolated container
 #   review-run.sh post           render the review, post the comment and set the commit status
@@ -966,6 +967,21 @@ summarize_claude_review() {
 # Entry points
 # =====================================================================
 
+# Check-only mode: fetches just the diff for the non-ASCII gate, touching no review comment or review status.
+fetch_pr_diff_only() {
+  if is_pr_stale; then
+    echo "A newer push landed on this PR since dispatch — skipping (the superseding run owns it)"
+    echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+    return 0
+  fi
+  gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
+  if [ ! -s repo/pr.diff ]; then
+    echo "PR diff is empty — nothing to check"
+    set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "success" "No changes" "Non-ASCII Check"
+    echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+  fi
+}
+
 # The "Non-ASCII comment check" step: passes or fails a commit status of its own and keeps one
 # comment up to date, independently of the review itself.
 check_english_comments() {
@@ -1016,11 +1032,12 @@ review_sandbox_step() {
 review_main() {
   case "${1:-}" in
     prepare)        prepare_review_context ;;
+    fetch-diff)     fetch_pr_diff_only ;;
     english-check)  check_english_comments ;;
     sandbox)        review_sandbox_step ;;
     post)           post_review_and_set_status ;;
     *)
-      echo "usage: review-run.sh {prepare|english-check|sandbox|post}" >&2
+      echo "usage: review-run.sh {prepare|fetch-diff|english-check|sandbox|post}" >&2
       return 2
       ;;
   esac

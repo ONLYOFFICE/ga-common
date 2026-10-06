@@ -329,6 +329,7 @@ render_claude_review() {
   RUNS_JSON="$(jq -c --arg t "$CUTOFF" --arg wf "claude-review.yml" '
     (.workflow_runs // []) as $r
     | [$r[] | select(.status=="completed")
+      | select((.display_title // "") | startswith("Check") | not)
       | select((.path//"" | split("@")[0] | (. == $wf or endswith("/"+$wf))))
       | select((.created_at//.started_at//.updated_at//"") >= $t)
       | {id, display_title, html_url}]
