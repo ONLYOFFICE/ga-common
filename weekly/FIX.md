@@ -21,7 +21,7 @@ Those are hypotheses from a review pass, not facts. Read the code each one point
 
 ## Where to work
 
-The repository is checked out at `/workspace/fix`, on the current head of `$BRANCH`, as a git repository with its history. Edit files in that directory only. Earlier fixes from this same run may already be committed on top of the head; build on them, and never undo them.
+The repository is checked out at `/workspace/fix`, on the current head of `$BRANCH`, as a git repository with its history. Edit files in that directory only. Fixes for other commits are written separately against the same head and are not present here: do not assume them, and do not try to anticipate them.
 
 ## Rules
 

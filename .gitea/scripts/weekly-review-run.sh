@@ -21,7 +21,8 @@
 # WEEKLY_LARGE_COMMIT_LINES (2000, from there a review gets a bigger budget and timeout), WEEKLY_EXCLUDE_REF (commits reachable from it are not reviewed),
 # WEEKLY_MIN_SEVERITY (medium), WEEKLY_MIN_CONFIDENCE (likely), WEEKLY_TOTAL_BUDGET_USD (60),
 # WEEKLY_DRY_RUN ("true" validates everything and pushes nothing), WEEKLY_MAX_OPEN (1, open pull
-# requests of this pipeline per base branch).
+# requests of this pipeline per base branch), WEEKLY_DEADLINE_MINUTES (220, no new commit is started
+# after this long into the sandbox step, so the job timeout never kills a run that has results).
 
 set -euo pipefail
 
@@ -34,6 +35,7 @@ WEEKLY_MIN_SEVERITY="${WEEKLY_MIN_SEVERITY:-medium}"
 WEEKLY_MIN_CONFIDENCE="${WEEKLY_MIN_CONFIDENCE:-likely}"
 WEEKLY_TOTAL_BUDGET_USD="${WEEKLY_TOTAL_BUDGET_USD:-60}"
 WEEKLY_MAX_OPEN="${WEEKLY_MAX_OPEN:-1}"
+WEEKLY_DEADLINE_MINUTES="${WEEKLY_DEADLINE_MINUTES:-220}"
 WEEKLY_BRANCH_PREFIX="claude-weekly/"
 WEEKLY_GIT_NAME="${WEEKLY_GIT_NAME:-Claude Weekly Review}"
 WEEKLY_GIT_EMAIL="${WEEKLY_GIT_EMAIL:-claude-weekly@noreply.${GITEA_HOST:-localhost}}"
@@ -117,10 +119,12 @@ _list_candidate_branches() {
     return 0
   fi
   # Only the branch with the highest version number: older release lines are no longer being worked on.
-  # A hotfix wins a tie with a release of the same version, and a name with no number in it is ignored.
+  # A hotfix wins a tie with a release of the same version. The version must open the name and be dotted
+  # (v4.0.0, 4.0.1-rc1): a number anywhere else (hotfix/bug-12345, release/2026-q4) is not a version.
   local VERSION RANK
   while IFS= read -r BRANCH; do
-    VERSION=$(grep -oE '[0-9]+(\.[0-9]+)*' <<< "${BRANCH#*/}" | head -1 || true)
+    VERSION=""
+    [[ "${BRANCH#*/}" =~ ^v?([0-9]+(\.[0-9]+)+) ]] && VERSION="${BASH_REMATCH[1]}"
     [ -n "$VERSION" ] || continue
     RANK=0
     [ "${BRANCH%%/*}" = "hotfix" ] && RANK=1
@@ -137,6 +141,9 @@ _triage_commit() {
   SAFE_SUBJECT=$(_sanitize "$SUBJECT" 150)
   if [ "$AUTHOR_EMAIL" = "$WEEKLY_GIT_EMAIL" ]; then
     REASON="written by this pipeline"
+  elif [[ "$SUBJECT" == "Weekly review fixes for "* || "$SUBJECT" == "WIP: Weekly review fixes for "* ]]; then
+    # A squash merge takes its author from whoever opened the pull request, not from the fix commits.
+    REASON="the merge of this pipeline's own pull request"
   elif [ "$(git -C "$SRC" rev-list --parents -n 1 "$SHA" | wc -w | tr -d ' ')" -lt 2 ]; then
     REASON="the root commit has nothing to compare with"
   else
@@ -160,6 +167,11 @@ prepare_weekly_context() {
   [[ "$WEEKLY_SINCE_DAYS" =~ ^[0-9]{1,3}$ ]] || { echo "::error::since_days must be a number, got '$WEEKLY_SINCE_DAYS'"; return 1; }
   [[ "$WEEKLY_MAX_COMMITS" =~ ^[0-9]{1,3}$ ]] || { echo "::error::max_commits must be a number, got '$WEEKLY_MAX_COMMITS'"; return 1; }
   [[ "$WEEKLY_LARGE_COMMIT_LINES" =~ ^[0-9]{1,6}$ ]] || { echo "::error::large_commit_lines must be a number, got '$WEEKLY_LARGE_COMMIT_LINES'"; return 1; }
+  # An unparsable budget reads as 0 in awk and would silently review nothing, so it is refused up front.
+  [[ "$WEEKLY_TOTAL_BUDGET_USD" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::total_budget_usd must be a number like 60 or 12.5, got '$WEEKLY_TOTAL_BUDGET_USD'"; return 1; }
+  [[ "$WEEKLY_DEADLINE_MINUTES" =~ ^[0-9]{1,4}$ ]] || { echo "::error::deadline must be a number of minutes, got '$WEEKLY_DEADLINE_MINUTES'"; return 1; }
+  case "$WEEKLY_MIN_SEVERITY" in low|medium|critical) ;; *) echo "::error::Invalid min severity '$WEEKLY_MIN_SEVERITY'"; return 1 ;; esac
+  case "$WEEKLY_MIN_CONFIDENCE" in unsure|likely|sure) ;; *) echo "::error::Invalid min confidence '$WEEKLY_MIN_CONFIDENCE'"; return 1 ;; esac
   if [ -n "${WEEKLY_EXCLUDE_REF:-}" ] && ! [[ "$WEEKLY_EXCLUDE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
     echo "::error::Invalid exclude_ref '$WEEKLY_EXCLUDE_REF'"
     return 1
@@ -175,7 +187,7 @@ prepare_weekly_context() {
 
   local BRANCHES_FILE="$WORK_DIR/branches.txt" INDEX=0 BRANCH BRANCH_DIR OPEN_PR COMMITS_FILE TOTAL
   : > "$BRANCHES_FILE"
-  local RANGE_ARGS
+  local RANGE_ARGS HELD_BACK=0
   while IFS= read -r BRANCH; do
     [ -n "$BRANCH" ] || continue
     if ! OPEN_PR=$(_open_weekly_pr "$BRANCH"); then
@@ -185,6 +197,10 @@ prepare_weekly_context() {
     fi
     if [ -n "$OPEN_PR" ]; then
       echo "$BRANCH already has $OPEN_PR open pull request(s) from this pipeline - skipping it"
+      # Not a quiet week: the window is relative to now, so this week's commits are not reviewed later
+      # unless somebody reruns it with a longer since_days once the old pull request is merged or closed.
+      _weekly_notice "weekly review skipped $BRANCH: an earlier pull request of this pipeline is still open (merge or close it, then run with since_days set to cover the gap)"
+      HELD_BACK=$((HELD_BACK + 1))
       continue
     fi
 
@@ -227,7 +243,11 @@ prepare_weekly_context() {
   done < <(_list_candidate_branches "$WORK_DIR/src")
 
   if [ "$INDEX" -eq 0 ]; then
-    _skip_run "no release or hotfix branch has a commit to review in the last $WEEKLY_SINCE_DAYS days"
+    if [ "$HELD_BACK" -gt 0 ]; then
+      _skip_run "the latest branch was held back by an open pull request of this pipeline"
+    else
+      _skip_run "no release or hotfix branch has a commit to review in the last $WEEKLY_SINCE_DAYS days"
+    fi
     return 0
   fi
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -425,10 +445,31 @@ _install_prompt() {
   docker exec "$SANDBOX_NAME" chown node:node "/workspace/prompts/$NAME.txt"
 }
 
-# Puts the fix workspace back on the head of BASE_REF, discarding whatever a session left behind.
+# Puts the fix workspace back on the given commit, discarding whatever a session left behind. Fails
+# when it could not, so a caller about to start a paid session can refuse to.
 _reset_fix_workspace() {
   docker exec --user node -w /workspace/fix "$SANDBOX_NAME" bash -c \
-    'git reset -q --hard "$1" && git clean -fdxq' _ "$1" > /dev/null 2>&1 || true
+    'git reset -q --hard "$1" && git clean -fdxq' _ "$1" > /dev/null 2>&1
+}
+
+# Said once per run: every later commit would repeat it, and this is the one case where "every commit" was not met.
+_note_run_limit_once() {
+  grep -q 'later commits were not reviewed' pipeline-notice.txt 2>/dev/null \
+    || _weekly_notice "weekly review: $1, later commits were not reviewed"
+}
+
+# Sets LIMIT_REASON and returns 0 when no new commit may be started: the money or the time is spent.
+# The time limit is what keeps the job timeout from killing a run that still holds finished fixes.
+_run_limit_reached() {
+  LIMIT_REASON=""
+  if ! _budget_left; then
+    LIMIT_REASON="the budget of the run (\$$WEEKLY_TOTAL_BUDGET_USD) was spent"
+  elif [ "$SECONDS" -ge $((WEEKLY_DEADLINE_MINUTES * 60)) ]; then
+    LIMIT_REASON="the time limit of the run ($WEEKLY_DEADLINE_MINUTES minutes) was reached"
+  else
+    return 1
+  fi
+  return 0
 }
 
 # Turns the fix session's working tree into claude-output/LABEL.patch, relative to the head it started on.
@@ -447,19 +488,21 @@ _collect_fix_patch() {
 # result.json of one commit: what the commit was, what the review found, what the fix did.
 _write_commit_result() {
   local CDIR="$1" STATUS="$2" REASON="$3"
-  local SELECTED FIX="null" BELOW=0
+  local SELECTED FIX="null" BELOW=0 CUT=0
   SELECTED=$(jq -c '.' "$CDIR/selected.json" 2>/dev/null || echo '[]')
   [ -s "$CDIR/fix.json" ] && FIX=$(jq -c '{title, summary, confidence, not_verified, results}' "$CDIR/fix.json" 2>/dev/null || echo null)
   if [ -s "$CDIR/counts.txt" ]; then
-    BELOW=$(awk '{ print ($2 > $1) ? $2 - $1 : 0 }' "$CDIR/counts.txt")
+    # counts.txt is "kept qualifying total": below the threshold = total - qualifying, over the per-commit cap = qualifying - kept.
+    BELOW=$(awk '{ print ($3 > $2) ? $3 - $2 : 0 }' "$CDIR/counts.txt")
+    CUT=$(awk '{ print ($2 > $1) ? $2 - $1 : 0 }' "$CDIR/counts.txt")
   fi
   local REVIEW_SUMMARY=""
   [ -s "$CDIR/review.json" ] && REVIEW_SUMMARY=$(jq -r '.summary // ""' "$CDIR/review.json" 2>/dev/null | tr -d '\r' || true)
   jq -n --arg sha "$COMMIT_SHA" --arg subject "$COMMIT_SUBJECT" --arg author "$COMMIT_AUTHOR" \
-    --arg status "$STATUS" --arg reason "$REASON" --argjson selected "$SELECTED" --argjson fix "$FIX" --argjson below "$BELOW" \
+    --arg status "$STATUS" --arg reason "$REASON" --argjson selected "$SELECTED" --argjson fix "$FIX" --argjson below "$BELOW" --argjson cut "$CUT" \
     --argjson lines "${COMMIT_LINES:-0}" --arg summary "$REVIEW_SUMMARY" \
     '{sha: $sha, subject: $subject, author: $author, status: $status, reason: $reason, lines: $lines, review_summary: $summary,
-      findings_selected: $selected, findings_below_threshold: $below, fix: $fix}' > "$CDIR/result.json"
+      findings_selected: $selected, findings_below_threshold: $below, findings_cut: $cut, fix: $fix}' > "$CDIR/result.json"
 }
 
 # Reviews one commit and, when it has findings worth a fix, writes the fix. Never fatal: a commit that
@@ -470,12 +513,10 @@ review_one_commit() {
   local LABEL="b$INDEX-c$NUMBER"
   mkdir -p "$CDIR"
 
-  if ! _budget_left; then
-    echo "::warning::The run budget of \$$WEEKLY_TOTAL_BUDGET_USD is spent - $COMMIT_SHA is not reviewed"
-    # Said once per run: every later commit would repeat it, and this is the one case where "every commit" was not met.
-    grep -q 'run budget' pipeline-notice.txt 2>/dev/null \
-      || _weekly_notice "weekly review: the run budget of \$$WEEKLY_TOTAL_BUDGET_USD was spent, later commits were not reviewed (raise total_budget_usd)"
-    _write_commit_result "$CDIR" "not-reviewed" "the budget of the run was spent before this commit"
+  if _run_limit_reached; then
+    echo "::warning::$LIMIT_REASON - $COMMIT_SHA is not reviewed"
+    _note_run_limit_once "$LIMIT_REASON"
+    _write_commit_result "$CDIR" "not-reviewed" "$LIMIT_REASON before this commit"
     return 0
   fi
 
@@ -510,10 +551,10 @@ review_one_commit() {
   fi
 
   python3 .gitea/scripts/weekly-review-tools.py select --findings "$CDIR/review.json" --out "$CDIR/selected.json" \
-    --text-out "$CDIR/findings.txt" --min-severity "$WEEKLY_MIN_SEVERITY" --min-confidence "$WEEKLY_MIN_CONFIDENCE" > "$CDIR/counts.txt"
-  local SELECTED_COUNT
-  SELECTED_COUNT=$(awk '{ print $1 }' "$CDIR/counts.txt")
-  echo "  $SELECTED_COUNT finding(s) at or above the threshold, $(awk '{ print $2 }' "$CDIR/counts.txt") in all"
+    --text-out "$CDIR/findings.txt" --min-severity "$WEEKLY_MIN_SEVERITY" --min-confidence "$WEEKLY_MIN_CONFIDENCE" | tr -d '' > "$CDIR/counts.txt"
+  local SELECTED_COUNT QUALIFYING_COUNT TOTAL_COUNT
+  read -r SELECTED_COUNT QUALIFYING_COUNT TOTAL_COUNT < "$CDIR/counts.txt"
+  echo "  $SELECTED_COUNT finding(s) selected ($QUALIFYING_COUNT at or above the threshold, $TOTAL_COUNT in all)"
   if [ "$SELECTED_COUNT" -eq 0 ]; then
     _write_commit_result "$CDIR" "clean" ""
     return 0
@@ -522,11 +563,11 @@ review_one_commit() {
   FINDINGS=$(cat "$CDIR/findings.txt")
   export FINDINGS
   _install_prompt weekly/FIX.md "$LABEL-fix" "$CDIR/fix-prompt.txt"
-  local BASE_HEAD
-  BASE_HEAD=$(docker exec --user node -w /workspace/fix "$SANDBOX_NAME" git rev-parse HEAD | tr -d '\r')
-  if ! [[ "$BASE_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "::warning::Could not read the head of the fix workspace"
-    _write_commit_result "$CDIR" "fix-failed" "the fix workspace was not ready"
+  # The review session ran in the same container with full write access and read untrusted commit text,
+  # so nothing it may have left in the fix workspace is trusted: the tree goes back to the branch head first.
+  if ! _reset_fix_workspace "$FIX_HEAD"; then
+    echo "::warning::Could not reset the fix workspace - no fix is attempted for $COMMIT_SHA"
+    _write_commit_result "$CDIR" "fix-failed" "the fix workspace could not be reset"
     return 0
   fi
 
@@ -537,7 +578,7 @@ review_one_commit() {
   # A session that timed out or errored leaves a half-finished edit in the tree. It would still be a
   # valid-looking patch, and a plausible broken fix is the one outcome worse than none: it is discarded unread.
   if [ "$FIX_OK" != "true" ]; then
-    _reset_fix_workspace "$BASE_HEAD"
+    _reset_fix_workspace "$FIX_HEAD" || true
     _write_commit_result "$CDIR" "fix-failed" "the fix session did not finish"
     return 0
   fi
@@ -545,28 +586,36 @@ review_one_commit() {
        | EXTRACT_JSON_SCHEMA=weekly/fix-schema.json python3 .gitea/scripts/common.py extract-json > "$CDIR/fix.json"; then
     echo "::warning::Could not read a valid fix description from $LABEL-fix"
     rm -f "$CDIR/fix.json"
-    _reset_fix_workspace "$BASE_HEAD"
+    _reset_fix_workspace "$FIX_HEAD" || true
     _write_commit_result "$CDIR" "fix-failed" "the fix session did not return valid output"
     return 0
   fi
-  if ! _collect_fix_patch "$LABEL-fix" "$BASE_HEAD" || [ ! -s "claude-output/$LABEL-fix.patch" ]; then
-    _reset_fix_workspace "$BASE_HEAD"
-    _write_commit_result "$CDIR" "not-fixed" "$(jq -r '[.results[]? | .note // empty] | join("; ")' "$CDIR/fix.json" | _trim_chars 300)"
+  local NOTES
+  NOTES=$(jq -r '[.results[]? | .note // empty] | join("; ")' "$CDIR/fix.json" | tr -d '\r' | _trim_chars 300)
+  # Every finding marked not_fixed means the session itself found nothing to fix; whatever it touched
+  # anyway (a reformat, a scratch file) is not a fix and is dropped, however non-empty the tree is.
+  if [ "$(jq '[.results[]? | select(.outcome == "fixed")] | length' "$CDIR/fix.json")" = "0" ]; then
+    _reset_fix_workspace "$FIX_HEAD" || true
+    _write_commit_result "$CDIR" "not-fixed" "${NOTES:-the fix session left every finding as it is}"
+    return 0
+  fi
+  if ! _collect_fix_patch "$LABEL-fix" "$FIX_HEAD" || [ ! -s "claude-output/$LABEL-fix.patch" ]; then
+    _reset_fix_workspace "$FIX_HEAD" || true
+    _write_commit_result "$CDIR" "not-fixed" "${NOTES:-the fix session changed nothing}"
     return 0
   fi
   local FIX_CONFIDENCE
   FIX_CONFIDENCE=$(jq -r '.confidence // ""' "$CDIR/fix.json" | tr -d '\r')
   # The schema's enum is a request to the model, not a guarantee: the value is checked here.
   if [ "$FIX_CONFIDENCE" != "high" ] && [ "$FIX_CONFIDENCE" != "medium" ]; then
-    _reset_fix_workspace "$BASE_HEAD"
+    _reset_fix_workspace "$FIX_HEAD" || true
     _write_commit_result "$CDIR" "not-fixed" "the fix session rated its own edit '${FIX_CONFIDENCE:-unstated}'"
     return 0
   fi
   cp "claude-output/$LABEL-fix.patch" "$CDIR/fix.patch"
-  # Committed inside the sandbox too, so the next commit's fix is written on top of this one: the
-  # patches are applied in order on this side, and each must apply to what the previous one left.
-  docker exec --user node -w /workspace/fix "$SANDBOX_NAME" bash -c \
-    'git -c user.name=weekly -c user.email=weekly@localhost commit -q --allow-empty -m "weekly fix"' > /dev/null 2>&1 || true
+  # Every fix is written against the branch head, never on top of an earlier one: a patch that is refused
+  # on the runner then strands nothing else, and a failed step cannot fold one fix into the next.
+  _reset_fix_workspace "$FIX_HEAD" || true
   _write_commit_result "$CDIR" "fixed" ""
   return 0
 }
@@ -582,6 +631,7 @@ review_branch() {
   if ! docker exec --user node -w /workspace/repo -e BRANCH "$SANDBOX_NAME" bash -c \
        'git checkout -q --detach "origin/$BRANCH" && git clean -fdxq'; then
     echo "::warning::Could not check out $BRANCH in the sandbox"
+    _weekly_notice "weekly review skipped $BRANCH: it could not be checked out in the sandbox"
     return 0
   fi
   # The fix workspace is a clone with the same history, so a session can run `git show` on the commit.
@@ -592,6 +642,14 @@ review_branch() {
       git -C /workspace/fix fetch -q /workspace/repo "+refs/remotes/origin/$BRANCH:refs/heads/base"
       git -C /workspace/fix checkout -q base'; then
     echo "::warning::Could not prepare the fix workspace for $BRANCH"
+    _weekly_notice "weekly review skipped $BRANCH: the sandbox could not be prepared"
+    return 0
+  fi
+  # Global, read by review_one_commit: the commit every fix of this branch is written against.
+  FIX_HEAD=$(docker exec --user node -w /workspace/fix "$SANDBOX_NAME" git rev-parse HEAD | tr -d '\r')
+  if ! [[ "$FIX_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "::warning::Could not read the head of the fix workspace for $BRANCH"
+    _weekly_notice "weekly review skipped $BRANCH: the fix workspace head could not be read"
     return 0
   fi
 

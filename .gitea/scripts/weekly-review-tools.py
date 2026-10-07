@@ -25,8 +25,12 @@ SHA_PATTERN = re.compile(r"^[0-9a-f]{7,40}$")
 
 
 def clean(text, limit):
-    """One line, capped by characters, escaped for markdown that may contain model or commit text."""
-    flat = " ".join(str(text or "").split())
+    """One line, capped by characters, escaped for markdown that may contain model or commit text.
+
+    Idempotent on purpose: the shell side already HTML-escapes commit subjects and authors, so the text is
+    unescaped first, and the one escape here is the only one the reader ends up seeing.
+    """
+    flat = " ".join(html.unescape(str(text or "")).split())
     if len(flat) > limit:
         flat = flat[: limit - 1].rstrip() + "..."
     return html.escape(flat.replace("`", "'"), quote=False)
@@ -72,6 +76,7 @@ def main_select(argv):
         and CONFIDENCE_RANK.get(item.get("confidence"), 0) >= CONFIDENCE_RANK[args.min_confidence]
     ]
     chosen.sort(key=lambda item: (-SEVERITY_RANK[item["severity"]], -CONFIDENCE_RANK[item["confidence"]]))
+    qualifying = len(chosen)
     chosen = chosen[: max(args.limit, 0)]
     for number, item in enumerate(chosen, start=1):
         item["id"] = number
@@ -89,7 +94,8 @@ def main_select(argv):
         json.dump(chosen, handle, ensure_ascii=False)
     with open(args.text_out, "w", encoding="utf-8", newline="\n") as handle:
         handle.write("\n".join(lines))
-    print(f"{len(chosen)} {len(findings)}")
+    # "kept qualifying total": what goes to the fix session, what met the threshold, what the review found.
+    print(f"{len(chosen)} {qualifying} {len(findings)}")
     return 0
 
 
@@ -113,6 +119,12 @@ def size_note(result, large_lines):
     return f" ({lines} changed lines{'; review: ' + summary if summary else ''})"
 
 
+def cut_note(result):
+    """Findings that met the threshold but were over the per-commit cap, so nobody assumes they were handled."""
+    cut = int(result.get("findings_cut") or 0)
+    return f" (+{cut} more finding{'s' if cut != 1 else ''} at or above the threshold, not handled: over the cap per commit)" if cut else ""
+
+
 def is_applied(result):
     return result.get("status") == "fixed" and result.get("patch_status", "") in ("applied", "dry-run")
 
@@ -129,7 +141,7 @@ def attention_reason(result):
 
 def render_fixed(result, base_url, large_lines):
     fix = result.get("fix") or {}
-    lines = [f"- {commit_link(result.get('sha'), base_url)} {clean(result.get('subject'), 150)}{size_note(result, large_lines)}"]
+    lines = [f"- {commit_link(result.get('sha'), base_url)} {clean(result.get('subject'), 150)}{size_note(result, large_lines)}{cut_note(result)}"]
     lines.append(f"  - **Fix commit:** {clean(fix.get('title'), 100)} (fix session's own confidence: {clean(fix.get('confidence'), 20) or 'unstated'})")
     for item in result.get("findings_selected") or []:
         location = clean(location_text(item), 200)
@@ -156,7 +168,10 @@ def render(args):
 
     fixed = [result for result in results if is_applied(result)]
     clean_commits = [result for result in results if result.get("status") == "clean"]
-    attention = [result for result in results if not is_applied(result) and result.get("status") != "clean"]
+    unreviewed = [result for result in results if result.get("status") in ("review-failed", "not-reviewed")]
+    attention = [result for result in results
+                 if not is_applied(result) and result.get("status") not in ("clean", "review-failed", "not-reviewed")]
+    reviewed_count = len(results) - len(unreviewed)
 
     skipped = []
     try:
@@ -177,9 +192,10 @@ def render(args):
         f"**Automated weekly review of `{clean(args.branch, 120)}`, {clean(args.week, 20)}.** Written by the Claude Weekly Review pipeline "
         "and **not reviewed by a person**; every commit below is a suggestion to check, not a change to trust.",
         "",
-        f"Looked at the commits of the last {args.since_days} days: {len(results)} reviewed, {len(fixed)} with a proposed fix, "
-        f"{len(clean_commits)} with nothing to fix, {len(attention)} needing a person. "
-        "Each fix is its own commit, one per reviewed commit, so any of them can be dropped on its own.",
+        f"Looked at the commits of the last {args.since_days} days: {reviewed_count} reviewed, {len(fixed)} with a proposed fix, "
+        f"{len(clean_commits)} with nothing to fix, {len(attention)} needing a person"
+        f"{', ' + str(len(unreviewed)) + ' that could not be reviewed' if unreviewed else ''}. "
+        "Each fix is its own commit, written against the branch head on its own, so any of them can be dropped without affecting the rest.",
     ]
     if fixed:
         out += ["", "### Proposed fixes", ""]
@@ -188,10 +204,15 @@ def render(args):
     if attention:
         out += ["", "### Needs a person", ""]
         for result in attention:
-            out.append(f"- {commit_link(result.get('sha'), args.commit_base_url)} {clean(result.get('subject'), 150)}{size_note(result, args.large_lines)} - {attention_reason(result)}")
+            out.append(f"- {commit_link(result.get('sha'), args.commit_base_url)} {clean(result.get('subject'), 150)}{size_note(result, args.large_lines)}{cut_note(result)} - {attention_reason(result)}")
             for item in result.get("findings_selected") or []:
                 out.append(f"  - [{clean(item.get('severity'), 20)} / {clean(item.get('confidence'), 20)}] {clean(item.get('title'), MAX_TITLE_CHARS)}"
                            f" - `{clean(location_text(item), 200)}`")
+    if unreviewed:
+        out += ["", "### Could not be reviewed", ""]
+        for result in unreviewed:
+            out.append(f"- {commit_link(result.get('sha'), args.commit_base_url)} {clean(result.get('subject'), 150)}{size_note(result, args.large_lines)}"
+                       f" - {clean(result.get('reason'), 300) or clean(result.get('status'), 60)}")
     if clean_commits:
         out += ["", "### Reviewed, nothing to fix", ""]
         for result in clean_commits:
