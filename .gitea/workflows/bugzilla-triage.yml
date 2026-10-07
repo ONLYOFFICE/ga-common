@@ -25,9 +25,14 @@ on:
         description: 'Hard cap on API spend for the fix session (USD), on top of the analysis budget'
         required: false
         type: string
-        default: '1'
+        default: '3'
       model:
-        description: 'Claude model'
+        description: 'Claude model for the analysis'
+        required: false
+        type: string
+        default: claude-opus-5-5
+      fix_model:
+        description: 'Claude model for the fix session'
         required: false
         type: string
         default: claude-sonnet-5-5
@@ -68,8 +73,8 @@ jobs:
   triage:
     runs-on: ubuntu-latest
     # Generous next to the review job: several repositories get cloned before the model starts,
-    # and the fix session that can follow the analysis has its own 10 minutes on top of its 15.
-    timeout-minutes: 45
+    # and the fix session that can follow the analysis has its own 20 minutes on top of its 15.
+    timeout-minutes: 60
     env:
       BUG_ID: ${{ inputs.bug_id }}
     steps:
@@ -111,7 +116,6 @@ jobs:
           BUGZILLA_HOST: ${{ secrets.BUGZILLA_HOST }}
           # Used only for the repository-selection call (see triage-tools.py select-repos), never inside the sandbox.
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
-          SELECT_MODEL: ${{ inputs.model }}
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"
@@ -125,6 +129,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
           CLAUDE_MODEL: ${{ inputs.model }}
+          FIX_MODEL: ${{ inputs.fix_model }}
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
           CLAUDE_EFFORT: ${{ inputs.effort }}
           CLAUDE_MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
@@ -133,7 +138,7 @@ jobs:
           TRIAGE_CLI_TIMEOUT: '900'
           TRIAGE_FIX_PR: ${{ inputs.fix_pr }}
           FIX_MAX_BUDGET_USD: ${{ inputs.fix_max_budget_usd }}
-          FIX_CLI_TIMEOUT: '600'
+          FIX_CLI_TIMEOUT: '1200'
         run: |
           set -euo pipefail
           echo "::add-mask::$ANTHROPIC_API_KEY"

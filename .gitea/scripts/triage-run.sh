@@ -1189,7 +1189,7 @@ summarize_claude_triage() {
 # thing the analysis found, starting from a clean checkout.
 #
 # Expects FIX_REPO, fix-prompt.txt and the sandbox variables (SANDBOX_NAME, HOST_OUTPUT_DIR) set.
-# Optional: FIX_MAX_BUDGET_USD (default 1), FIX_CLI_TIMEOUT (default 600).
+# Optional: FIX_MAX_BUDGET_USD (default 3), FIX_CLI_TIMEOUT (default 1200).
 run_claude_fix() {
   local rc=0 CONTAINER_REPO="/workspace/$FIX_REPO"
 
@@ -1210,10 +1210,10 @@ run_claude_fix() {
   # Same containment as the analysis session, with the timeout inside the container for the same
   # reason: a hung session must end as a clean exit 124 the step can describe, not as a job kill
   # that takes the step log with it.
-  docker exec --user node -w /workspace -e FIX_MAX_BUDGET_USD -e FIX_CLI_TIMEOUT "$SANDBOX_NAME" bash -c '
+  docker exec --user node -w /workspace -e FIX_MAX_BUDGET_USD -e FIX_CLI_TIMEOUT -e FIX_MODEL "$SANDBOX_NAME" bash -c '
     set -euo pipefail
-    timeout "${FIX_CLI_TIMEOUT:-600}" \
-    claude -p --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" --max-budget-usd "${FIX_MAX_BUDGET_USD:-1}" \
+    timeout "${FIX_CLI_TIMEOUT:-1200}" \
+    claude -p --model "${FIX_MODEL:-$CLAUDE_MODEL}" --effort "$CLAUDE_EFFORT" --max-budget-usd "${FIX_MAX_BUDGET_USD:-3}" \
       --debug-file /output/fix-debug.log --output-format json --dangerously-skip-permissions --permission-prompts none \
       --disallowedTools "Task" \
       --json-schema "$(cat /triage/fix-schema.json)" \
@@ -1231,7 +1231,9 @@ run_claude_fix() {
   # so it is discarded unread rather than collected and hoped about.
   if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' claude-output/fix-output.json > /dev/null 2>&1; then
     if [ "$rc" -eq 124 ]; then
-      echo "::warning::The fix session hit the ${FIX_CLI_TIMEOUT:-600}s timeout - its edit is discarded"
+  # The edit has its own model, FIX_MODEL; without it the analysis model is used.
+  echo "Running the fix with model: ${FIX_MODEL:-$CLAUDE_MODEL}"
+      echo "::warning::The fix session hit the ${FIX_CLI_TIMEOUT:-1200}s timeout - its edit is discarded"
     else
       echo "::warning::The fix session did not finish cleanly (exit $rc) - its edit is discarded"
     fi
