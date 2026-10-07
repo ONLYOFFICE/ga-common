@@ -959,11 +959,11 @@ def main_expand_repos():
 # render
 # ----------------------------------------------------------------------------
 
-MAX_FIELD = 1200
-MAX_CAUSE = 700
-MAX_WHY = 250
-MAX_STEPS = 400
-MAX_SYMPTOM = 300
+MAX_FIELD = 4000
+MAX_CAUSE = 3000
+MAX_WHY = 1000
+MAX_STEPS = 2000
+MAX_SYMPTOM = 1000
 MAX_LOCATIONS = 6
 MAX_SIMILAR = 3
 MAX_FIX_LINES = 40

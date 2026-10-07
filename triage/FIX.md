@@ -25,6 +25,8 @@ That is a hypothesis from a previous pass, not a fact. Read the code it points a
 
 When the analysis confidence is medium, treat the cause as unconfirmed until the code shows it; if you cannot confirm it, leave the tree untouched.
 
+The analysis may also list what it ruled out (do not go back there), a suggested change (a starting point to check against the code, never pasted blindly; angle brackets inside this block are written as `&lt;` and `&gt;`) and earlier bugs the report resembles. For an earlier bug, look under `/workspace/_history/`: `<repository>.log` lists recent commits with the files they touched, and `<repository>-related-fixes.patch`, where it exists, holds the patches of commits that mention the related bugs. Check whether the earlier fix was undone, bypassed or missed in the code you are changing, and let that decide where the edit goes.
+
 ## Where to work
 
 The repository is checked out at `/workspace/$FIX_REPO`, on branch `$FIX_REF`, and it is a git repository with one commit holding the untouched state. Edit files in that directory only. Screenshots and files the reporter attached are under `/workspace/attachments/`, if any.

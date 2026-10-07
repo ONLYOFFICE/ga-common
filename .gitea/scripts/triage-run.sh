@@ -379,6 +379,22 @@ _resolve_branch() {
   printf '%s' "$MATCH"
 }
 
+# The repositories reach the sandbox without .git, so their history goes in as text: one block per commit with
+# the files it touched, and the patches of the commits that mention one of the related bugs.
+_write_repo_history() {
+  local REPO="$1" REPO_DIR="repos/$1" IDS PATTERN
+  mkdir -p repo-history
+  git -C "$REPO_DIR" log --no-merges --name-only --date=short --format='@@ %h %ad %s' 2>/dev/null | head -c 2000000 > "repo-history/$REPO.log" || true
+  if [ -s related-bugs.txt ]; then
+    IDS=$(cut -f1 related-bugs.txt | grep -E '^[0-9]+$' | paste -sd'|' - || true)
+    if [ -n "$IDS" ]; then
+      PATTERN="bug[ #-]*(${IDS})([^0-9]|$)"
+      git -C "$REPO_DIR" log --no-merges -E -i --grep="$PATTERN" -n 15 -p --date=short --format='@@ %h %ad %s' 2>/dev/null | head -c 150000 > "repo-history/$REPO-related-fixes.patch" || true
+    fi
+  fi
+  if [ ! -s "repo-history/$REPO-related-fixes.patch" ]; then rm -f "repo-history/$REPO-related-fixes.patch"; fi
+}
+
 _clone_repo() {
   local REPO="$1" BRANCH=""
   # Already cloned (a routing entry listing a name twice, or two spellings of it): cloning again
@@ -387,7 +403,10 @@ _clone_repo() {
     return 0
   fi
   BRANCH=$(_resolve_branch "$REPO")
-  local CLONE_ARGS=(--depth=1 --quiet)
+  # A bounded history, not none: it is turned into text files below, and the .git directory is still dropped.
+  local HISTORY_DEPTH="${TRIAGE_HISTORY_DEPTH:-400}"
+  [[ "$HISTORY_DEPTH" =~ ^[1-9][0-9]*$ ]] || HISTORY_DEPTH=1
+  local CLONE_ARGS=(--depth="$HISTORY_DEPTH" --no-tags --quiet)
   [ -n "$BRANCH" ] && CLONE_ARGS+=(--branch "$BRANCH")
   if ! git clone "${CLONE_ARGS[@]}" "https://$GITEA_HOST/$TRIAGE_ORG/$REPO" "repos/$REPO" 2>/dev/null; then
     echo "::warning::Could not clone $REPO${BRANCH:+ ($BRANCH)} - continuing without it"
@@ -396,6 +415,7 @@ _clone_repo() {
   fi
   local ACTUAL_BRANCH
   ACTUAL_BRANCH=$(git -C "repos/$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  _write_repo_history "$REPO"
   rm -rf "repos/$REPO/.git"
   echo "$REPO@$ACTUAL_BRANCH" >> repos-cloned.txt
   echo "  cloned $REPO ($ACTUAL_BRANCH)"
@@ -1078,6 +1098,10 @@ EOF
     echo "Copied $REPO_NAME into the sandbox"
   done
   docker cp claude-prompt.txt "$SANDBOX_NAME":/workspace/claude-prompt.txt
+  if [ -d repo-history ] && [ -n "$(ls -A repo-history 2>/dev/null)" ]; then
+    docker cp repo-history "$SANDBOX_NAME":/workspace/_history
+    echo "Copied the commit history of $(find repo-history -name '*.log' | wc -l | tr -d ' ') repositories into the sandbox"
+  fi
   # The sandbox cannot reach Bugzilla - egress is npm and Anthropic only - so the attachments have
   # to arrive the same way the repositories do. Already vetted: triage-tools.py expand-attachments unpacked any
   # zip among them on the runner, before this copy, so nothing here runs an extractor on untrusted
@@ -1207,6 +1231,8 @@ run_claude_fix() {
   docker cp fix-prompt.txt "$SANDBOX_NAME":/workspace/fix-prompt.txt || return 1
   docker exec "$SANDBOX_NAME" chown node:node /workspace/fix-prompt.txt || return 1
 
+  # The edit has its own model, FIX_MODEL; without it the analysis model is used.
+  echo "Running the fix with model: ${FIX_MODEL:-$CLAUDE_MODEL}"
   # Same containment as the analysis session, with the timeout inside the container for the same
   # reason: a hung session must end as a clean exit 124 the step can describe, not as a job kill
   # that takes the step log with it.
@@ -1231,8 +1257,6 @@ run_claude_fix() {
   # so it is discarded unread rather than collected and hoped about.
   if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' claude-output/fix-output.json > /dev/null 2>&1; then
     if [ "$rc" -eq 124 ]; then
-  # The edit has its own model, FIX_MODEL; without it the analysis model is used.
-  echo "Running the fix with model: ${FIX_MODEL:-$CLAUDE_MODEL}"
       echo "::warning::The fix session hit the ${FIX_CLI_TIMEOUT:-1200}s timeout - its edit is discarded"
     else
       echo "::warning::The fix session did not finish cleanly (exit $rc) - its edit is discarded"
@@ -1293,12 +1317,13 @@ fix_eligibility() {
     return 1
   fi
 
-  local CONFIDENCE NOTE_KIND MISSING SIMILAR REPO
+  local CONFIDENCE NOTE_KIND MISSING SIMILAR REPO FIX_SCOPE OPEN_SIMILAR=""
   CONFIDENCE=$(jq -r '.summary.confidence // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   NOTE_KIND=$(jq -r '.summary.note_kind // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   MISSING=$(jq -r '.missing_repository // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   SIMILAR=$(jq -r '(.similar_bugs // []) | length' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   REPO=$(jq -r '(.locations // [])[0].repository // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+  FIX_SCOPE=$(jq -r '.summary.fix_scope // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
 
   # High and medium both go ahead: a person reads the draft either way, and the analysis, with its stated
   # confidence, is in the pull request description.
@@ -1318,11 +1343,32 @@ fix_eligibility() {
     FIX_WHY="the analysis places the cause in code it was not given ($MISSING)"
     return 1
   fi
-  # Resembling an existing bug is the analysis saying somebody may already have dealt with this.
+  # A resembling bug that is still open may already have somebody on it. One resolved as FIXED does not block:
+  # the same thing broken again is worth a proposal, and the analysis was asked to look at what fixed it. Any
+  # other resolution still blocks (WONTFIX and INVALID say it is not a defect, DUPLICATE points at a bug that
+  # may be open), and so does a status that cannot be read.
   if [ "${SIMILAR:-0}" != "0" ]; then
-    FIX_WHY="the analysis found a resembling bug"
-    return 1
+    local SIMILAR_ID SIMILAR_STATUS
+    while IFS= read -r SIMILAR_ID; do
+      SIMILAR_STATUS=$(awk -F'\t' -v id="$SIMILAR_ID" '$1 == id { print $2; exit }' related-bugs.txt 2>/dev/null || true)
+      case "${SIMILAR_STATUS^^}" in
+        RESOLVED/FIXED|VERIFIED/FIXED|CLOSED/FIXED) ;;
+        *) OPEN_SIMILAR="$SIMILAR_ID"; break ;;
+      esac
+    done < <(jq -r '(.similar_bugs // [])[].id | tostring' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+    if [ -n "$OPEN_SIMILAR" ]; then
+      FIX_WHY="the analysis found a resembling bug that is not resolved as fixed (Bug $OPEN_SIMILAR)"
+      return 1
+    fi
   fi
+  # How big the change is, in the analysis's own words. Absent means the analysis did not say, which is
+  # not a reason to refuse.
+  case "$FIX_SCOPE" in
+    large|needs_decision)
+      FIX_WHY="the analysis rated the fix '${FIX_SCOPE//_/ }'"
+      return 1
+      ;;
+  esac
   if [ -z "$REPO" ]; then
     FIX_WHY="the analysis named no repository"
     return 1
@@ -1371,6 +1417,10 @@ render_fix_prompt() {
         + (if .line then ":" + (.line | tostring) else "" end)
         + (if .why then "  " + .why else "" end)) | join("\n"))
     + (if .next_steps then "\n\nChecks suggested: " + .next_steps else "" end)
+    + (if (.summary.fix_scope // "") != "" then "\n\nSize of the fix, by the analysis: " + .summary.fix_scope else "" end)
+    + (if ((.ruled_out // []) | length) > 0 then "\n\nAlready ruled out:\n" + ((.ruled_out // []) | map("- " + (.repository // "?") + ": " + (.reason // "")) | join("\n")) else "" end)
+    + (if (.fix.code // "") != "" then "\n\nSuggested change, a starting point to check against the code:\n" + .fix.code else "" end)
+    + (if ((.similar_bugs // []) | length) > 0 then "\n\nResembles earlier bugs:\n" + ((.similar_bugs // []) | map("- Bug " + (.id | tostring) + ": " + (.why // "")) | join("\n")) else "" end)
     | gsub("<"; "&lt;") | gsub(">"; "&gt;")' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   if [ -z "$ANALYSIS" ]; then
     echo "::warning::Could not read the analysis back for the fix prompt"
@@ -1434,7 +1484,7 @@ _pr_analysis_block() {
   [ -s pr-analysis.txt ] || return 1
 
   local TEXT
-  TEXT=$(sed '/^--$/,$d' pr-analysis.txt | _trim_chars 12000)
+  TEXT=$(sed '/^--$/,$d' pr-analysis.txt | _trim_chars 30000)
   [ -n "$TEXT" ] || return 1
   printf '### Analysis (generated, not reviewed)\n\n%s\n' "$(_fenced_block "$TEXT")"
 }
@@ -1557,6 +1607,20 @@ open_fix_pr() {
   BODY="**Automated proposal for Bug $BUG_ID.** Written by the Claude Bug Triage pipeline and **not reviewed by a person**; treat it as a suggestion to check, not a change to trust."
   BODY+=$'\n\n'"**What it does** (the fix session's own confidence: $FIX_CONFIDENCE):"$'\n'"$(_fenced_block "$SUMMARY")"
   BODY+=$'\n\n'"**Analysis confidence:** ${ANALYSIS_CONFIDENCE:-unstated}"
+  local SCOPE_WORD
+  SCOPE_WORD=$(jq -r '.summary.fix_scope // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+  case "$SCOPE_WORD" in
+    small|medium) BODY+=$'\n\n'"**Size of the change, by the analysis:** $SCOPE_WORD" ;;
+  esac
+  local RESEMBLES="" LOOKALIKE_ID LOOKALIKE_WHY LOOKALIKE_STATUS
+  while IFS=$'\t' read -r LOOKALIKE_ID LOOKALIKE_WHY; do
+    [[ "$LOOKALIKE_ID" =~ ^[0-9]+$ ]] || continue
+    LOOKALIKE_STATUS=$(awk -F'\t' -v id="$LOOKALIKE_ID" '$1 == id { print $2; exit }' related-bugs.txt 2>/dev/null || true)
+    RESEMBLES+="Bug $LOOKALIKE_ID (${LOOKALIKE_STATUS:-status unknown}): $LOOKALIKE_WHY"$'\n'
+  done < <(jq -r '(.similar_bugs // [])[] | [(.id | tostring), (.why // "")] | @tsv' claude-structured.json 2>/dev/null | tr -d '\r' || true)
+  if [ -n "$RESEMBLES" ]; then
+    BODY+=$'\n\n'"**Resembles earlier bugs:**"$'\n'"$(_fenced_block "${RESEMBLES%$'\n'}")"
+  fi
   if [ "$NOTE_KIND" = "several_repositories" ]; then
     BODY+=$'\n\n'"**Heads up:** the analysis found more than one repository involved in this bug. This change is only the part in \`$REPO\`."
   fi
