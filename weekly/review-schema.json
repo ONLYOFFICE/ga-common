@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": { "type": "string", "maxLength": 400, "description": "One or two sentences: what the commit changes and whether anything in it needs fixing. Specific to this commit." },
+    "findings": {
+      "type": "array",
+      "description": "Defects this commit introduced or exposed that are still present at the branch head. Empty when there are none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "confidence", "title", "why", "locations"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["critical", "medium", "low"], "description": "critical = data loss, security breach, broken install or release-blocking regression. medium = incorrect behavior or a realistic production failure. low = minor, local, nice to fix." },
+          "confidence": { "type": "string", "enum": ["sure", "likely", "unsure"], "description": "sure = provable from the commit and the code at the branch head. likely = depends on behavior outside what was read. unsure = plausible, needs a person's judgment." },
+          "title": { "type": "string", "maxLength": 120, "description": "Short issue title." },
+          "locations": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Every affected path:line at the branch head for this exact issue.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "line"],
+              "properties": {
+                "path": { "type": "string" },
+                "line": { "type": "integer", "description": "Line number in the file as it is at the branch head." }
+              }
+            }
+          },
+          "why": { "type": "string", "maxLength": 600, "description": "One to three short sentences: what the code does now, what it should do, and the consequence." },
+          "fix_summary": { "type": "string", "maxLength": 300, "description": "One sentence: the smallest change that resolves it. Omit when no concrete fix applies." }
+        }
+      }
+    }
+  }
+}

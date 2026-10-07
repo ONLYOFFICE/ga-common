@@ -1,0 +1,210 @@
+name: Weekly Release Review
+run-name: "Weekly review • DocSpace-buildtools${{ inputs.dry_run && ' (dry run)' || '' }}"
+
+on:
+  schedule:
+    # Saturday 06:00 UTC: nobody is pushing, so the head the fixes are written against stays put.
+    - cron: '0 6 * * 6'
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: 'Comma-separated branches to review (empty: the release/* or hotfix/* branch with the highest version number)'
+        required: false
+        type: string
+        default: ''
+      since_days:
+        description: 'Review the commits of the last N days'
+        required: false
+        type: string
+        default: '7'
+      dry_run:
+        description: 'Review and write the fixes, validate them, but push nothing and open no pull request'
+        required: false
+        type: boolean
+        default: false
+      total_budget_usd:
+        description: 'Hard cap on API spend for the whole run (USD); commits left over are reported as not reviewed'
+        required: false
+        type: string
+        default: '60'
+      claude_code_version:
+        # Pinned, not 'latest': the run depends on specific CLI flags (--effort, --max-budget-usd,
+        # --json-schema), so bump it deliberately after a manual run with the new version.
+        description: 'Claude Code CLI version (exact version, or a dist-tag like "latest" to test)'
+        required: false
+        type: string
+        default: '2.1.284'
+
+env:
+  GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+
+concurrency:
+  # Queue rather than cancel, same reasoning as claude-review.yml: a second run must find the first one's work done.
+  group: Weekly-Release-Review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Every commit is up to two sessions of up to 15 and 20 minutes, but the run budget normally ends
+    # the run long before: this is only the backstop.
+    timeout-minutes: 300
+    env:
+      WEEKLY_REPO: DocSpace-buildtools
+      WEEKLY_BRANCHES: ${{ inputs.branches }}
+      WEEKLY_SINCE_DAYS: ${{ inputs.since_days || '7' }}
+      WEEKLY_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+      WEEKLY_TOTAL_BUDGET_USD: ${{ inputs.total_budget_usd || '60' }}
+    steps:
+      - name: Checkout ga-common
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
+          git clone "https://$GITEA_HOST/ONLYOFFICE/ga-common" --depth=1 --branch "$REF_NAME" .
+
+      - name: Select API key
+        id: select_key
+        env:
+          ANTHROPIC_KEYS: ${{ secrets.ANTHROPIC_KEYS }}
+          ANTHROPIC_KEY_DEFAULT: ${{ secrets.ANTHROPIC_KEY_DEFAULT }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$ANTHROPIC_KEYS" | jq '.' > /dev/null 2>&1 || echo "::warning::ANTHROPIC_KEYS is not valid JSON"
+          # Same lookup as claude-review.yml: the key of the reviewed repository, matched case-insensitively.
+          ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_KEYS" | jq -r --arg repo "$WEEKLY_REPO" \
+            'to_entries | map(select(.key | ascii_downcase == ($repo | ascii_downcase))) | (.[0].value // empty)' 2>/dev/null || true)
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            ANTHROPIC_API_KEY="$ANTHROPIC_KEY_DEFAULT"
+            echo "::warning::No dedicated API key for $WEEKLY_REPO - using default key"
+          fi
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::No Anthropic API key available (neither ANTHROPIC_KEYS[$WEEKLY_REPO] nor ANTHROPIC_KEY_DEFAULT is set)"
+            exit 1
+          fi
+          echo "::add-mask::$ANTHROPIC_API_KEY"
+          echo "api_key=$ANTHROPIC_API_KEY" >> $GITHUB_OUTPUT
+
+      - name: Prepare review context
+        id: prepare
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash .gitea/scripts/weekly-review-run.sh prepare
+
+      - name: Run review (isolated container)
+        # A quiet week has no branch to review, so every step from here on is simply not run, and the job ends green.
+        if: steps.prepare.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
+          # sonnet-5, not 5-5, for the review: /code-review has no recipe of its own for claude-sonnet-5-5 on this CLI (see claude-review.yml).
+          CLAUDE_MODEL: claude-sonnet-5
+          FIX_MODEL: claude-sonnet-5-5
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version || '2.1.284' }}
+          CLAUDE_EFFORT: high
+          # Per review session; a large commit gets three times this (see review_one_commit).
+          CLAUDE_MAX_BUDGET_USD: '1.5'
+          FIX_MAX_BUDGET_USD: '2'
+          # Per session, well inside the job's own limit, so a hung session fails with a message instead of taking the job down.
+          REVIEW_CLI_TIMEOUT: '900'
+          FIX_CLI_TIMEOUT: '1200'
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$ANTHROPIC_API_KEY"
+          exec bash .gitea/scripts/weekly-review-run.sh sandbox
+
+      - name: Upload review artifacts
+        # v3: v4/v7 intermittently fail against a non-github.com host (GHESNotSupportedError).
+        uses: actions/upload-artifact@v3.2.2
+        if: always() && steps.prepare.outputs.skip != 'true'
+        continue-on-error: true
+        with:
+          name: claude-weekly-artifacts
+          path: |
+            claude-output/*.json
+            claude-output/*.patch
+            claude-output/*-debug.log
+            work/branches/*/c-*/result.json
+            work/branches/*/c-*/review-prompt.txt
+            work/branches/*/c-*/fix-prompt.txt
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Open pull requests
+        # Its own step and the only one with a token that can push: the model that wrote the changes
+        # never sees it. Not always(): a run an operator cancelled must not go on to push a branch.
+        if: (success() || failure()) && steps.prepare.outputs.skip != 'true'
+        continue-on-error: true
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash .gitea/scripts/weekly-review-run.sh open-pr
+
+      - name: Upload pull request descriptions
+        uses: actions/upload-artifact@v3.2.2
+        if: always() && steps.prepare.outputs.skip != 'true'
+        continue-on-error: true
+        with:
+          name: claude-weekly-pr-bodies
+          path: pr-body-*.md
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Send result to Telegram
+        # Only for a green run that opened something; a quiet week sends nothing.
+        if: success() && steps.prepare.outputs.skip != 'true'
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          bash .gitea/scripts/weekly-review-run.sh notify
+
+      - name: Notify
+        # Self-contained on purpose: no source, no repository files. The earliest steps run before
+        # anything is checked out, and a failure there is exactly the case this exists for. Only
+        # the optional notice file comes from the workspace.
+        if: always()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID_OPS: ${{ secrets.TELEGRAM_CHAT_ID_OPS }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          REASON=""
+          KIND=""
+          case "${JOB_STATUS:-}" in
+            # A cancelled run is an operator's decision, not news.
+            cancelled) exit 0 ;;
+            failure)   REASON="run failed"; KIND="problem" ;;
+            *)         if [ -s pipeline-notice.txt ]; then
+                         REASON=$(tr -d "\r" < pipeline-notice.txt | head -5); KIND="notice"
+                       fi ;;
+          esac
+          [ -n "$REASON" ] || exit 0
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID_OPS:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID_OPS is unset - alert not sent"; exit 0
+          fi
+          # No literal host: it comes from the CI_GITEA_HOST secret, and ga-common is mirrored to public GitHub.
+          LINK=""
+          if [ -n "${GITEA_HOST:-}" ]; then
+            LINK="https://$GITEA_HOST/${GITHUB_REPOSITORY:-ONLYOFFICE/ga-common}/actions/runs/$GITHUB_RUN_ID"
+          fi
+          if [ "$KIND" = "problem" ]; then
+            TEXT=$(printf "%s problem\n%s - %s" "⚠️ Claude Weekly Review" "$WEEKLY_REPO" "$REASON")
+          else
+            TEXT=$(printf "%s\n%s - %s" "ℹ️ Claude Weekly Review" "$WEEKLY_REPO" "$REASON")
+          fi
+          [ -n "$LINK" ] && TEXT=$(printf "%s\n%s" "$TEXT" "$LINK")
+          curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID_OPS" --arg text "$TEXT" \
+                  '{chat_id:$id,text:$text,disable_web_page_preview:true}')" || true
+          echo "Alert sent ($KIND)"
