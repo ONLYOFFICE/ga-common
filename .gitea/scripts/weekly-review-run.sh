@@ -721,21 +721,35 @@ open_branch_pr() {
   fi
 
   local GIT_ID=(-c "user.name=$WEEKLY_GIT_NAME" -c "user.email=$WEEKLY_GIT_EMAIL")
-  local RESULT_FILE CDIR PATCH CHECK_OUT CHECK_RC TITLE APPLIED=0 SUBJECT_ERR
+  local RESULT_FILE CDIR PATCH CHECK_OUT CHECK_RC TITLE APPLIED=0 SUBJECT_ERR APPLY_ARGS
   while IFS= read -r RESULT_FILE; do
     CDIR=$(dirname "$RESULT_FILE")
     [ "$(jq -r '.status' "$RESULT_FILE")" = "fixed" ] || continue
     PATCH="$CDIR/fix.patch"
     CHECK_RC=0
+    APPLY_ARGS=(--index --whitespace=nowarn)
     CHECK_OUT=$(python3 .gitea/scripts/triage-tools.py check-patch "$PATCH" "$CLONE_DIR" 2> "$CDIR/check.err") || CHECK_RC=$?
+    # The patches are independent, each written against the branch head, so an earlier one can have moved
+    # this one's context. A three-way merge takes that case; a real conflict (the same or neighbouring
+    # lines) fails it too and stays reported rather than forced.
+    if [ "$CHECK_RC" = "2" ] && grep -q 'does not apply' "$CDIR/check.err"; then
+      CHECK_RC=0
+      CHECK_OUT=$(python3 .gitea/scripts/triage-tools.py check-patch "$PATCH" "$CLONE_DIR" --3way 2> "$CDIR/check.err") || CHECK_RC=$?
+      if [ "$CHECK_RC" = "0" ]; then
+        APPLY_ARGS+=(--3way)
+        echo "Fix patch of $(jq -r '.sha' "$RESULT_FILE" | cut -c1-10) needs a three-way merge: an earlier fix moved its context"
+      fi
+    fi
     if [ "$CHECK_RC" != "0" ]; then
       SUBJECT_ERR=$(head -c 300 "$CDIR/check.err" | tr '\n\r' '  ' | sed 's/^refused: //; s/[[:space:]]*$//')
       echo "::warning::Fix patch of $(jq -r '.sha' "$RESULT_FILE" | cut -c1-10) not accepted: $SUBJECT_ERR"
       _set_patch_state "$RESULT_FILE" "refused" "$SUBJECT_ERR"
       continue
     fi
-    if ! git -C "$CLONE_DIR" apply --index --whitespace=nowarn "$PWD/$PATCH" 2> "$CDIR/apply.err"; then
+    if ! git -C "$CLONE_DIR" apply "${APPLY_ARGS[@]}" "$PWD/$PATCH" 2> "$CDIR/apply.err"; then
       echo "::warning::git apply failed after the check passed: $(head -c 200 "$CDIR/apply.err" | tr '\n\r' '  ')"
+      # A failed three-way apply can leave conflict markers behind; the clone goes back to the last commit.
+      git -C "$CLONE_DIR" reset -q --hard
       _set_patch_state "$RESULT_FILE" "not-applied" "git apply failed"
       continue
     fi
