@@ -92,24 +92,30 @@ _skip_run() {
 # Prepare
 # ============================================================================
 
-# Prints the number of an open pull request of this pipeline into $1, or nothing. Returns 1 when the
-# answer is unknown: an unreadable listing refuses rather than passes, so a second proposal for one
-# branch cannot appear just because the API had a bad moment.
+# Prints how many open pull requests of this pipeline go into BASE when that reaches WEEKLY_MAX_OPEN, and nothing
+# otherwise. Returns 1 when the answer is unknown: an unreadable page, or no end of the listing within ten pages,
+# refuses rather than passes, so a second proposal for one branch cannot appear just because the API had a bad moment.
+# The count is summed over the pages: matches that land on different pages must still add up to the cap.
 _open_weekly_pr() {
-  local BASE="$1" PAGE=1 PAGE_JSON FOUND
+  local BASE="$1" PAGE=1 PAGE_JSON TOTAL=0 REACHED_END=false
   while [ "$PAGE" -le 10 ]; do
     PAGE_JSON=$(_weekly_api GET "/repos/$WEEKLY_ORG/$WEEKLY_REPO/pulls?state=open&limit=50&page=$PAGE" || true)
     jq -e 'type == "array"' <<< "$PAGE_JSON" > /dev/null 2>&1 || return 1
-    [ "$(jq 'length' <<< "$PAGE_JSON")" = "0" ] && return 0
-    FOUND=$(jq -r --arg prefix "$WEEKLY_BRANCH_PREFIX" --arg base "$BASE" \
-      '[.[] | select((.head.ref // "" | startswith($prefix)) and (.base.ref // "") == $base)] | length' <<< "$PAGE_JSON")
-    if [ "$FOUND" -ge "$WEEKLY_MAX_OPEN" ]; then
-      echo "$FOUND"
+    if [ "$(jq 'length' <<< "$PAGE_JSON")" = "0" ]; then
+      REACHED_END=true
+      break
+    fi
+    TOTAL=$((TOTAL + $(jq -r --arg prefix "$WEEKLY_BRANCH_PREFIX" --arg base "$BASE" \
+      '[.[] | select((.head.ref // "" | startswith($prefix)) and (.base.ref // "") == $base)] | length' <<< "$PAGE_JSON")))
+    # The total only grows, so reaching the cap settles it without reading the rest.
+    if [ "$TOTAL" -ge "$WEEKLY_MAX_OPEN" ]; then
+      echo "$TOTAL"
       return 0
     fi
     PAGE=$((PAGE + 1))
   done
-  return 1
+  [ "$REACHED_END" = "true" ] || return 1
+  return 0
 }
 
 # The newest pull request of this pipeline into BASE, whatever its state, as {number, created_at, body}.
@@ -659,7 +665,7 @@ review_one_commit() {
   fi
 
   python3 .gitea/scripts/weekly-review-tools.py select --findings "$CDIR/review.json" --out "$CDIR/selected.json" \
-    --text-out "$CDIR/findings.txt" --min-severity "$WEEKLY_MIN_SEVERITY" --min-confidence "$WEEKLY_MIN_CONFIDENCE" | tr -d '' > "$CDIR/counts.txt"
+    --text-out "$CDIR/findings.txt" --min-severity "$WEEKLY_MIN_SEVERITY" --min-confidence "$WEEKLY_MIN_CONFIDENCE" | tr -d '\r' > "$CDIR/counts.txt"
   local SELECTED_COUNT QUALIFYING_COUNT TOTAL_COUNT
   read -r SELECTED_COUNT QUALIFYING_COUNT TOTAL_COUNT < "$CDIR/counts.txt"
   echo "  $SELECTED_COUNT finding(s) selected ($QUALIFYING_COUNT at or above the threshold, $TOTAL_COUNT in all)"
