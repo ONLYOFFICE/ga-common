@@ -13,10 +13,10 @@ on:
         type: string
         default: ''
       since_days:
-        description: 'Review the commits of the last N days'
+        description: 'Review the commits of the last N days (empty: since the end of the previous review of the branch, 7 days when there is none)'
         required: false
         type: string
-        default: '7'
+        default: ''
       dry_run:
         description: 'Review and write the fixes, validate them, but push nothing and open no pull request'
         required: false
@@ -52,7 +52,7 @@ jobs:
     env:
       WEEKLY_REPO: DocSpace-buildtools
       WEEKLY_BRANCHES: ${{ inputs.branches }}
-      WEEKLY_SINCE_DAYS: ${{ inputs.since_days || '7' }}
+      WEEKLY_SINCE_DAYS: ${{ inputs.since_days }}
       WEEKLY_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
       WEEKLY_TOTAL_BUDGET_USD: ${{ inputs.total_budget_usd || '60' }}
     steps:

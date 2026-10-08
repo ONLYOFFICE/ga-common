@@ -17,7 +17,9 @@
 #
 # Expects from the job env: GITEA_HOST, GITEA_TOKEN. Optional: WEEKLY_ORG (default ONLYOFFICE),
 # WEEKLY_REPO (default DocSpace-buildtools), WEEKLY_BRANCHES (comma-separated, default: the
-# release/* or hotfix/* branch with the highest version number), WEEKLY_SINCE_DAYS (7), WEEKLY_MAX_COMMITS (0 = every commit),
+# release/* or hotfix/* branch with the highest version number), WEEKLY_SINCE_DAYS (empty: from the end of the previous review of the branch, WEEKLY_FALLBACK_DAYS=7 days
+# when there is none; a number fixes the window), WEEKLY_MAX_WINDOW_DAYS (35, the longest an anchored window
+# may get), WEEKLY_WINDOW_MARGIN_MINUTES (120, overlap kept between two windows), WEEKLY_MAX_COMMITS (0 = every commit),
 # WEEKLY_LARGE_COMMIT_LINES (2000, from there a review gets a bigger budget and timeout), WEEKLY_EXCLUDE_REF (commits reachable from it are not reviewed),
 # WEEKLY_MIN_SEVERITY (medium), WEEKLY_MIN_CONFIDENCE (likely), WEEKLY_TOTAL_BUDGET_USD (60),
 # WEEKLY_DRY_RUN ("true" validates everything and pushes nothing), WEEKLY_MAX_OPEN (1, open pull
@@ -28,7 +30,10 @@ set -euo pipefail
 
 WEEKLY_ORG="${WEEKLY_ORG:-ONLYOFFICE}"
 WEEKLY_REPO="${WEEKLY_REPO:-DocSpace-buildtools}"
-WEEKLY_SINCE_DAYS="${WEEKLY_SINCE_DAYS:-7}"
+WEEKLY_SINCE_DAYS="${WEEKLY_SINCE_DAYS:-}"
+WEEKLY_FALLBACK_DAYS="${WEEKLY_FALLBACK_DAYS:-7}"
+WEEKLY_MAX_WINDOW_DAYS="${WEEKLY_MAX_WINDOW_DAYS:-35}"
+WEEKLY_WINDOW_MARGIN_MINUTES="${WEEKLY_WINDOW_MARGIN_MINUTES:-120}"
 WEEKLY_MAX_COMMITS="${WEEKLY_MAX_COMMITS:-0}"
 WEEKLY_LARGE_COMMIT_LINES="${WEEKLY_LARGE_COMMIT_LINES:-2000}"
 WEEKLY_MIN_SEVERITY="${WEEKLY_MIN_SEVERITY:-medium}"
@@ -107,6 +112,85 @@ _open_weekly_pr() {
   return 1
 }
 
+# The newest pull request of this pipeline into BASE, whatever its state, as {number, created_at, body}.
+# Prints nothing when there is none; returns 1 when the listing cannot be read.
+_latest_weekly_pr() {
+  local BASE="$1" PAGE=1 PAGE_JSON MATCHES="[]"
+  while [ "$PAGE" -le 5 ]; do
+    PAGE_JSON=$(_weekly_api GET "/repos/$WEEKLY_ORG/$WEEKLY_REPO/pulls?state=all&limit=50&page=$PAGE" || true)
+    jq -e 'type == "array"' <<< "$PAGE_JSON" > /dev/null 2>&1 || return 1
+    [ "$(jq 'length' <<< "$PAGE_JSON")" = "0" ] && break
+    MATCHES=$(jq -c --argjson found "$MATCHES" --arg prefix "$WEEKLY_BRANCH_PREFIX" --arg base "$BASE" \
+      '$found + [.[] | select((.head.ref // "" | startswith($prefix)) and (.base.ref // "") == $base) | {number, created_at, body: (.body // "")}]' <<< "$PAGE_JSON")
+    PAGE=$((PAGE + 1))
+  done
+  jq -c 'sort_by(.created_at) | last // empty' <<< "$MATCHES"
+}
+
+# Every comment of a pull request as one JSON array; returns 1 when they cannot be read.
+_pr_comments() {
+  local NUMBER="$1" PAGE=1 ALL="[]" PAGE_JSON
+  while [ "$PAGE" -le 10 ]; do
+    PAGE_JSON=$(_weekly_api GET "/repos/$WEEKLY_ORG/$WEEKLY_REPO/issues/$NUMBER/comments?limit=50&page=$PAGE" || true)
+    jq -e 'type == "array"' <<< "$PAGE_JSON" > /dev/null 2>&1 || return 1
+    ALL=$(jq -c --argjson found "$ALL" '$found + .' <<< "$PAGE_JSON")
+    [ "$(jq 'length' <<< "$PAGE_JSON")" -lt 50 ] && break
+    PAGE=$((PAGE + 1))
+  done
+  printf '%s' "$ALL"
+}
+
+# The newest window-end timestamp among the markers in the text on stdin.
+_newest_window_marker() {
+  grep -oE 'weekly-review-window-end:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z' | sed 's/^weekly-review-window-end://' | sort | tail -n 1 || true
+}
+
+# Where the previous review of BASE ended: the marker in the body of the newest pull request of this pipeline
+# or in the comment a later run left on it when it had nothing to propose. Prints nothing when there is no such
+# pull request; returns 1 when the API cannot be read.
+_window_anchor() {
+  local LATEST NUMBER TEXT COMMENTS
+  LATEST=$(_latest_weekly_pr "$1") || return 1
+  [ -n "$LATEST" ] || return 0
+  NUMBER=$(jq -r '.number' <<< "$LATEST")
+  [[ "$NUMBER" =~ ^[0-9]+$ ]] || return 0
+  TEXT=$(jq -r '.body' <<< "$LATEST")
+  COMMENTS=$(_pr_comments "$NUMBER") || return 1
+  TEXT+=$'\n'"$(jq -r '.[].body // ""' <<< "$COMMENTS")"
+  _newest_window_marker <<< "$TEXT"
+}
+
+# Sets WINDOW_SINCE (a git --since value) and WINDOW_TEXT (the same, for people) for one branch. A fixed
+# since_days always wins; otherwise the window starts where the previous review ended, so a week held back
+# by an open pull request, a failed run or a late cron is picked up by the next run instead of being lost.
+_choose_window() {
+  local BRANCH="$1" ANCHOR="" ANCHOR_EPOCH NOW_EPOCH
+  if [ -n "$WEEKLY_SINCE_DAYS" ]; then
+    WINDOW_SINCE="$WEEKLY_SINCE_DAYS days ago"
+    WINDOW_TEXT="of the last $WEEKLY_SINCE_DAYS days"
+    return 0
+  fi
+  if ! ANCHOR=$(_window_anchor "$BRANCH"); then
+    echo "::warning::Could not read where the previous review of $BRANCH ended - using the last $WEEKLY_FALLBACK_DAYS days"
+    ANCHOR=""
+  fi
+  NOW_EPOCH=$(date -u +%s)
+  # A marker in the future is ignored: anyone who can comment could plant one to suppress the next review.
+  if [ -n "$ANCHOR" ] && ANCHOR_EPOCH=$(date -u -d "$ANCHOR" +%s 2> /dev/null) && [ "$ANCHOR_EPOCH" -le "$NOW_EPOCH" ]; then
+    if [ $((NOW_EPOCH - ANCHOR_EPOCH)) -gt $((WEEKLY_MAX_WINDOW_DAYS * 86400)) ]; then
+      WINDOW_SINCE="$WEEKLY_MAX_WINDOW_DAYS days ago"
+      WINDOW_TEXT="of the last $WEEKLY_MAX_WINDOW_DAYS days (the previous review, $ANCHOR, is older than that)"
+      _weekly_notice "weekly review of $BRANCH: the previous review ended $ANCHOR, more than $WEEKLY_MAX_WINDOW_DAYS days ago - only the last $WEEKLY_MAX_WINDOW_DAYS days are reviewed"
+    else
+      WINDOW_SINCE="$ANCHOR"
+      WINDOW_TEXT="since $ANCHOR (the end of the previous review)"
+    fi
+  else
+    WINDOW_SINCE="$WEEKLY_FALLBACK_DAYS days ago"
+    WINDOW_TEXT="of the last $WEEKLY_FALLBACK_DAYS days"
+  fi
+}
+
 # The latest release/* or hotfix/* branch of the clone, or the ones the operator named.
 _list_candidate_branches() {
   local SRC="$1" BRANCH
@@ -164,7 +248,9 @@ _triage_commit() {
 
 prepare_weekly_context() {
   [[ "$WEEKLY_REPO" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::Invalid repository name '$WEEKLY_REPO'"; return 1; }
-  [[ "$WEEKLY_SINCE_DAYS" =~ ^[0-9]{1,3}$ ]] || { echo "::error::since_days must be a number, got '$WEEKLY_SINCE_DAYS'"; return 1; }
+  [[ -z "$WEEKLY_SINCE_DAYS" || "$WEEKLY_SINCE_DAYS" =~ ^[0-9]{1,3}$ ]] || { echo "::error::since_days must be empty or a number, got '$WEEKLY_SINCE_DAYS'"; return 1; }
+  [[ "$WEEKLY_FALLBACK_DAYS" =~ ^[0-9]{1,3}$ && "$WEEKLY_MAX_WINDOW_DAYS" =~ ^[0-9]{1,3}$ && "$WEEKLY_WINDOW_MARGIN_MINUTES" =~ ^[0-9]{1,4}$ ]] \
+    || { echo "::error::The window settings must be numbers"; return 1; }
   [[ "$WEEKLY_MAX_COMMITS" =~ ^[0-9]{1,3}$ ]] || { echo "::error::max_commits must be a number, got '$WEEKLY_MAX_COMMITS'"; return 1; }
   [[ "$WEEKLY_LARGE_COMMIT_LINES" =~ ^[0-9]{1,6}$ ]] || { echo "::error::large_commit_lines must be a number, got '$WEEKLY_LARGE_COMMIT_LINES'"; return 1; }
   # An unparsable budget reads as 0 in awk and would silently review nothing, so it is refused up front.
@@ -179,6 +265,9 @@ prepare_weekly_context() {
 
   rm -rf "$WORK_DIR"
   mkdir -p "$WORK_DIR/branches"
+  # Taken before the clone, and pushed back by a margin: a commit that lands while this run works, or one
+  # whose committer date is a little older than its push, is then inside the next window instead of between two.
+  WINDOW_END=$(date -u -d "$WEEKLY_WINDOW_MARGIN_MINUTES minutes ago" +%Y-%m-%dT%H:%M:%SZ)
   # The full history, not a shallow clone: the review reads old commits and compares them with the head.
   if ! git clone --quiet "$(_clone_url)" "$WORK_DIR/src"; then
     echo "::error::Could not clone $WEEKLY_ORG/$WEEKLY_REPO"
@@ -197,9 +286,9 @@ prepare_weekly_context() {
     fi
     if [ -n "$OPEN_PR" ]; then
       echo "$BRANCH already has $OPEN_PR open pull request(s) from this pipeline - skipping it"
-      # Not a quiet week: the window is relative to now, so this week's commits are not reviewed later
-      # unless somebody reruns it with a longer since_days once the old pull request is merged or closed.
-      _weekly_notice "weekly review skipped $BRANCH: an earlier pull request of this pipeline is still open (merge or close it, then run with since_days set to cover the gap)"
+      # Nothing is lost: no end-of-review marker is written for a skipped week, so the next run that gets
+      # past this check starts from the earlier marker and covers it. Said out loud because the PR is waiting.
+      _weekly_notice "weekly review skipped $BRANCH: an earlier pull request of this pipeline is still open (merge or close it; the next run picks up from where the last review ended)"
       HELD_BACK=$((HELD_BACK + 1))
       continue
     fi
@@ -211,18 +300,22 @@ prepare_weekly_context() {
     : > "$BRANCH_DIR/skipped.tsv"
     RANGE_ARGS=("origin/$BRANCH")
     [ -n "${WEEKLY_EXCLUDE_REF:-}" ] && RANGE_ARGS+=("^origin/$WEEKLY_EXCLUDE_REF")
+    _choose_window "$BRANCH"
+    echo "$BRANCH: reviewing the commits $WINDOW_TEXT"
+    printf '%s\n' "$WINDOW_TEXT" > "$BRANCH_DIR/window.txt"
+    printf '%s\n' "$WINDOW_END" > "$BRANCH_DIR/window-end.txt"
 
     # Oldest first, so the fixes line up in the order the commits landed.
     local SHA AUTHOR_EMAIL AUTHOR_NAME SUBJECT
     while IFS=$'\t' read -r SHA AUTHOR_EMAIL AUTHOR_NAME SUBJECT; do
       [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || continue
       _triage_commit "$WORK_DIR/src" "$SHA" "$AUTHOR_EMAIL" "$AUTHOR_NAME" "$SUBJECT" "$BRANCH_DIR"
-    done < <(git -C "$WORK_DIR/src" log --no-merges --reverse --since="$WEEKLY_SINCE_DAYS days ago" \
+    done < <(git -C "$WORK_DIR/src" log --no-merges --reverse --since="$WINDOW_SINCE" \
                --format='%H%x09%ae%x09%an%x09%s' "${RANGE_ARGS[@]}")
 
     TOTAL=$(wc -l < "$BRANCH_DIR/commits.tsv" | tr -d ' ')
     if [ "$TOTAL" -eq 0 ]; then
-      echo "$BRANCH: nothing to review in the last $WEEKLY_SINCE_DAYS days ($(wc -l < "$BRANCH_DIR/skipped.tsv" | tr -d ' ') skipped)"
+      echo "$BRANCH: nothing to review in the commits $WINDOW_TEXT ($(wc -l < "$BRANCH_DIR/skipped.tsv" | tr -d ' ') skipped)"
       rm -rf "$BRANCH_DIR"
       continue
     fi
@@ -246,7 +339,7 @@ prepare_weekly_context() {
     if [ "$HELD_BACK" -gt 0 ]; then
       _skip_run "the latest branch was held back by an open pull request of this pipeline"
     else
-      _skip_run "no release or hotfix branch has a commit to review in the last $WEEKLY_SINCE_DAYS days"
+      _skip_run "no release or hotfix branch has a commit to review in its window"
     fi
     return 0
   fi
@@ -422,10 +515,13 @@ run_claude_session() {
   _fetch_output "$LABEL-debug.log"
   scrub_claude_output
   [ -s "claude-output/$LABEL.json" ] || echo '{}' > "claude-output/$LABEL.json"
-  jq -r '.total_cost_usd // 0' "claude-output/$LABEL.json" 2>/dev/null >> "$WORK_DIR/cost.txt" || true
+  SESSION_COST=$(jq -r '.total_cost_usd // 0' "claude-output/$LABEL.json" 2> /dev/null | tr -d '\r' || true)
+  [[ "$SESSION_COST" =~ ^[0-9]+(\.[0-9]+)?$ ]] || SESSION_COST=0
+  echo "$SESSION_COST" >> "$WORK_DIR/cost.txt"
   echo "  [$LABEL] finished after $((SECONDS - STARTED))s (exit $rc, \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' "claude-output/$LABEL.json" 2>/dev/null || echo '?'), run total \$$(_spent_usd))"
 
-  if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' "claude-output/$LABEL.json" > /dev/null 2>&1; then
+  # The answer normally sits in .result; a run that ended on the schema-forced object has it in .structured_output instead.
+  if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and (((.result // "") | length > 0) or (.structured_output != null))' "claude-output/$LABEL.json" > /dev/null 2>&1; then
     if [ "$rc" -eq 124 ]; then
       echo "::warning::Session $LABEL hit the ${LIMIT}s timeout"
     else
@@ -434,6 +530,11 @@ run_claude_session() {
     return 1
   fi
   return 0
+}
+
+# The text of a finished session's answer: .result, or the schema-forced object when .result is empty.
+_session_text() {
+  jq -r 'if (.result // "") != "" then .result else (.structured_output | tojson) end' "claude-output/$1.json"
 }
 
 # Renders a prompt template and copies it into the sandbox as /workspace/prompts/NAME.txt.
@@ -450,6 +551,11 @@ _install_prompt() {
 _reset_fix_workspace() {
   docker exec --user node -w /workspace/fix "$SANDBOX_NAME" bash -c \
     'git reset -q --hard "$1" && git clean -fdxq' _ "$1" > /dev/null 2>&1
+}
+
+# Adds the session that just finished to the cost of the commit being reviewed.
+_add_commit_cost() {
+  COMMIT_COST=$(awk -v total="${COMMIT_COST:-0}" -v session="${SESSION_COST:-0}" 'BEGIN { printf "%.4f", total + session }')
 }
 
 # Said once per run: every later commit would repeat it, and this is the one case where "every commit" was not met.
@@ -500,8 +606,8 @@ _write_commit_result() {
   [ -s "$CDIR/review.json" ] && REVIEW_SUMMARY=$(jq -r '.summary // ""' "$CDIR/review.json" 2>/dev/null | tr -d '\r' || true)
   jq -n --arg sha "$COMMIT_SHA" --arg subject "$COMMIT_SUBJECT" --arg author "$COMMIT_AUTHOR" \
     --arg status "$STATUS" --arg reason "$REASON" --argjson selected "$SELECTED" --argjson fix "$FIX" --argjson below "$BELOW" --argjson cut "$CUT" \
-    --argjson lines "${COMMIT_LINES:-0}" --arg summary "$REVIEW_SUMMARY" \
-    '{sha: $sha, subject: $subject, author: $author, status: $status, reason: $reason, lines: $lines, review_summary: $summary,
+    --argjson lines "${COMMIT_LINES:-0}" --arg summary "$REVIEW_SUMMARY" --argjson cost "${COMMIT_COST:-0}" \
+    '{sha: $sha, subject: $subject, author: $author, status: $status, reason: $reason, lines: $lines, review_summary: $summary, cost_usd: $cost,
       findings_selected: $selected, findings_below_threshold: $below, findings_cut: $cut, fix: $fix}' > "$CDIR/result.json"
 }
 
@@ -511,6 +617,7 @@ _write_commit_result() {
 review_one_commit() {
   local INDEX="$1" NUMBER="$2" CDIR="$3"
   local LABEL="b$INDEX-c$NUMBER"
+  COMMIT_COST=0
   mkdir -p "$CDIR"
 
   if _run_limit_reached; then
@@ -537,13 +644,14 @@ review_one_commit() {
   local REVIEW_OK=true
   run_claude_session "$LABEL-review" /workspace/repo "/workspace/prompts/$LABEL-review.txt" /weekly/review-schema.json \
     "$CLAUDE_MODEL" "$REVIEW_BUDGET" "$REVIEW_TIMEOUT" || REVIEW_OK=false
+  _add_commit_cost
   # The review session was asked not to edit anything; make sure the next one starts from the head anyway.
   docker exec --user node -w /workspace/repo "$SANDBOX_NAME" bash -c 'git reset -q --hard && git clean -fdxq' > /dev/null 2>&1 || true
   if [ "$REVIEW_OK" != "true" ]; then
     _write_commit_result "$CDIR" "review-failed" "the review session did not finish"
     return 0
   fi
-  if ! jq -r '.result' "claude-output/$LABEL-review.json" \
+  if ! _session_text "$LABEL-review" \
        | EXTRACT_JSON_SCHEMA=weekly/review-schema.json python3 .gitea/scripts/common.py extract-json > "$CDIR/review.json"; then
     echo "::warning::Could not read a valid review from $LABEL-review"
     _write_commit_result "$CDIR" "review-failed" "the review did not return valid output"
@@ -575,6 +683,7 @@ review_one_commit() {
   local FIX_OK=true
   run_claude_session "$LABEL-fix" /workspace/fix "/workspace/prompts/$LABEL-fix.txt" /weekly/fix-schema.json \
     "${FIX_MODEL:-$CLAUDE_MODEL}" "${FIX_MAX_BUDGET_USD:-2}" "${FIX_CLI_TIMEOUT:-1200}" || FIX_OK=false
+  _add_commit_cost
   # A session that timed out or errored leaves a half-finished edit in the tree. It would still be a
   # valid-looking patch, and a plausible broken fix is the one outcome worse than none: it is discarded unread.
   if [ "$FIX_OK" != "true" ]; then
@@ -582,7 +691,7 @@ review_one_commit() {
     _write_commit_result "$CDIR" "fix-failed" "the fix session did not finish"
     return 0
   fi
-  if ! jq -r '.result' "claude-output/$LABEL-fix.json" \
+  if ! _session_text "$LABEL-fix" \
        | EXTRACT_JSON_SCHEMA=weekly/fix-schema.json python3 .gitea/scripts/common.py extract-json > "$CDIR/fix.json"; then
     echo "::warning::Could not read a valid fix description from $LABEL-fix"
     rm -f "$CDIR/fix.json"
@@ -663,6 +772,20 @@ review_branch() {
     COMMIT_LINES="${COMMIT_LINES_FIELD:-0}"
     review_one_commit "$INDEX" "$NUMBER" "$BRANCH_DIR/c-$NUMBER"
   done 3< "$BRANCH_DIR/commits.tsv"
+
+  # The commits go oldest first, so a run limit leaves the reviewed ones as a prefix: the window then ends
+  # just before the first commit that was not reviewed, and the next run starts there.
+  local RESULT_FILES UNREVIEWED_EPOCH
+  RESULT_FILES=$(find "$BRANCH_DIR" -path '*/c-*/result.json' | sort -V)
+  if [ -n "$RESULT_FILES" ] && jq -es 'any(.[]; .status == "not-reviewed")' $RESULT_FILES > /dev/null 2>&1; then
+    UNREVIEWED_EPOCH=$(jq -r 'select(.status == "not-reviewed") | .sha' $RESULT_FILES \
+      | while read -r SHA; do git -C "$WORK_DIR/src" log -1 --format=%ct "$SHA"; done | sort -n | head -n 1)
+    if [[ "$UNREVIEWED_EPOCH" =~ ^[0-9]+$ ]]; then
+      date -u -d "@$((UNREVIEWED_EPOCH - 1))" +%Y-%m-%dT%H:%M:%SZ > "$BRANCH_DIR/window-end.txt"
+    else
+      rm -f "$BRANCH_DIR/window-end.txt"
+    fi
+  fi
   return 0
 }
 
@@ -696,12 +819,40 @@ _set_patch_state() {
     && mv "$TEMP_FILE" "$RESULT_FILE"
 }
 
+# Leaves the end of this review where the next run looks for it, when this run opened no pull request of its own:
+# one comment on the newest pull request of this pipeline, edited in place on later runs so it never notifies anybody
+# twice. Nothing to attach it to (no pull request yet) means the next run falls back to WEEKLY_FALLBACK_DAYS.
+_record_window() {
+  local INDEX="$1" BRANCH="$2" END_FILE="$WORK_DIR/branches/$1/window-end.txt" END LATEST NUMBER COMMENTS COMMENT_ID BODY PAYLOAD
+  [ -s "$END_FILE" ] || return 0
+  END=$(tr -d '\r\n' < "$END_FILE")
+  LATEST=$(_latest_weekly_pr "$BRANCH") || { echo "::warning::Could not read the pull requests of $WEEKLY_REPO - the end of the review of $BRANCH is not recorded"; return 0; }
+  if [ -z "$LATEST" ]; then
+    echo "No pull request of this pipeline into $BRANCH yet - the end of its review is not recorded"
+    return 0
+  fi
+  NUMBER=$(jq -r '.number' <<< "$LATEST")
+  COMMENTS=$(_pr_comments "$NUMBER") || { echo "::warning::Could not read the comments of #$NUMBER - the end of the review is not recorded"; return 0; }
+  COMMENT_ID=$(jq -r '[.[] | select((.body // "") | contains("weekly-review-window-end:"))] | first | .id // empty' <<< "$COMMENTS")
+  BODY="Claude Weekly Review: the commits of $BRANCH up to $END were reviewed, nothing to propose."$'\n'"<!-- weekly-review-window-end:$END -->"
+  PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
+  if [[ "$COMMENT_ID" =~ ^[0-9]+$ ]]; then
+    _weekly_api PATCH "/repos/$WEEKLY_ORG/$WEEKLY_REPO/issues/comments/$COMMENT_ID" -d "$PAYLOAD" > /dev/null || true
+  else
+    _weekly_api POST "/repos/$WEEKLY_ORG/$WEEKLY_REPO/issues/$NUMBER/comments" -d "$PAYLOAD" > /dev/null || true
+  fi
+  echo "Recorded the end of the review of $BRANCH ($END) on #$NUMBER"
+}
+
 # Validates and commits every fix of one branch in order, then pushes and opens the pull request.
+# Sets BRANCH_OUTCOME: "pr" when a pull request was opened, "reviewed" when the commits were reviewed and there is
+# nothing to open, and nothing when something failed or it was a dry run - the window end is then not recorded.
 # Prints nothing on stdout that a caller needs; the pull request link goes to weekly-pr-urls.txt.
 open_branch_pr() {
   local INDEX="$1" BRANCH="$2"
   local BRANCH_DIR="$WORK_DIR/branches/$INDEX" CLONE_DIR="$WORK_DIR/pr/$INDEX"
   local WEEK
+  BRANCH_OUTCOME=""
   WEEK=$(date -u +%G-W%V)
 
   if ! compgen -G "$BRANCH_DIR/c-*/result.json" > /dev/null; then
@@ -710,6 +861,7 @@ open_branch_pr() {
   fi
   if ! jq -es 'any(.[]; .status == "fixed")' "$BRANCH_DIR"/c-*/result.json > /dev/null 2>&1; then
     echo "$BRANCH: no fix to propose"
+    BRANCH_OUTCOME="reviewed"
     return 0
   fi
 
@@ -753,6 +905,14 @@ open_branch_pr() {
       _set_patch_state "$RESULT_FILE" "not-applied" "git apply failed"
       continue
     fi
+    # A fix must not break a file that parsed before it: check-patch judges paths and size, not content.
+    if ! python3 .gitea/scripts/weekly-review-tools.py syntax-gate --repo "$CLONE_DIR" 2> "$CDIR/syntax.err"; then
+      SUBJECT_ERR=$(head -c 300 "$CDIR/syntax.err" | tr '\n\r' '  ' | sed 's/[[:space:]]*$//')
+      echo "::warning::Fix patch of $(jq -r '.sha' "$RESULT_FILE" | cut -c1-10) breaks a file that parsed before: $SUBJECT_ERR"
+      git -C "$CLONE_DIR" reset -q --hard
+      _set_patch_state "$RESULT_FILE" "refused" "syntax check: $SUBJECT_ERR"
+      continue
+    fi
     # The subject is one line from the model, capped by characters; a byte cut would sever a Cyrillic letter.
     TITLE=$(jq -r '.fix.title // ""' "$RESULT_FILE" | tr -d '\r' | tr '\n' ' ' | _trim_chars 72 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\.$//')
     [ -n "$TITLE" ] || TITLE="Fix a defect found in the weekly review"
@@ -766,11 +926,12 @@ open_branch_pr() {
   [ -n "${GITHUB_RUN_ID:-}" ] && RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$WEEKLY_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
   local BODY_FILE="pr-body-$INDEX.md"
   python3 .gitea/scripts/weekly-review-tools.py render --dir "$BRANCH_DIR" --branch "$BRANCH" --week "$WEEK" \
-    --since-days "$WEEKLY_SINCE_DAYS" --large-lines "$WEEKLY_LARGE_COMMIT_LINES" --commit-base-url "$COMMIT_BASE_URL" --cost "$(_spent_usd)" --run-url "$RUN_URL" > "$BODY_FILE"
+    --window "$(cat "$BRANCH_DIR/window.txt" 2> /dev/null || true)" --large-lines "$WEEKLY_LARGE_COMMIT_LINES" --commit-base-url "$COMMIT_BASE_URL" --cost "$(_spent_usd)" --run-url "$RUN_URL" > "$BODY_FILE"
 
   if [ "$APPLIED" -eq 0 ]; then
     echo "$BRANCH: no fix passed the checks - no pull request"
     _weekly_notice "weekly review of $BRANCH: fixes were written but none passed the checks"
+    BRANCH_OUTCOME="reviewed"
     return 0
   fi
   if [ "${WEEKLY_DRY_RUN:-false}" = "true" ]; then
@@ -784,8 +945,16 @@ open_branch_pr() {
   # unknown, and pushing on an unknown state is how a second proposal for one week appears.
   EXISTS=$(_weekly_api GET "/repos/$WEEKLY_ORG/$WEEKLY_REPO/branches/$PR_BRANCH_ENC" -o /dev/null -w '%{http_code}' || true)
   if [ "$EXISTS" = "200" ]; then
-    echo "Branch $PR_BRANCH already exists - not opening a second pull request"
-    return 0
+    # The earlier pull request of this week is not open (prepare would have skipped the branch), so this is a
+    # deliberate rerun after it was closed or merged: it gets its own branch instead of being silently dropped.
+    PR_BRANCH="$PR_BRANCH-${GITHUB_RUN_ID:-$(date -u +%H%M)}"
+    PR_BRANCH_ENC=${PR_BRANCH//\//%2F}
+    echo "The weekly branch already exists - using $PR_BRANCH"
+    EXISTS=$(_weekly_api GET "/repos/$WEEKLY_ORG/$WEEKLY_REPO/branches/$PR_BRANCH_ENC" -o /dev/null -w '%{http_code}' || true)
+    if [ "$EXISTS" = "200" ]; then
+      echo "Branch $PR_BRANCH already exists too - not opening a second pull request"
+      return 0
+    fi
   fi
   if [ "$EXISTS" != "404" ]; then
     echo "::warning::Could not tell whether $PR_BRANCH exists (HTTP ${EXISTS:-none}) - not opening a pull request"
@@ -800,6 +969,10 @@ open_branch_pr() {
   fi
 
   local PAYLOAD RESPONSE PR_URL
+  # Where the next run starts reading commits; hidden in the rendered body, like the markers of the review pipeline.
+  if [ -s "$BRANCH_DIR/window-end.txt" ]; then
+    printf '\n<!-- weekly-review-window-end:%s -->\n' "$(tr -d '\r\n' < "$BRANCH_DIR/window-end.txt")" >> "$BODY_FILE"
+  fi
   # The WIP: prefix makes Gitea treat this as a draft it will not let anyone merge until a person removes it.
   PAYLOAD=$(jq -n --arg title "WIP: Weekly review fixes for $BRANCH ($WEEK)" --arg head "$PR_BRANCH" --arg base "$BRANCH" \
     --rawfile body "$BODY_FILE" '{title: $title, head: $head, base: $base, body: $body}')
@@ -810,8 +983,9 @@ open_branch_pr() {
     _weekly_notice "weekly review of $BRANCH: branch $PR_BRANCH pushed but the pull request was not created"
     return 0
   fi
-  printf '%s\t%s\t%s\n' "$BRANCH" "$PR_URL" "$APPLIED" >> weekly-pr-urls.txt
+  printf '%s\t%s\t%s\t%s\n' "$BRANCH" "$PR_URL" "$APPLIED" "$INDEX" >> weekly-pr-urls.txt
   echo "Opened draft pull request: $PR_URL"
+  BRANCH_OUTCOME="pr"
   return 0
 }
 
@@ -820,6 +994,9 @@ open_weekly_prs() {
   local INDEX BRANCH
   while IFS=$'\t' read -r INDEX BRANCH <&4; do
     open_branch_pr "$INDEX" "$BRANCH"
+    if [ "$BRANCH_OUTCOME" = "reviewed" ] && [ "${WEEKLY_DRY_RUN:-false}" != "true" ]; then
+      _record_window "$INDEX" "$BRANCH"
+    fi
   done 4< "$WORK_DIR/branches.txt"
   return 0
 }
@@ -831,11 +1008,19 @@ notify_weekly_result() {
     echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - message not sent"
     return 0
   fi
-  local TEXT BRANCH PR_URL FIXES
+  local TEXT BRANCH PR_URL FIXES INDEX STATS
   TEXT="Claude Weekly Review: $WEEKLY_REPO"
-  while IFS=$'\t' read -r BRANCH PR_URL FIXES; do
-    TEXT+=$'\n'"$BRANCH - $FIXES proposed fix(es): $PR_URL"
+  while IFS=$'\t' read -r BRANCH PR_URL FIXES INDEX; do
+    # What the pull request does not say at a glance: how many commits were really reviewed and how many need a person.
+    STATS=$(jq -rs '
+      (map(select(.status == "review-failed" or .status == "not-reviewed")) | length) as $unreviewed
+      | (map(select(.status != "clean" and .status != "review-failed" and .status != "not-reviewed"
+                    and ((.status == "fixed" and (.patch_status == "applied" or .patch_status == "dry-run")) | not))) | length) as $needs
+      | "\(length - $unreviewed) reviewed, \($needs) need a person, \($unreviewed) not reviewed"' \
+      "$WORK_DIR"/branches/"$INDEX"/c-*/result.json 2> /dev/null | tr -d '\r' || true)
+    TEXT+=$'\n'"$BRANCH - $FIXES proposed fix(es)${STATS:+, $STATS}: $PR_URL"
   done < weekly-pr-urls.txt
+  TEXT+=$'\n'"Run cost: \$$(_spent_usd)"
   curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
     "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -H "Content-Type: application/json" \
