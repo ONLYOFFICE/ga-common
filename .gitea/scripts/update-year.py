@@ -113,7 +113,7 @@ def notice_patterns(holders):
 
 
 def update_notices(content, patterns, year):
-    """Change only the previous year's terminal year, preserving every other byte."""
+    """Update stale terminal years, preserving every other byte."""
     # The packaged RTF license has a trailing NUL. Preserve that terminator while
     # still excluding binary data and UTF-16, which these byte patterns cannot read.
     text_rtf = content.startswith(b"{\\rtf") and b"\0" not in content.rstrip(b"\0")
@@ -124,7 +124,7 @@ def update_notices(content, patterns, year):
         for match in pattern.finditer(content):
             notices += 1
             group = "end" if match["end"] is not None else "start"
-            if int(match[group]) == year - 1 and int(match["start"]) <= int(match[group]):
+            if int(match[group]) < year and int(match["start"]) <= int(match[group]):
                 replacements.append(match.span(group))
     for start, end in sorted(set(replacements), reverse=True):
         content = content[:start] + str(year).encode("ascii") + content[end:]
@@ -282,7 +282,7 @@ class Gitea:
 
     def open_pr(self, repo, base, branch, year, changes):
         body = (f"<!-- update-year:{year} -->\n"
-                f"Update configured company copyright notices from {year - 1} to {year}.\n\n"
+                f"Update outdated company copyright notices to {year}.\n\n"
                 f"Target branch: `{base}`. Range start years and third-party notices are preserved.\n\n"
                 + "\n".join(f"- `{c.path}`: {c.count} replacement(s)" for c in changes)
                 + "\n\nCreated by ga-common's annual copyright workflow. Merge after the normal CI and review.")
