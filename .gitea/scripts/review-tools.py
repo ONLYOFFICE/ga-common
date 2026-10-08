@@ -632,7 +632,9 @@ SUPPRESS_MARKER = "non-ascii: allow"
 # Matches the middle of a `/* ... */` block comment when a diff hunk starts partway
 # through one (the opening `/*` is outside the hunk, so BLOCK_COMMENT state alone
 # can't see it) - a conservative per-line fallback, not real cross-hunk tracking.
-STAR_CONTINUATION_RE = re.compile(r"^\s*\*(?!/)")
+# A real continuation line is a star followed by a space or nothing at all; `*)` (a shell `case` pattern),
+# `*.json` (a glob) and `*/` (the closer) are not, and wrongly opening a comment here swallowed every line after it.
+STAR_CONTINUATION_RE = re.compile(r"^\s*\*+(?:\s|$)")
 
 # Ordered so multi-char delimiters are tried before the single-quote-string
 # alternative would otherwise swallow the first two chars of """ / '''.
@@ -645,15 +647,23 @@ TOKEN_RE = re.compile(
     r'|"[^"\\]*(?:\\.[^"\\]*)*"'
     r'|\'[^\'\\]*(?:\\.[^\'\\]*)*\''
     r'|`'
-    r'|/\*'
+    r'|(?<![\w.~-])/\*'
     r'|//|#(?!!)|<!--|(?<!\w)--(?!\w)'
 )
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+# Letterlike Symbols (U+2100-214F) hold signs Unicode files under "letter" - the info emoji U+2139, the
+# trademark and numero signs - that are not words in any language, so they never count.
+LETTERLIKE_SYMBOLS = range(0x2100, 0x2150)
+
+
 def has_non_ascii_letters(text: str) -> bool:
-    return any(ord(ch) > 127 and unicodedata.category(ch).startswith("L") for ch in text)
+    return any(
+        ord(ch) > 127 and ord(ch) not in LETTERLIKE_SYMBOLS and unicodedata.category(ch).startswith("L")
+        for ch in text
+    )
 
 
 _missing_link_env_warned = False
