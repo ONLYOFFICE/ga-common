@@ -1,0 +1,103 @@
+name: Update year
+
+on:
+  schedule:
+    # January 1, 06:00 UTC / 09:00 Moscow. No periodic checks during the year.
+    - cron: '0 6 1 1 *'
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: 'Comma-separated configured repositories; empty means all four'
+        required: false
+        type: string
+      year:
+        description: 'Target copyright year; empty means the current year'
+        required: false
+        type: string
+      dry_run:
+        description: 'Prepare patches and a report without pushing branches or opening PRs'
+        required: false
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
+
+concurrency:
+  # Both manual and scheduled runs use the same two branch names.
+  group: Update-Year
+  cancel-in-progress: false
+
+env:
+  GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+  GIT_TERMINAL_PROMPT: '0'
+  # Start with these four repositories; expand the list as needed.
+  YEAR_CONFIG: |
+    {
+      "organization": "ONLYOFFICE",
+      "holders": ["Ascensio System SIA"],
+      "repositories": [
+        {"name": "OneClickInstall-Docs", "include": ["LICENSE", "*.sh"]},
+        {"name": "Docker-DocumentServer", "include": ["LICENSE"]},
+        {"name": "document-server-package", "include": [
+          "LICENSE",
+          "common/documentserver/license/onlyoffice-documentserver/LICENSE.txt",
+          "exe/license/community/LICENSE.rtf"
+        ]},
+        {"name": "DocSpace-buildtools", "include": [
+          "LICENSE",
+          "install/OneClickInstall/*.sh",
+          "install/deb/debian/copyright",
+          "config/document-formats/build.js"
+        ]}
+      ]
+    }
+
+jobs:
+  update-year:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout ga-common
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${GITEA_HOST:?GITEA_HOST is required}"
+          : "${GITEA_TOKEN:?GITEA_TOKEN is required}"
+          git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
+          git clone "https://$GITEA_HOST/ONLYOFFICE/ga-common" --depth=1 --branch "$REF_NAME" .
+
+      - name: Update copyright years
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          REPOSITORIES: ${{ inputs.repositories }}
+          YEAR: ${{ inputs.year }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ARGS=(run --output update-year-output)
+          [[ -z "${YEAR:-}" ]] || ARGS+=(--year "$YEAR")
+          [[ -z "${REPOSITORIES:-}" ]] || ARGS+=(--repositories "$REPOSITORIES")
+          case "${GITHUB_EVENT_NAME:-workflow_dispatch}" in
+            schedule) ARGS+=(--publish) ;;
+            workflow_dispatch)
+              case "${DRY_RUN:-true}" in
+                true) ;;
+                false) ARGS+=(--publish) ;;
+                *) echo '::error::dry_run must be true or false'; exit 1 ;;
+              esac ;;
+            *) echo '::error::Unsupported trigger'; exit 1 ;;
+          esac
+          exec python3 .gitea/scripts/update-year.py "${ARGS[@]}"
+
+      - name: Upload patches and report
+        if: always()
+        # Match the artifact version used by the other Gitea workflows.
+        uses: actions/upload-artifact@v3.2.2
+        with:
+          name: update-year
+          path: update-year-output/
+          retention-days: 30
+          if-no-files-found: ignore
