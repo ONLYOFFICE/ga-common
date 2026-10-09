@@ -1,0 +1,55 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "stage",
+    "category",
+    "root_cause",
+    "fix",
+    "confidence"
+  ],
+  "properties": {
+    "stage": {
+      "type": "string",
+      "description": "The failed stage name."
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "code",
+        "dependency",
+        "environment",
+        "tooling"
+      ],
+      "description": "Nature of the root cause."
+    },
+    "root_cause": {
+      "type": "string",
+      "description": "One paragraph: the underlying cause, traced upstream to its real origin."
+    },
+    "repo": {
+      "type": "string",
+      "description": "ORG/REPO where the cause lives, or empty string."
+    },
+    "file": {
+      "type": "string",
+      "description": "Path to the culprit file, or empty string."
+    },
+    "evidence": {
+      "type": "string",
+      "description": "The exact log line or code snippet that proves the cause."
+    },
+    "fix": {
+      "type": "string",
+      "description": "Concrete fix: a code change (which repo/file/what) or, if not code, the action to take on the build machine/environment."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    }
+  }
+}

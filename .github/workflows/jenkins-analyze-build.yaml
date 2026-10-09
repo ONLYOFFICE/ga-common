@@ -1,0 +1,262 @@
+# .github/workflows/jenkins-analyze-build.yaml
+#
+# Triggered from Jenkins after a FAILURE via:
+#   gh workflow run jenkins-analyze-build.yaml --repo ONLYOFFICE/ga-common \
+#      -f branch="$BRANCH_NAME" -f build_number="$BUILD_NUMBER"
+#
+# Prerequisites (Settings -> Secrets and variables -> Actions):
+#   vars:    JENKINS_URL, GITEA_URL
+#   secrets: JENKINS_USER, JENKINS_TOKEN, GITEA_TOKEN,
+#            ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#
+# jenkins_review_tools/: fetch_failed_stages.sh, jenkins_checkout.py, select-repos.tmpl,
+#          select_repos.py, build-prompt.tmpl, build-overview.md,
+#          diag-schema.json, extract_diag.py, render_md.py
+ 
+name: Analyze build failure
+ 
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name (Jenkins $BRANCH_NAME, e.g. release/v10.0.0)"
+        required: true
+      build_number:
+        description: "Failed build number"
+        required: true
+      repos:
+        description: "Manual repo override (space-separated). Empty = Claude auto-selects."
+        required: false
+        default: ""
+ 
+permissions:
+  contents: read
+ 
+concurrency:
+  group: analyze-${{ github.event.inputs.build_number }}
+  cancel-in-progress: false
+ 
+jobs:
+  analyze:
+    runs-on: ubuntu-latest          # self-hosted if Jenkins/Gitea are internal-only
+    timeout-minutes: 45
+    env:
+      TOOLS_DIR: jenkins_review_tools
+      JENKINS_PROJECT: oo
+      JENKINS_URL: ${{ vars.JENKINS_URL }}
+      GITEA_URL:   ${{ vars.GITEA_URL || 'https://git.onlyoffice.com' }}
+      BRANCH: ${{ github.event.inputs.branch }}
+      BUILD:  ${{ github.event.inputs.build_number }}
+      REPOS_INPUT: ${{ github.event.inputs.repos }}
+      BASE_REPOS: "build_tools core"
+      CLAUDE_MODEL: claude-sonnet-5
+      SELECT_MODEL: claude-sonnet-5
+      MAX_BUDGET_USD: "5"
+      SELECT_BUDGET_USD: "1"
+    steps:
+      - name: Checkout tooling
+        uses: actions/checkout@v4
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+ 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+ 
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code    # pin a version for reproducibility
+ 
+      - name: Build Jenkins URLs
+        run: |
+          enc="${BRANCH//\//%252F}"
+          echo "BASE=$JENKINS_URL/job/$JENKINS_PROJECT/job/$enc/$BUILD" >> "$GITHUB_ENV"
+          echo "GOOD_BASE=$JENKINS_URL/job/$JENKINS_PROJECT/job/$enc/lastSuccessfulBuild" >> "$GITHUB_ENV"
+ 
+      # --- 1. clean logs of failed stages + index (id slug name) ---
+      - name: Fetch failed stages
+        env:
+          JENKINS_AUTH: "${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_TOKEN }}"
+        run: |
+          bash "$TOOLS_DIR/fetch_failed_stages.sh" "$BASE" | tee stages.txt
+          echo "--- stage files ---"; ls -1 stage_*.log || true
+ 
+      # --- 2. repo -> commit map ---
+      - name: Get checkout map
+        env:
+          JENKINS_AUTH: "${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_TOKEN }}"
+        run: |
+          python3 "$TOOLS_DIR/jenkins_checkout.py" "$BASE" -o checkout.json --table
+          cat checkout.json
+ 
+      # --- 3. phase 1: Claude picks which repos are needed (no tools) ---
+      - name: Select repos
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.JENKINS_ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$REPOS_INPUT" ]; then
+            echo "manual override: $REPOS_INPUT"
+            echo "SELECTED_REPOS=$REPOS_INPUT" >> "$GITHUB_ENV"; exit 0
+          fi
+          command -v envsubst >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gettext-base; }
+          export REPO_LIST="$(jq -r '.checked_out[] | "\(.name) @ \(.commit[0:12])"' checkout.json)"
+          logs=""
+          for f in stage_*.log; do
+            [ -e "$f" ] || continue
+            logs="${logs}"$'\n'"=== $f ==="$'\n'"$(tail -n 500 "$f")"
+          done
+          export STAGE_LOGS="$logs"
+          envsubst '$REPO_LIST $STAGE_LOGS' < "$TOOLS_DIR/select-repos.tmpl" > prompt_select.txt
+          claude -p "$(cat prompt_select.txt)" \
+            --model "$SELECT_MODEL" --output-format json \
+            --permission-mode dontAsk --allowedTools "" \
+            --max-turns 3 --max-budget-usd "$SELECT_BUDGET_USD" \
+            > raw_select.json || true
+          if ! jq -e '.is_error == false and ((.result // "") | length > 0)' raw_select.json >/dev/null 2>&1; then
+            echo "::warning::repo selection failed (subtype: $(jq -r '.subtype // "?"' raw_select.json)) — using base repos"
+          fi
+          echo "select cost: $(jq -r '.total_cost_usd // "?"' raw_select.json) USD"
+          sel="$(python3 "$TOOLS_DIR/select_repos.py")"
+          echo "selected repos: $sel"
+          cat repos.json 2>/dev/null || true
+          echo "SELECTED_REPOS=$sel" >> "$GITHUB_ENV"
+ 
+      # --- 4. clone the selected repos at their as-built commits ---
+      - name: Clone source repos
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          mkdir -p src
+          echo "cloning: $SELECTED_REPOS"
+          for name in $SELECTED_REPOS; do
+            sha=$(jq -r --arg n "$name" '.checked_out[]|select(.name==$n)|.commit' checkout.json)
+            if [ -z "$sha" ] || [ "$sha" = "null" ]; then echo "skip $name"; continue; fi
+            url="$GITEA_URL/ONLYOFFICE/$name.git"
+            git -c http.extraHeader="AUTHORIZATION: token $GITEA_TOKEN" \
+                clone --filter=blob:none --no-checkout "$url" "src/$name"
+            git -C "src/$name" -c http.extraHeader="AUTHORIZATION: token $GITEA_TOKEN" checkout "$sha"
+            git -C "src/$name" remote set-url origin "$url"
+            echo "cloned src/$name @ $(git -C "src/$name" rev-parse --short HEAD)"
+          done
+ 
+      # --- 5. phase 2: root-cause each failed stage (with tools + schema) ---
+      - name: Root-cause with Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.JENKINS_ANTHROPIC_API_KEY }}
+        run: |
+          command -v envsubst >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gettext-base; }
+          export REPOS_LIST="$(ls src 2>/dev/null | sed 's#^#  - src/#')"
+          export BUILD_OVERVIEW="$(cat "$TOOLS_DIR/build-overview.md")"
+          schema="$(cat "$TOOLS_DIR/diag-schema.json")"
+          while read -r stage_id slug name; do
+            [ -z "$stage_id" ] && continue
+            log="stage_${stage_id}_${slug}.log"
+            [ -f "$log" ] || { echo "no $log, skip"; continue; }
+ 
+            STAGE_NAME="$name" STAGE_LOG="$log" \
+              envsubst '$STAGE_NAME $STAGE_LOG $REPOS_LIST $BUILD_OVERVIEW' \
+              < "$TOOLS_DIR/build-prompt.tmpl" > "prompt_${slug}.txt"
+ 
+            echo "::group::Claude: $name"
+            claude -p "$(cat "prompt_${slug}.txt")" \
+              --model "$CLAUDE_MODEL" \
+              --output-format json \
+              --json-schema "$schema" \
+              --permission-mode dontAsk \
+              --allowedTools "Read,Grep,Glob,Bash" \
+              --max-turns 80 \
+              --max-budget-usd "$MAX_BUDGET_USD" \
+              > "raw_${slug}.json" || echo "claude exited non-zero"
+ 
+            python3 "$TOOLS_DIR/extract_diag.py" "$slug"
+            cost=$(jq -r '.total_cost_usd // 0' "raw_${slug}.json")
+            jq --argjson c "$cost" '. + {cost_usd: $c}' "diag_${slug}.json" > "diag_${slug}.tmp" \
+              && mv "diag_${slug}.tmp" "diag_${slug}.json"
+            python3 "$TOOLS_DIR/render_md.py" "$slug"        # -> stage_${slug}.md
+            echo "stage cost: ${cost} USD"
+            echo "::endgroup::"
+          done < stages.txt
+ 
+          total=$(jq -s 'map(.total_cost_usd // 0) | add' raw_*.json 2>/dev/null || echo 0)
+          printf 'TOTAL_COST=%.4f\n' "$total" >> "$GITHUB_ENV"
+          {
+            echo "## Cost"; echo "Total: \$$(printf '%.4f' "$total")"
+            for f in diag_*.json; do [ -e "$f" ] || continue
+              echo "- $(jq -r '"\(.stage // "?"): $\(.cost_usd // 0)"' "$f")"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+ 
+      # --- 6. report to Telegram: message + one .md per stage + full zip ---
+      - name: Report to Telegram
+        if: always()
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT:  ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          command -v zip >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq zip; }
+          shopt -s nullglob
+          mds=(stage_*.md)
+
+          failed=""; while read -r sid slug name; do [ -z "$sid" ] && continue
+            failed="${failed}"$'\n'"• ${name}"; done < stages.txt
+          mdnames=""; for m in "${mds[@]}"; do mdnames="${mdnames}"$'\n'"${m}"; done
+
+          cap="Hey! It's Claude!"$'\n'"Docs Build №${BUILD} (${BRANCH}) is <b>failed</b>"$'\n\n'
+          cap="${cap}<b>Stages that failed:</b>${failed}"$'\n\n'
+          cap="${cap}<b>Analysis per stage (md):</b>${mdnames}"$'\n\n'
+          cap="${cap}💰 <b>total:</b> \$${TOTAL_COST:-?}"
+
+          if [ ${#mds[@]} -gt 0 ]; then
+            # build media JSON array: first item carries the caption
+            media="["; i=0; files=()
+            for m in "${mds[@]}"; do
+              files+=( -F "file${i}=@${m};type=text/markdown" )
+              if [ $i -eq 0 ]; then
+                media="${media}{\"type\":\"document\",\"media\":\"attach://file${i}\",\"caption\":$(jq -Rs . <<< "$cap"),\"parse_mode\":\"HTML\"}"
+              else
+                media="${media},{\"type\":\"document\",\"media\":\"attach://file${i}\"}"
+              fi
+              i=$((i+1))
+            done
+            media="${media}]"
+            curl -sS "https://api.telegram.org/bot${TG_TOKEN}/sendMediaGroup" \
+              -F "chat_id=${TG_CHAT}" -F "media=${media}" "${files[@]}" \
+              | jq -r 'if .ok then "media group OK (\(.result|length) files)" else "FAIL: \(.description)" end'
+          else
+            # no md -> just send the caption as a message
+            curl -sS "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -F "chat_id=${TG_CHAT}" -F "parse_mode=HTML" -F "text=${cap}" \
+              | jq -r 'if .ok then "message OK" else "FAIL: \(.description)" end'
+          fi
+
+          # zip — separated message
+          zip -q "stages_report_${BUILD}.zip" \
+            stage_*.md diag_*.json raw_*.json prompt_*.txt checkout.json repos.json 2>/dev/null || true
+          if [ -f "stages_report_${BUILD}.zip" ]; then
+            caption="Full Claude report - Docs Build #${BUILD}"
+            resp=$(curl -sS "https://api.telegram.org/bot${TG_TOKEN}/sendDocument" \
+              -F "chat_id=${TG_CHAT}" \
+              -F "document=@$(pwd)/stages_report_${BUILD}.zip" \
+              -F "caption=${caption}" \
+              -F "parse_mode=HTML")
+            echo "$resp" | jq -r 'if .ok then "zip OK" else "FAIL: \(.description)" end'
+          fi
+ 
+      # --- 7. artifacts ---
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-analysis-${{ github.event.inputs.build_number }}
+          path: |
+            stages.txt
+            stage_*.log
+            stage_*.md
+            checkout.json
+            repos.json
+            prompt_*.txt
+            raw_*.json
+            diag_*.json
+            stages_report_*.zip
+          if-no-files-found: ignore
+ 
