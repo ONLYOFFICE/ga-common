@@ -6,7 +6,6 @@
 #   triage-run.sh open-pr   validate the fix patch and open a draft pull request (the only step that can push)
 #   triage-run.sh report    render the result into the job log and step summary
 #   triage-run.sh publish   post the result to Bugzilla
-#   triage-run.sh notify    send the finished result to Telegram
 #
 # Run as `bash .gitea/scripts/triage-run.sh <subcommand>`. It can also be sourced to reach the functions
 # below directly, which is how the local tests drive them.
@@ -907,6 +906,7 @@ report_triage_result() {
       if [ -n "$SUMMARY_LINKS" ]; then echo "$SUMMARY_LINKS"; echo; fi
       echo '```text'; cat triage-message.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
   fi
+  write_result_summary || true
 }
 
 # One line of model output as plain text: no control characters, one line, capped by characters.
@@ -914,22 +914,18 @@ _plain_line() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | tr -d '\000-\010\013\014\016-\037' | tr -s ' ' | _trim_chars "${2:-200}" | sed 's/^ *//; s/ *$//'
 }
 
-# The finished result as a Telegram message, one per analysed bug, to every chat id in TELEGRAM_CHAT_ID
-# (comma-separated, as the other workflows read it). A run with no analysis says nothing here: the alert
-# step of the workflow already reports it. Plain text, no parse mode, so nothing the model wrote is markup.
-notify_result() {
-  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
-    echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - the result is not sent"
-    return 0
-  fi
+# The result of a finished triage as the opening lines of the Telegram message: the bug and the analysis
+# confidence, then the pull request or the reason there is none. Only written here; the last step of the
+# workflow sends it together with any notice or problem, so one message per run says everything. A run with no
+# analysis writes nothing, because that one is a problem for the same step.
+write_result_summary() {
+  rm -f pipeline-result.txt
   if [ -s triage-skip-reason.txt ] || [ -s pipeline-failure.txt ] || [ ! -s claude-structured.json ]; then
-    echo "No analysis for bug $BUG_ID - nothing to send"
     return 0
   fi
 
-  local CONFIDENCE PR_URL="" PR_LINE RUN_URL="" TEXT CHAT_ID CODE
+  local CONFIDENCE PR_URL="" PR_LINE
   CONFIDENCE=$(_plain_line "$(jq -r '.summary.confidence // "unstated"' claude-structured.json 2>/dev/null || true)" 20)
-
   if [ -s fix-pr-url.txt ]; then
     PR_URL=$(head -1 fix-pr-url.txt | tr -d '\r ')
     case "$PR_URL" in https://*) ;; *) PR_URL="" ;; esac
@@ -941,25 +937,7 @@ notify_result() {
   else
     PR_LINE="No PR"
   fi
-  if [ -n "${GITHUB_RUN_ID:-}" ] && [ -n "${GITEA_HOST:-}" ]; then
-    RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
-  fi
-
-  TEXT=$(printf 'Bug %s · %s' "$BUG_ID" "$CONFIDENCE")
-  TEXT+=$(printf '\n%s' "$PR_LINE")
-  if [ -n "$RUN_URL" ]; then TEXT+=$(printf '\nRun: %s' "$RUN_URL"); fi
-
-  for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
-    CODE=$(curl -s --max-time 20 --retry 2 -o /dev/null -w '%{http_code}' -X POST \
-      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -H "Content-Type: application/json" \
-      -d "$(jq -n --arg id "$CHAT_ID" --arg text "$TEXT" '{chat_id: $id, text: $text, disable_web_page_preview: true}')" || true)
-    if [ "$CODE" = "200" ]; then
-      echo "Result sent to Telegram"
-    else
-      echo "::warning::Telegram refused the result (HTTP ${CODE:-none})"
-    fi
-  done
+  printf 'Bug %s · %s\n%s\n' "$BUG_ID" "$CONFIDENCE" "$PR_LINE" > pipeline-result.txt
   return 0
 }
 
@@ -1647,7 +1625,6 @@ open_fix_pr() {
   fi
   echo "$PR_URL" > fix-pr-url.txt
   echo "Opened draft pull request: $PR_URL"
-  _fix_notice "opened a draft pull request with a proposed fix: $PR_URL"
   return 0
 }
 
@@ -1684,9 +1661,8 @@ triage_main() {
     open-pr) open_fix_pr ;;
     report)  report_triage_result ;;
     publish) publish_triage_comment ;;
-    notify)  notify_result ;;
     *)
-      echo "usage: triage-run.sh {prepare|sandbox|open-pr|report|publish|notify}" >&2
+      echo "usage: triage-run.sh {prepare|sandbox|open-pr|report|publish}" >&2
       return 2
       ;;
   esac

@@ -202,18 +202,6 @@ jobs:
           set -euo pipefail
           bash .gitea/scripts/triage-run.sh publish
 
-      - name: Send result to Telegram
-        # The finished analysis and, when there is one, the pull request, to the chat in TELEGRAM_CHAT_ID. Only for a
-        # green run that analysed the bug: a failed one, or one with no analysis, is the Notify step's.
-        if: success() && steps.prepare.outputs.skip != 'true'
-        continue-on-error: true
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          set -euo pipefail
-          bash .gitea/scripts/triage-run.sh notify
-
       - name: Notify
         # Self-contained on purpose: no source, no repository files. The earliest steps run
         # before anything is checked out, and a failure there is exactly the case this exists
@@ -237,15 +225,15 @@ jobs:
             failure)   REASON="run failed"; KIND="problem" ;;
             *)         if [ -s pipeline-failure.txt ]; then
                          REASON=$(tr -d "\r" < pipeline-failure.txt | head -1); KIND="problem"
-                       elif [ -s pipeline-notice.txt ]; then
+                       elif [ -s pipeline-notice.txt ] || [ -s pipeline-result.txt ]; then
                          # Not a failure: the run went green and there is still something a person
                          # should know - a bug nobody analysed, or an analysis pointing at code the
                          # routing map never supplied. Both are holes in the map, and a hole nobody
                          # hears about stays open.
-                         REASON=$(tr -d "\r" < pipeline-notice.txt | head -5); KIND="notice"
+                         KIND="notice"
                        fi ;;
           esac
-          [ -n "$REASON" ] || exit 0
+          [ -n "$KIND" ] || exit 0
           if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID_OPS:-}" ]; then
             echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID_OPS is unset - alert not sent"; exit 0
           fi
@@ -258,9 +246,16 @@ jobs:
           if [ "$KIND" = "problem" ]; then
             TEXT=$(printf "%s problem\n%s - %s" "⚠️ Claude Triage" "Bug $BUG_ID" "$REASON")
           else
-            TEXT=$(printf "%s\n%s - %s" "ℹ️ Claude Triage" "Bug $BUG_ID" "$REASON")
+            NOTICES=""
+            [ -s pipeline-notice.txt ] && NOTICES=$(tr -d "\r" < pipeline-notice.txt | head -5)
+            if [ -s pipeline-result.txt ]; then
+              TEXT=$(printf "%s\n%s" "ℹ️ Claude Triage" "$(tr -d "\r" < pipeline-result.txt)")
+              [ -n "$NOTICES" ] && TEXT=$(printf "%s\n%s" "$TEXT" "$NOTICES")
+            else
+              TEXT=$(printf "%s\n%s - %s" "ℹ️ Claude Triage" "Bug $BUG_ID" "$NOTICES")
+            fi
           fi
-          [ -n "$LINK" ] && TEXT=$(printf "%s\n%s" "$TEXT" "$LINK")
+          [ -n "$LINK" ] && TEXT=$(printf "%s\n%s" "$TEXT" "Run: $LINK")
           curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
