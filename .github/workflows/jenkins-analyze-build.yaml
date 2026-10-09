@@ -244,7 +244,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.JENKINS_ANTHROPIC_API_KEY }}
         run: |
           shopt -s nullglob
-          files=(raw_*.json diag_*.json stage_*.md prompt_*.txt stages.txt checkout.json repos.json)
+          files=(raw_*.json diag_*.json stage_*.md prompt_*.txt stages.txt checkout.json repos.json stage_*.log)
           [ ${#files[@]} -eq 0 ] && { echo "nothing to scrub"; exit 0; }
           # Key passed via env (not argv) so it never lands in `ps`/traces. \Q..\E
           # quotemetas the literal value; the pattern catches any other sk-ant token.
