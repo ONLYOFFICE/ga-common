@@ -110,7 +110,7 @@ jobs:
           node-version: "24"
 
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code    # pin a version for reproducibility
+        run: npm install -g @anthropic-ai/claude-code@2.1.285
 
       - name: Build Jenkins URLs
         run: |
