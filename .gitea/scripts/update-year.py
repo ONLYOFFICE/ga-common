@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import difflib
 import fnmatch
+import http.client
 import json
 import os
 from pathlib import Path
@@ -386,7 +387,7 @@ def notify_results(results, year):
                 print("Copyright update summary sent to Telegram")
             else:
                 print("::warning::Telegram refused the copyright update summary")
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
             # Request URLs contain the bot token; never log exceptions or response bodies.
             print("::warning::Could not send the copyright update summary to Telegram")
 
