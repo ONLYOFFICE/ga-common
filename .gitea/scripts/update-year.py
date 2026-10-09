@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 
 
-BRANCHES = ("feature/update-year", "feature/year-update")
+BRANCHES = ("feature/test-update-year", "feature/test-year-update")
 RELEASE = re.compile(r"release/v?(\d+(?:\.\d+)*)\Z")
 MAX_FILE_BYTES = 10 * 1024 * 1024
 
@@ -231,7 +231,7 @@ def choose_branch(repo, branches, base, settings, holders, year):
     for branch in BRANCHES:
         if branch not in branches:
             return branch, None
-    raise RolloverError("Both feature/update-year and feature/year-update are occupied")
+    raise RolloverError("Both feature/test-update-year and feature/test-year-update are occupied")
 
 
 def push_new_branch(repo, branch, commit):
@@ -283,11 +283,12 @@ class Gitea:
 
     def open_pr(self, repo, base, branch, year, changes):
         body = (f"<!-- update-year:{year} -->\n"
+                "Test PR for copyright updates and Telegram notification. Do not merge.\n\n"
                 f"Update outdated company copyright notices to {year}.\n\n"
                 f"Target branch: `{base}`. Range start years and third-party notices are preserved.\n\n"
                 + "\n".join(f"- `{c.path}`: {c.count} replacement(s)" for c in changes)
-                + "\n\nCreated by ga-common's annual copyright workflow. Merge after the normal CI and review.")
-        pull = self.request(repo, "pulls", {"title": f"Update copyright year to {year}",
+                + "\n\nCreated by ga-common's isolated copyright update test.")
+        pull = self.request(repo, "pulls", {"title": f"[TEST] Update copyright year to {year}",
                             "head": branch, "base": base, "body": body})
         if not isinstance(pull, dict) or not pull.get("html_url"):
             raise RolloverError("Gitea did not return the created pull request URL")
@@ -365,7 +366,7 @@ def notify_results(results, year):
     if not token or not chats:
         print("::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - summary not sent")
         return
-    lines = [f"Copyright update to {year}", f"Created PRs: {len(created)}", ""]
+    lines = [f"[TEST] Copyright update to {year}", f"Created PRs: {len(created)}", ""]
     lines += [f"{result['repository']} ({result['base']}):\n{result['url']}" for result in created]
     if failed:
         lines += ["", "Failed repositories: " + ", ".join(failed)]
