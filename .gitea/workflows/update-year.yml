@@ -27,7 +27,7 @@ env:
 
 jobs:
   update-year:
-    if: github.event_name == 'push' && github.ref_name == 'feature/test-update-year'
+    if: github.event_name == 'push' && github.ref_name == 'feature/test-update-year' && !contains(github.event.head_commit.message, '[telegram-diagnostics]')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -61,3 +61,48 @@ jobs:
           path: update-year-output/
           retention-days: 30
           if-no-files-found: ignore
+
+  telegram-destination:
+    if: github.event_name == 'push' && github.ref_name == 'feature/test-update-year' && contains(github.event.head_commit.message, '[telegram-diagnostics]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Identify Telegram destination without sending messages
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import http.client
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chats = [chat.strip() for chat in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if chat.strip()]
+          if not token or not chats:
+              raise SystemExit("Telegram configuration is missing")
+
+          def read(method, payload):
+              request = urllib.request.Request(
+                  f"https://api.telegram.org/bot{token}/{method}",
+                  data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      result = json.load(response)
+              except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as error:
+                  raise SystemExit(f"Telegram {method} lookup failed: {type(error).__name__}") from None
+              if not result.get("ok"):
+                  raise SystemExit(f"Telegram {method} lookup was refused")
+              return result["result"]
+
+          bot = read("getMe", {})
+          print(json.dumps({"telegram_bot": bot.get("username")}, ensure_ascii=False))
+          for chat in dict.fromkeys(chats):
+              info = read("getChat", {"chat_id": chat})
+              title = info.get("title") or " ".join(info.get(key, "") for key in ("first_name", "last_name")).strip()
+              print(json.dumps({"telegram_destination": {"title": title, "type": info.get("type"),
+                               "username": info.get("username"), "is_forum": info.get("is_forum", False)}}, ensure_ascii=False))
+          PY
