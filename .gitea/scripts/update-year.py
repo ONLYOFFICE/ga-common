@@ -352,6 +352,45 @@ def write_report(output, results, year):
     return report
 
 
+def notify_results(results, year):
+    """Send one summary per configured chat after a publishing run."""
+    created = [result for result in results if result["status"] == "created-pr"]
+    failed = [result["repository"] for result in results if result["status"] == "error"]
+    if not created and not failed:
+        return
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chats = list(dict.fromkeys(chat.strip() for chat in os.environ.get("TELEGRAM_CHAT_ID", "").split(",")
+                              if chat.strip()))
+    if not token or not chats:
+        print("::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - summary not sent")
+        return
+    lines = [f"Copyright update to {year}", f"Created PRs: {len(created)}", ""]
+    lines += [f"{result['repository']} ({result['base']}):\n{result['url']}" for result in created]
+    if failed:
+        lines += ["", "Failed repositories: " + ", ".join(failed)]
+    host, run_id = os.environ.get("GITEA_HOST"), os.environ.get("GITHUB_RUN_ID")
+    if host and run_id:
+        repository = os.environ.get("GITHUB_REPOSITORY") or "ONLYOFFICE/ga-common"
+        lines += ["", f"Run: https://{host}/{repository}/actions/runs/{run_id}"]
+    text = "\n".join(lines)
+    for chat in chats:
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=json.dumps({"chat_id": chat, "text": text,
+                             "link_preview_options": {"is_disabled": True}}).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                reply = json.load(response)
+            if isinstance(reply, dict) and reply.get("ok") is True:
+                print("Copyright update summary sent to Telegram")
+            else:
+                print("::warning::Telegram refused the copyright update summary")
+        except (urllib.error.URLError, OSError, ValueError):
+            # Request URLs contain the bot token; never log exceptions or response bodies.
+            print("::warning::Could not send the copyright update summary to Telegram")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("run", "preview"))
@@ -391,6 +430,8 @@ def main(argv=None):
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
             stream.write(report)
+    if args.publish:
+        notify_results(results, args.year)
     return int(any(result["status"] == "error" for result in results))
 
 

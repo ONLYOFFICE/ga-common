@@ -2,8 +2,8 @@ name: Update year
 
 on:
   schedule:
-    # January 1, 06:00 UTC / 09:00 Moscow. No periodic checks during the year.
-    - cron: '0 6 1 1 *'
+    # December 20-26, 07:00 UTC / 10:00 Moscow; only Monday proceeds.
+    - cron: '0 7 20-26 12 *'
   workflow_dispatch:
     inputs:
       repositories:
@@ -58,7 +58,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Check schedule
+        id: schedule
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "schedule" && "$(date -u '+%m-%d-%u')" != 12-2[0-6]-1 ]]; then
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+            echo 'Outside the annual Monday in December 20-26; skipping.'
+            exit 0
+          fi
+          echo 'run=true' >> "$GITHUB_OUTPUT"
+
       - name: Checkout ga-common
+        if: steps.schedule.outputs.run == 'true'
         env:
           REF_NAME: ${{ github.ref_name }}
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
@@ -70,18 +84,22 @@ jobs:
           git clone "https://$GITEA_HOST/ONLYOFFICE/ga-common" --depth=1 --branch "$REF_NAME" .
 
       - name: Update copyright years
+        if: steps.schedule.outputs.run == 'true'
         env:
+          EVENT_NAME: ${{ github.event_name }}
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPOSITORIES: ${{ inputs.repositories }}
           YEAR: ${{ inputs.year }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           ARGS=(run --output update-year-output)
-          [[ -z "${YEAR:-}" ]] || ARGS+=(--year "$YEAR")
-          [[ -z "${REPOSITORIES:-}" ]] || ARGS+=(--repositories "$REPOSITORIES")
-          case "${GITHUB_EVENT_NAME:-workflow_dispatch}" in
-            schedule) ARGS+=(--publish) ;;
+          case "$EVENT_NAME" in
+            schedule)
+              YEAR="$(( $(date -u +%Y) + 1 ))"
+              ARGS+=(--publish) ;;
             workflow_dispatch)
               case "${DRY_RUN:-true}" in
                 true) ;;
@@ -90,10 +108,12 @@ jobs:
               esac ;;
             *) echo '::error::Unsupported trigger'; exit 1 ;;
           esac
+          [[ -z "${YEAR:-}" ]] || ARGS+=(--year "$YEAR")
+          [[ -z "${REPOSITORIES:-}" ]] || ARGS+=(--repositories "$REPOSITORIES")
           exec python3 .gitea/scripts/update-year.py "${ARGS[@]}"
 
       - name: Upload patches and report
-        if: always()
+        if: always() && steps.schedule.outputs.run == 'true'
         # Match the artifact version used by the other Gitea workflows.
         uses: actions/upload-artifact@v3.2.2
         with:

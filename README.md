@@ -58,7 +58,7 @@ Manually dispatched job that installs a given Document Server / Desktop Editors 
 
 ### Update copyright year
 
-Runs on January 1 to update company copyright years and open pull requests in configured Gitea repositories. Repositories are configured in `.gitea/workflows/update-year.yml`, which also supports manual dry runs.
+Runs on the Monday between December 20 and 26 at 10:00 Moscow time to open copyright update PRs for the next year, then sends one Telegram summary with the created PRs and any repository failures. Repositories are configured in `.gitea/workflows/update-year.yml`, which also supports manual dry runs.
 
 ### Claude Code Review
 
