@@ -83,6 +83,15 @@ When a Jenkins build fails, Jenkins triggers `.github/workflows/jenkins-analyze-
 5. **Root-cause (phase 2)** — Claude Code analyzes each failed stage over `src/`, guided by a build map, and emits a schema-validated JSON diagnosis.
 6. **Report** — each diagnosis is rendered to `stage_<slug>.md` and sent to Telegram, with a full `stages_report_<build>.zip`.
 
+#### Egress containment
+
+Phases 1–2 run `claude -p` over **untrusted** input — Jenkins build logs (arbitrary tool/compiler output) and cloned proprietary source — with the `Bash` tool and the Anthropic key in the job env. A prompt injection could otherwise try to exfiltrate the key or the source. Rather than rely on "treat as data" prompt wording alone, the workflow splits into two jobs by trust domain, each pinning a `step-security/harden-runner` egress allowlist (`egress-policy: block`) as its first step so there is nowhere to exfiltrate to even if the model is hijacked:
+
+- **`analyze`** runs Claude. Its allowlist covers only what phases 1–5 legitimately fetch (Anthropic, Jenkins, Gitea, npm, GitHub). It deliberately does **not** include `api.telegram.org`: the Telegram Bot API is an open, token-agnostic write endpoint (an attacker would use their own bot, not ours), so leaving it reachable from the Claude job would re-open the exfiltration channel. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` keeps the CLI itself to `api.anthropic.com`.
+- **`report`** (`needs: analyze`, `if: always()`) posts the finished analysis to Telegram. It never runs Claude, never clones source, and has no untrusted Bash — it only downloads the analysis artifacts and `curl`s them to the fixed org chat. It is the only job allowed to reach `api.telegram.org`.
+
+When adding a step that calls a new host, add it to that job's `allowed-endpoints` (an `egress-policy: audit` run lists what gets blocked). This is the GitHub-Actions-native counterpart of the Docker/Squid sandbox the Gitea PR-review pipeline uses for the same reason.
+
 #### Files
 
 - `.github/workflows/jenkins-analyze-build.yaml` — workflow definition (triggered by Jenkins)
