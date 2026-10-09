@@ -7,7 +7,7 @@
 # Prerequisites (Settings -> Secrets and variables -> Actions):
 #   vars:    JENKINS_URL, GITEA_URL
 #   secrets: JENKINS_USER, JENKINS_TOKEN, GITEA_TOKEN,
-#            ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#            JENKINS_ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 #
 # Two jobs by trust domain (see the egress notes on each):
 #   analyze - runs `claude -p` over UNTRUSTED Jenkins logs + proprietary source;

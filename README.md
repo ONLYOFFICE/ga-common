@@ -108,4 +108,4 @@ When adding a step that calls a new host, add it to that job's `allowed-endpoint
 #### Configuration
 
 - **vars:** `JENKINS_URL`, `GITEA_URL`
-- **secrets:** `JENKINS_USER`, `JENKINS_TOKEN`, `GITEA_TOKEN`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- **secrets:** `JENKINS_USER`, `JENKINS_TOKEN`, `GITEA_TOKEN`, `JENKINS_ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
