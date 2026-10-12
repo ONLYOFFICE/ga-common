@@ -56,6 +56,10 @@ Monthly empty commit to `feature/keeplive` to keep the repository active and pre
 
 Manually dispatched job that installs a given Document Server / Desktop Editors build across Windows and macOS runners for each edition and package type (inno-setup, MSI/advanced-installer, portable, DMG). The Windows Document Server job additionally waits for a healthcheck and runs the Puppeteer smoke-test suite; the Desktop Windows/macOS jobs verify the install/mount and report the installed version.
 
+### Update copyright year
+
+Runs on the Monday between December 20 and 26 at 10:00 Moscow time to open copyright update PRs for the next year, then sends one Telegram summary with the created PRs and any repository failures. Repositories are configured in `.gitea/workflows/update-year.yml`, which also supports manual dry runs.
+
 ### Claude Code Review
 
 Automated AI code review for pull requests across all connected Gitea repositories.
