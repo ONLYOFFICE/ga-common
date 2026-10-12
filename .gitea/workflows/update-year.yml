@@ -2,7 +2,7 @@ name: Update year
 
 on:
   schedule:
-    # December 20-26, 07:00 UTC / 10:00 Moscow; only Monday proceeds.
+    # December 20-26, 07:00 UTC; only Monday proceeds.
     - cron: '0 7 20-26 12 *'
   workflow_dispatch:
     inputs:
