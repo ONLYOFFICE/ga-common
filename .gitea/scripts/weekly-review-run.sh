@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Everything the weekly-release-review.yml workflow runs on the runner, one subcommand per step:
+# Everything the weekly-review.yml workflow runs on the runner, one subcommand per step:
 #
 #   weekly-review-run.sh prepare   clone the repository, pick the latest release/hotfix branch, list its commits
 #   weekly-review-run.sh sandbox   review every commit in the isolated container and write a fix for the ones with findings

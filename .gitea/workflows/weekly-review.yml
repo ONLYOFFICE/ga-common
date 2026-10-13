@@ -1,5 +1,5 @@
-name: Weekly Release Review
-run-name: "Weekly review - DocSpace-buildtools${{ inputs.dry_run && ' (dry run)' || '' }}"
+name: Weekly Review
+run-name: "Weekly Review • DocSpace-buildtools${{ inputs.dry_run && ' (dry run)' || '' }}"
 
 on:
   schedule:
@@ -60,7 +60,7 @@ env:
 
 concurrency:
   # Queue rather than cancel, same reasoning as claude-review.yml: a second run must find the first one's work done.
-  group: Weekly-Release-Review
+  group: Weekly-Review
   cancel-in-progress: false
 
 jobs:

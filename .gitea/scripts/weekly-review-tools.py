@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helpers for the weekly release review workflow (weekly-release-review.yml).
+"""Helpers for the weekly release review workflow (weekly-review.yml).
 
 Subcommands, each run as `python3 .gitea/scripts/weekly-review-tools.py <subcommand> [args]`:
 
