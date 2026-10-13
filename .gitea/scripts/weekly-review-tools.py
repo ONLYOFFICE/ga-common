@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+"""Helpers for the weekly release review workflow (weekly-release-review.yml).
+
+Subcommands, each run as `python3 .gitea/scripts/weekly-review-tools.py <subcommand> [args]`:
+
+  select  pick the findings worth a fix from a review result and render them as prompt text
+  split   do the same for the review of a run of commits, one set of findings per commit
+  render  turn the per-commit results of one branch into the pull request description
+  syntax-gate  refuse a staged fix that breaks a shell, Python, JSON or YAML file that parsed before it
+
+Stdlib only: the runners have no pip install step for these scripts.
+"""
+
+import argparse
+import ast
+import html
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+SEVERITY_RANK = {"low": 1, "medium": 2, "critical": 3}
+CONFIDENCE_RANK = {"unsure": 1, "likely": 2, "sure": 3}
+MAX_TITLE_CHARS = 120
+MAX_WHY_CHARS = 600
+MAX_BODY_CHARS = 60000
+SHA_PATTERN = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def clean(text, limit):
+    """One line, capped by characters, escaped for markdown that may contain model or commit text.
+
+    Idempotent on purpose: the shell side already HTML-escapes commit subjects and authors, so the text is
+    unescaped first, and the one escape here is the only one the reader ends up seeing.
+    """
+    flat = " ".join(html.unescape(str(text or "")).split())
+    # The pipeline's own window marker must never be reproduced from commit or model text.
+    flat = flat.replace("weekly-review-window-end", "weekly-review-window")
+    if len(flat) > limit:
+        flat = flat[: limit - 1].rstrip() + "..."
+    return html.escape(flat.replace("`", "'"), quote=False)
+
+
+def read_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return default
+
+
+def location_text(finding):
+    parts = []
+    for location in finding.get("locations") or []:
+        if isinstance(location, dict) and location.get("path"):
+            parts.append(f"{location['path']}:{location.get('line', '?')}")
+    return ", ".join(parts[:4])
+
+
+# ----------------------------------------------------------------------------
+# select
+# ----------------------------------------------------------------------------
+
+def review_findings(path):
+    """The findings of a review result file, objects only."""
+    data = read_json(path, {})
+    findings = data.get("findings") if isinstance(data, dict) else None
+    return [item for item in findings if isinstance(item, dict)] if isinstance(findings, list) else []
+
+
+def pick_findings(findings, min_severity, min_confidence, limit):
+    """The findings worth a fix, most severe first and numbered from 1: (chosen, how many met the threshold)."""
+    chosen = [
+        item for item in findings
+        if SEVERITY_RANK.get(item.get("severity"), 0) >= SEVERITY_RANK[min_severity]
+        and CONFIDENCE_RANK.get(item.get("confidence"), 0) >= CONFIDENCE_RANK[min_confidence]
+    ]
+    chosen.sort(key=lambda item: (-SEVERITY_RANK[item["severity"]], -CONFIDENCE_RANK[item["confidence"]]))
+    qualifying = len(chosen)
+    chosen = chosen[: max(limit, 0)]
+    for number, item in enumerate(chosen, start=1):
+        item["id"] = number
+    return chosen, qualifying
+
+
+def findings_text(chosen):
+    lines = []
+    for item in chosen:
+        lines.append(f"{item['id']}. [{item['severity']} / {item['confidence']}] {clean(item.get('title'), MAX_TITLE_CHARS)}")
+        lines.append(f"   Where: {clean(location_text(item), 300)}")
+        lines.append(f"   Why: {clean(item.get('why'), MAX_WHY_CHARS)}")
+        if item.get("fix_summary"):
+            lines.append(f"   Suggested change, a starting point to check against the code: {clean(item['fix_summary'], 300)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def write_selection(chosen, out_path, text_path):
+    with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(chosen, handle, ensure_ascii=False)
+    with open(text_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(findings_text(chosen))
+
+
+def main_select(argv):
+    parser = argparse.ArgumentParser(prog="weekly-review-tools.py select")
+    parser.add_argument("--findings", required=True, help="the review result JSON")
+    parser.add_argument("--out", required=True, help="where to write the selected findings as JSON")
+    parser.add_argument("--text-out", required=True, help="where to write the findings as prompt text")
+    parser.add_argument("--min-severity", default="medium", choices=sorted(SEVERITY_RANK))
+    parser.add_argument("--min-confidence", default="likely", choices=sorted(CONFIDENCE_RANK))
+    parser.add_argument("--max", type=int, default=5, dest="limit")
+    args = parser.parse_args(argv)
+
+    findings = review_findings(args.findings)
+    chosen, qualifying = pick_findings(findings, args.min_severity, args.min_confidence, args.limit)
+    write_selection(chosen, args.out, args.text_out)
+    # "kept qualifying total": what goes to the fix session, what met the threshold, what the review found.
+    print(f"{len(chosen)} {qualifying} {len(findings)}")
+    return 0
+
+
+# ----------------------------------------------------------------------------
+# split
+# ----------------------------------------------------------------------------
+
+def match_commit(reference, shas):
+    """The one listed commit a model-written hash points at, or None when it is missing, malformed or ambiguous."""
+    reference = str(reference or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", reference):
+        return None
+    hits = [sha for sha in shas if sha.startswith(reference)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def main_split(argv):
+    parser = argparse.ArgumentParser(prog="weekly-review-tools.py split")
+    parser.add_argument("--review", required=True, help="the review result JSON of a run of commits")
+    parser.add_argument("--shas", required=True, help="a file with the full hash of every commit of the run, one per line")
+    parser.add_argument("--out-dir", required=True, help="gets one directory per commit with selected.json, findings.txt and counts.txt")
+    parser.add_argument("--min-severity", default="medium", choices=sorted(SEVERITY_RANK))
+    parser.add_argument("--min-confidence", default="likely", choices=sorted(CONFIDENCE_RANK))
+    parser.add_argument("--max", type=int, default=5, dest="limit", help="most findings kept per commit")
+    args = parser.parse_args(argv)
+
+    with open(args.shas, encoding="utf-8") as handle:
+        shas = [line.strip() for line in handle if re.fullmatch(r"[0-9a-f]{40}", line.strip())]
+    if not shas:
+        print("no valid commit hashes", file=sys.stderr)
+        return 2
+    findings = review_findings(args.review)
+
+    groups = {sha: [] for sha in shas}
+    unattributed = 0
+    for item in findings:
+        owner = match_commit(item.get("commit"), shas)
+        if owner is None:
+            # The defect is at the head either way: it goes to the newest commit rather than being dropped.
+            owner = shas[-1]
+            unattributed += 1
+        groups[owner].append(item)
+
+    for sha in shas:
+        chosen, qualifying = pick_findings(groups[sha], args.min_severity, args.min_confidence, args.limit)
+        directory = Path(args.out_dir) / sha
+        directory.mkdir(parents=True, exist_ok=True)
+        write_selection(chosen, directory / "selected.json", directory / "findings.txt")
+        (directory / "counts.txt").write_text(f"{len(chosen)} {qualifying} {len(groups[sha])}\n", encoding="utf-8", newline="\n")
+    print(f"{len(findings)} finding(s) in all, {unattributed} without a usable commit (given to the newest one)")
+    return 0
+
+
+# ----------------------------------------------------------------------------
+# render
+# ----------------------------------------------------------------------------
+
+def commit_link(sha, base_url):
+    short = sha[:10] if SHA_PATTERN.match(sha or "") else "unknown"
+    if base_url and SHA_PATTERN.match(sha or ""):
+        return f"[`{short}`]({base_url.rstrip('/')}/{sha})"
+    return f"`{short}`"
+
+
+def size_note(result, large_lines):
+    """For a large commit: how big it was and what the review says it covered, so the coverage is visible."""
+    lines = int(result.get("lines") or 0)
+    if lines < large_lines:
+        return ""
+    summary = clean(result.get("review_summary"), 300)
+    return f" ({lines} changed lines{'; review: ' + summary if summary else ''})"
+
+
+def cut_note(result):
+    """Findings that met the threshold but were over the per-commit cap, so nobody assumes they were handled."""
+    cut = int(result.get("findings_cut") or 0)
+    return f" (+{cut} more finding{'s' if cut != 1 else ''} at or above the threshold, not handled: over the cap per commit)" if cut else ""
+
+
+def cost_note(result):
+    cost = float(result.get("cost_usd") or 0)
+    return f" (cost ${cost:.2f})" if cost >= 0.005 else ""
+
+
+def is_applied(result):
+    return result.get("status") == "fixed" and result.get("patch_status", "") in ("applied", "dry-run")
+
+
+def attention_reason(result):
+    status = result.get("status", "")
+    if status == "fixed":
+        note = clean(result.get("patch_note"), 300)
+        return f"the fix was not applied ({clean(result.get('patch_status'), 40) or 'unknown'}){': ' + note if note else ''}"
+    if status == "not-fixed":
+        return clean(result.get("reason"), 300) or "the fix session changed nothing"
+    return clean(result.get("reason"), 300) or clean(status, 60)
+
+
+def render_fixed(result, base_url, large_lines):
+    fix = result.get("fix") or {}
+    lines = [f"- {commit_link(result.get('sha'), base_url)} {clean(result.get('subject'), 150)}{size_note(result, large_lines)}{cut_note(result)}{cost_note(result)}"]
+    lines.append(f"  - **Fix commit:** {clean(fix.get('title'), 100)} (fix session's own confidence: {clean(fix.get('confidence'), 20) or 'unstated'})")
+    for item in result.get("findings_selected") or []:
+        location = clean(location_text(item), 200)
+        lines.append(f"  - **Finding {item.get('id', '?')}** [{clean(item.get('severity'), 20)} / {clean(item.get('confidence'), 20)}] "
+                     f"{clean(item.get('title'), MAX_TITLE_CHARS)}{' - `' + location + '`' if location else ''}")
+    if fix.get("summary"):
+        lines.append(f"  - **What it does:** {clean(fix['summary'], 600)}")
+    unfixed = [entry for entry in fix.get("results") or []
+               if isinstance(entry, dict) and entry.get("outcome") == "not_fixed"]
+    for entry in unfixed:
+        lines.append(f"  - **Finding {clean(entry.get('id'), 10)} left as is:** {clean(entry.get('note'), 200) or 'no reason given'}")
+    if fix.get("not_verified"):
+        lines.append(f"  - **Not verified:** {clean(fix['not_verified'], 300)}")
+    return lines
+
+
+def render(args):
+    base = Path(args.dir)
+    results = []
+    for result_file in sorted(base.glob("c-*/result.json"), key=lambda path: int(re.sub(r"\D", "", path.parent.name) or 0)):
+        data = read_json(result_file, None)
+        if isinstance(data, dict):
+            results.append(data)
+
+    fixed = [result for result in results if is_applied(result)]
+    clean_commits = [result for result in results if result.get("status") == "clean"]
+    unreviewed = [result for result in results if result.get("status") in ("review-failed", "not-reviewed")]
+    unfinished = [result for result in results
+                  if not is_applied(result) and result.get("status") not in ("clean", "review-failed", "not-reviewed")]
+    # The fix session read the finding and disagreed: a different thing for a person to settle than a fix that failed.
+    disagree = [result for result in unfinished if result.get("status") == "not-fixed"]
+    attention = [result for result in unfinished if result.get("status") != "not-fixed"]
+    reviewed_count = len(results) - len(unreviewed)
+
+    skipped = []
+    try:
+        with open(base / "skipped.tsv", encoding="utf-8") as handle:
+            for row in handle:
+                parts = row.rstrip("\n").split("\t")
+                if len(parts) >= 3:
+                    skipped.append(parts)
+    except OSError:
+        pass
+    truncated = 0
+    try:
+        truncated = int((base / "truncated.txt").read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        pass
+
+    out = [
+        f"**Automated weekly review of `{clean(args.branch, 120)}`, {clean(args.week, 20)}.** Written by the Claude Weekly Review pipeline "
+        "and **not reviewed by a person**; every commit below is a suggestion to check, not a change to trust.",
+        "",
+        f"Looked at the commits {clean(args.window, 200) or 'of the last ' + str(args.since_days) + ' days'}: {reviewed_count} reviewed, {len(fixed)} with a proposed fix, "
+        f"{len(clean_commits)} with nothing to fix, {len(attention) + len(disagree)} needing a person"
+        f"{', ' + str(len(unreviewed)) + ' that could not be reviewed' if unreviewed else ''}. "
+        "Each fix is its own commit, written against the branch head on its own, so any of them can be dropped without affecting the rest.",
+    ]
+    if fixed:
+        out += ["", "### Proposed fixes", ""]
+        for result in fixed:
+            out += render_fixed(result, args.commit_base_url, args.large_lines)
+    if attention:
+        out += ["", "### Needs a person", ""]
+        for result in attention:
+            out.append(f"- {commit_link(result.get('sha'), args.commit_base_url)} {clean(result.get('subject'), 150)}{size_note(result, args.large_lines)}{cut_note(result)}{cost_note(result)} - {attention_reason(result)}")
+            for item in result.get("findings_selected") or []:
+                out.append(f"  - [{clean(item.get('severity'), 20)} / {clean(item.get('confidence'), 20)}] {clean(item.get('title'), MAX_TITLE_CHARS)}"
+                           f" - `{clean(location_text(item), 200)}`")
+    if disagree:
+        out += ["", "### The fix session did not act on these findings", ""]
+        for result in disagree:
+            out.append(f"- {commit_link(result.get('sha'), args.commit_base_url)} {clean(result.get('subject'), 150)}{size_note(result, args.large_lines)}"
+                       f"{cost_note(result)} - {attention_reason(result)}")
+            for item in result.get("findings_selected") or []:
+                out.append(f"  - [{clean(item.get('severity'), 20)} / {clean(item.get('confidence'), 20)}] {clean(item.get('title'), MAX_TITLE_CHARS)}"
+                           f" - `{clean(location_text(item), 200)}`")
+    if unreviewed:
+        out += ["", "### Could not be reviewed", ""]
+        for result in unreviewed:
+            out.append(f"- {commit_link(result.get('sha'), args.commit_base_url)} {clean(result.get('subject'), 150)}{size_note(result, args.large_lines)}"
+                       f" - {clean(result.get('reason'), 300) or clean(result.get('status'), 60)}")
+    if clean_commits:
+        out += ["", "### Reviewed, nothing to fix", ""]
+        for result in clean_commits:
+            below = int(result.get("findings_below_threshold") or 0)
+            suffix = f" ({below} minor finding{'s' if below != 1 else ''} below the threshold)" if below else ""
+            out.append(f"- {commit_link(result.get('sha'), args.commit_base_url)} {clean(result.get('subject'), 150)}{size_note(result, args.large_lines)}{cost_note(result)}{suffix}")
+    if skipped or truncated:
+        out += ["", "### Not reviewed", ""]
+        for parts in skipped:
+            out.append(f"- {commit_link(parts[0], args.commit_base_url)} {clean(parts[2], 150)} - {clean(parts[1], 100)}")
+        if truncated:
+            out.append(f"- {truncated} older commit(s) over the limit of commits per run")
+    if args.run_url or args.cost:
+        out.append("")
+        if args.cost:
+            out.append(f"**Cost of the whole run (all branches):** ${clean(args.cost, 12)}")
+        if args.run_url:
+            out.append(f"**Run:** {clean(args.run_url, 300)}")
+
+    text = "\n".join(out) + "\n"
+    if len(text) > MAX_BODY_CHARS:
+        text = text[:MAX_BODY_CHARS].rsplit("\n", 1)[0] + "\n\n(truncated)\n"
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.write(text)
+    return 0
+
+
+def main_render(argv):
+    parser = argparse.ArgumentParser(prog="weekly-review-tools.py render")
+    parser.add_argument("--dir", required=True, help="the branch's work directory (c-N/result.json, skipped.tsv, truncated.txt)")
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--week", default="")
+    parser.add_argument("--since-days", default="7", help="used only when --window is not given")
+    parser.add_argument("--window", default="", help="the period reviewed, as a phrase: 'of the last 7 days', 'since <time> (...)'")
+    parser.add_argument("--large-lines", type=int, default=2000, help="from this many changed lines a commit's coverage note is shown")
+    parser.add_argument("--commit-base-url", default="", help="URL prefix a commit hash is appended to")
+    parser.add_argument("--cost", default="")
+    parser.add_argument("--run-url", default="")
+    return render(parser.parse_args(argv))
+
+
+# ----------------------------------------------------------------------------
+# syntax-gate
+# ----------------------------------------------------------------------------
+
+GATE_KINDS = {".sh": "bash", ".bash": "bash", ".envsh": "bash", ".py": "python", ".json": "json", ".yml": "yaml", ".yaml": "yaml"}
+
+
+def syntax_problem(kind, data):
+    """The first problem in `data` as a file of this kind, or None when it parses (or cannot be judged)."""
+    text = data.decode("utf-8", "replace")
+    if kind == "python":
+        try:
+            ast.parse(text)
+        except (SyntaxError, ValueError) as error:
+            return f"Python: {error}"
+    elif kind == "json":
+        try:
+            json.loads(text)
+        except ValueError as error:
+            return f"JSON: {error}"
+    elif kind == "yaml":
+        try:
+            import yaml  # optional: without it YAML is simply not judged
+        except ImportError:
+            return None
+        try:
+            list(yaml.safe_load_all(text))
+        except yaml.YAMLError as error:
+            return "YAML: " + " ".join(str(error).split())[:200]
+    elif kind == "bash":
+        with tempfile.TemporaryDirectory() as scratch:
+            path = os.path.join(scratch, "script.sh")
+            with open(path, "wb") as handle:
+                handle.write(data)
+            checked = subprocess.run(["bash", "-n", path], capture_output=True)
+            if checked.returncode != 0:
+                detail = checked.stderr.decode("utf-8", "replace").replace(path, "script").strip().splitlines()
+                return "shell: " + (detail[0] if detail else "syntax error")
+    return None
+
+
+def main_syntax_gate(argv):
+    parser = argparse.ArgumentParser(prog="weekly-review-tools.py syntax-gate")
+    parser.add_argument("--repo", required=True, help="the clone whose index holds the staged fix")
+    args = parser.parse_args(argv)
+
+    listing = subprocess.run(["git", "-C", args.repo, "diff", "--cached", "--name-only", "--diff-filter=AM", "-z"], capture_output=True)
+    problems = []
+    for raw_name in listing.stdout.split(b"\0"):
+        name = raw_name.decode("utf-8", "replace")
+        kind = GATE_KINDS.get(os.path.splitext(name)[1].lower())
+        if not name or not kind:
+            continue
+        after = subprocess.run(["git", "-C", args.repo, "show", f":{name}"], capture_output=True)
+        problem = syntax_problem(kind, after.stdout) if after.returncode == 0 else None
+        if not problem:
+            continue
+        before = subprocess.run(["git", "-C", args.repo, "show", f"HEAD:{name}"], capture_output=True)
+        # A file that was already unparsable (a CRLF shell script, a template) is not this fix's doing: it cannot be judged.
+        if before.returncode == 0 and syntax_problem(kind, before.stdout):
+            continue
+        problems.append(f"{name}: {problem}")
+    if problems:
+        print("; ".join(problems), file=sys.stderr)
+        return 2
+    return 0
+
+
+COMMANDS = {"select": main_select, "split": main_split, "render": main_render, "syntax-gate": main_syntax_gate}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print("usage: weekly-review-tools.py {select|split|render|syntax-gate} [args...]", file=sys.stderr)
+        return 2
+    return COMMANDS[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

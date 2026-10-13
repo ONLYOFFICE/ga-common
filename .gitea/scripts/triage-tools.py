@@ -259,6 +259,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import textwrap
 import unicodedata
 import urllib.error
@@ -1575,9 +1576,25 @@ def path_problem(path):
     return None
 
 
+def apply_dry_run_three_way(repo, patch):
+    """Would `git apply --3way` take this patch? Tried on a throwaway copy of the index, so the tree is never touched."""
+    index_path = git(repo, "rev-parse", "--git-path", "index").stdout.decode("utf-8", "replace").strip()
+    index_path = os.path.join(repo, index_path)  # relative to the repository root; an absolute path wins the join
+    if not index_path or not os.path.isfile(index_path):
+        return subprocess.CompletedProcess([], 1, b"", b"cannot find the index")
+    with tempfile.TemporaryDirectory() as scratch:
+        scratch_index = os.path.join(scratch, "index")
+        shutil.copyfile(index_path, scratch_index)
+        env = dict(os.environ, GIT_INDEX_FILE=scratch_index)
+        return subprocess.run(["git", "-C", repo, "apply", "--3way", "--cached", "-"], input=patch, capture_output=True, env=env)
+
+
 def main_check_patch():
-    if len(sys.argv) != 3:
-        print("usage: triage-tools.py check-patch PATCH_FILE REPO_DIR", file=sys.stderr)
+    # The optional third argument lets a patch whose context an earlier patch has moved still pass: a
+    # real conflict (the same or neighbouring lines) fails the three-way merge just as it fails a plain apply.
+    three_way = len(sys.argv) == 4 and sys.argv[3] == "--3way"
+    if len(sys.argv) != 3 and not three_way:
+        print("usage: triage-tools.py check-patch PATCH_FILE REPO_DIR [--3way]", file=sys.stderr)
         return 2
     patch_path, repo = sys.argv[1], sys.argv[2]
     try:
@@ -1628,7 +1645,7 @@ def main_check_patch():
         if re.search(r"\bmode (120000|160000)\b", line) or "=> 120000" in line or "=> 160000" in line:
             return refuse("the patch adds a symlink or a submodule pointer: " + line.strip())
 
-    check = git(repo, "apply", "--check", "-", data=patch)
+    check = apply_dry_run_three_way(repo, patch) if three_way else git(repo, "apply", "--check", "-", data=patch)
     if check.returncode != 0:
         return refuse("the patch does not apply: " + check.stderr.decode("utf-8", "replace").strip()[:200])
 

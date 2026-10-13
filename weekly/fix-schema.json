@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "summary", "confidence", "results"],
+  "properties": {
+    "title": { "type": "string", "maxLength": 72, "description": "The commit subject: an imperative phrase saying what changed, Sentence case, about 60 characters. No prefix, no trailing period, no commit hash." },
+    "summary": { "type": "string", "maxLength": 600, "description": "Two or three sentences for the reviewer: what was wrong, what the change does, and why that is enough. Specific to this change." },
+    "confidence": { "type": "string", "enum": ["high", "medium", "low"], "description": "high = the edit removes the defect and nothing else depends on the old behavior. medium = it plausibly fixes it but a caller or a platform variant was not checked. low = a best attempt." },
+    "results": {
+      "type": "array",
+      "description": "One entry per numbered finding you were given.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "outcome"],
+        "properties": {
+          "id": { "type": "integer", "description": "The finding's number from the list you were given." },
+          "outcome": { "type": "string", "enum": ["fixed", "not_fixed"], "description": "fixed = this edit resolves it. not_fixed = you made no change for it." },
+          "note": { "type": "string", "maxLength": 200, "description": "For not_fixed: why. Omit for fixed." }
+        }
+      }
+    },
+    "not_verified": { "type": "string", "maxLength": 300, "description": "What you could not check here and a reviewer should - a build, a platform, a caller you did not open. Omit when nothing applies." }
+  }
+}
