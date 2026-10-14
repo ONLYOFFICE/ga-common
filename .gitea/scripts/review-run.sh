@@ -666,6 +666,7 @@ post_review_and_set_status() {
   if [ ! -s claude-output.md ] || ! grep -q "<details>" claude-output.md 2>/dev/null; then
     IS_FALLBACK=true
     { printf '**Review error** — could not complete. See the [workflow run](%s) for details.' "$(_run_url)"
+      printf '\n\nTo retry, comment `/review` (PR author only) or push a new commit. If it keeps failing, write to @evgeniy-antonyuk.'
       # Skip the wrap if the previous comment is itself an error fallback - otherwise consecutive
       # failures nest a "Previous review" wrapper inside a "Previous review" wrapper each time.
       if [ -f repo/previous-claude-output.md ] && ! grep -q '^\*\*Review error\*\*' repo/previous-claude-output.md; then
