@@ -208,6 +208,17 @@ def is_work_in_progress(title, prefixes):
     return False
 
 
+def is_wip_removal(payload, prefixes):
+    # Gitea reports the previous title under changes.title.from when a title is edited.
+    old_title = (((payload.get("changes") or {}).get("title")) or {}).get("from")
+    pull_request = payload.get("pull_request") or {}
+    new_title = pull_request.get("title")
+    # Unlike the other actions, a title edit can also happen on a closed or merged PR.
+    if old_title is None or pull_request.get("state") == "closed" or pull_request.get("merged"):
+        return False
+    return is_work_in_progress(old_title, prefixes) and not is_work_in_progress(new_title, prefixes)
+
+
 def get_repo_full_name(payload):
     repository = payload.get("repository") or {}
     full_name = repository.get("full_name") or ""
@@ -322,7 +333,11 @@ def lambda_handler(event, context):
         return response(400, {"ok": False, "error": "invalid JSON body"})
 
     action = payload.get("action") or ""
-    if action not in config["allowed_actions"]:
+    if action == "edited":
+        # A title edit starts a review only when it removes the WIP prefix; other edits are ignored.
+        if not is_wip_removal(payload, config["wip_prefixes"]):
+            return response(200, {"ok": True, "ignored": True, "reason": "edit is not a WIP removal"})
+    elif action not in config["allowed_actions"]:
         return response(200, {"ok": True, "ignored": True, "reason": "unsupported action", "action": action})
 
     pull_request = payload.get("pull_request")
