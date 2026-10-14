@@ -49,6 +49,10 @@ CHECK_ONLY_REPOSITORIES = tuple(
 # Matching is case-insensitive with an alphanumeric-continuation guard: a bare prefix like "WIP"
 # matches "WIP", "WIP:", "WIP - x", "WIP foo" but never "WIPe".
 DEFAULT_WIP_PREFIXES = "WIP,[WIP],(WIP),Draft,[Draft],(Draft)"
+# A PR comment whose first line is exactly this re-runs the review. Override with REVIEW_COMMAND env var.
+DEFAULT_REVIEW_COMMAND = "/review"
+# Gitea names the PR comment webhook event "pull_request_comment"; GitHub-style senders use "issue_comment".
+COMMENT_EVENTS = ("issue_comment", "pull_request_comment")
 
 
 def load_config():
@@ -108,6 +112,7 @@ def load_config():
             for value in os.getenv("SKIP_BRANCH_MERGES", DEFAULT_SKIP_BRANCH_MERGES).split(",")
             if value.strip()
         ),
+        "review_command": os.getenv("REVIEW_COMMAND", DEFAULT_REVIEW_COMMAND).strip() or DEFAULT_REVIEW_COMMAND,
     }
 
 
@@ -219,6 +224,36 @@ def is_wip_removal(payload, prefixes):
     return is_work_in_progress(old_title, prefixes) and not is_work_in_progress(new_title, prefixes)
 
 
+def comment_ignore_reason(payload, command):
+    if (payload.get("action") or "") != "created":
+        return "unsupported action"
+    issue = payload.get("issue") or {}
+    if not (payload.get("is_pull") or issue.get("pull_request")):
+        return "comment is not on a pull request"
+    # The command must be the whole first line, so quoting it inside a sentence never starts a run.
+    lines = ((payload.get("comment") or {}).get("body") or "").strip().splitlines()
+    if not lines or lines[0].strip().casefold() != command.casefold():
+        return "not a review command"
+    return ""
+
+
+def fetch_pull_request(config, full_name, number):
+    path = f"/api/v1/repos/{urllib.parse.quote(full_name, safe='/')}/pulls/{urllib.parse.quote(str(number), safe='')}"
+    request = urllib.request.Request(
+        url=config["gitea_url"] + path,
+        headers={
+            "Authorization": "token " + config["gitea_token"],
+            "Accept": "application/json",
+            "User-Agent": "ga-common-claude-review-dispatch-lambda",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as result:
+            return json.loads(result.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
 def get_repo_full_name(payload):
     repository = payload.get("repository") or {}
     full_name = repository.get("full_name") or ""
@@ -324,7 +359,7 @@ def lambda_handler(event, context):
         return response(401, {"ok": False, "error": "bad signature"})
 
     event_name = normalize_headers(headers).get("x-gitea-event") or normalize_headers(headers).get("x-github-event")
-    if event_name and event_name != "pull_request":
+    if event_name and event_name != "pull_request" and event_name not in COMMENT_EVENTS:
         return response(200, {"ok": True, "ignored": True, "reason": "unsupported event"})
 
     try:
@@ -332,20 +367,40 @@ def lambda_handler(event, context):
     except json.JSONDecodeError:
         return response(400, {"ok": False, "error": "invalid JSON body"})
 
-    action = payload.get("action") or ""
-    if action == "edited":
-        # A title edit starts a review only when it removes the WIP prefix; other edits are ignored.
-        if not is_wip_removal(payload, config["wip_prefixes"]):
-            return response(200, {"ok": True, "ignored": True, "reason": "edit is not a WIP removal"})
-    elif action not in config["allowed_actions"]:
-        return response(200, {"ok": True, "ignored": True, "reason": "unsupported action", "action": action})
+    # A review command comment re-runs the review on demand and, being explicit, also works on a WIP PR.
+    force = event_name in COMMENT_EVENTS
+    if force:
+        reason = comment_ignore_reason(payload, config["review_command"])
+        if reason:
+            return response(200, {"ok": True, "ignored": True, "reason": reason})
 
-    pull_request = payload.get("pull_request")
-    if not pull_request:
-        return response(200, {"ok": True, "ignored": True, "reason": "missing pull_request"})
+        number = (payload.get("issue") or {}).get("number")
+        pull_request = fetch_pull_request(config, get_repo_full_name(payload), number)
+        if pull_request is None:
+            return response(502, {"ok": False, "error": "could not fetch the pull request"})
+        if pull_request.get("state") == "closed" or pull_request.get("merged"):
+            return response(200, {"ok": True, "ignored": True, "reason": "pull request is closed"})
+        # Only the PR author may re-run the review: every run costs money and a comment is open to anyone.
+        commenter = ((payload.get("comment") or {}).get("user") or payload.get("sender") or {}).get("login") or ""
+        author = (pull_request.get("user") or {}).get("login") or ""
+        if not commenter or commenter.casefold() != author.casefold():
+            return response(200, {"ok": True, "ignored": True, "reason": "commenter is not the pull request author"})
+        payload ={"repository": payload.get("repository"), "number": number, "pull_request": pull_request}
+    else:
+        action = payload.get("action") or ""
+        if action == "edited":
+            # A title edit starts a review only when it removes the WIP prefix; other edits are ignored.
+            if not is_wip_removal(payload, config["wip_prefixes"]):
+                return response(200, {"ok": True, "ignored": True, "reason": "edit is not a WIP removal"})
+        elif action not in config["allowed_actions"]:
+            return response(200, {"ok": True, "ignored": True, "reason": "unsupported action", "action": action})
 
-    if is_work_in_progress(pull_request.get("title"), config["wip_prefixes"]):
-        return response(200, {"ok": True, "ignored": True, "reason": "work in progress"})
+        pull_request = payload.get("pull_request")
+        if not pull_request:
+            return response(200, {"ok": True, "ignored": True, "reason": "missing pull_request"})
+
+        if is_work_in_progress(pull_request.get("title"), config["wip_prefixes"]):
+            return response(200, {"ok": True, "ignored": True, "reason": "work in progress"})
 
     try:
         inputs = extract_dispatch_inputs(payload)
@@ -383,6 +438,8 @@ def lambda_handler(event, context):
     dispatch_inputs = {"pr_url": pr_url}
     if check_only:
         dispatch_inputs["check_only"] = "true"
+    if force:
+        dispatch_inputs["force"] = "true"
     status, body = dispatch_workflow(config, dispatch_inputs)
     if status < 200 or status >= 300:
         return response(
