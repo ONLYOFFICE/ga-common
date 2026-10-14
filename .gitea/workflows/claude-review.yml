@@ -25,12 +25,11 @@ on:
         type: string
         default: '2.1.284'
       effort:
-        description: 'Reasoning effort level (auto: high for small diffs, medium for large)'
+        description: 'Reasoning effort level'
         required: false
         type: choice
-        default: 'auto'
+        default: 'high'
         options:
-          - auto
           - low
           - medium
           - high
@@ -198,7 +197,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
           CLAUDE_MODEL: ${{ inputs.model }}
           CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
-          CLAUDE_EFFORT: ${{ inputs.effort == 'auto' && steps.prepare.outputs.effort || inputs.effort }}
+          CLAUDE_EFFORT: ${{ inputs.effort }}
           CLAUDE_MAX_BUDGET_USD: ${{ inputs.max_budget_usd }}
           # Well inside the job's own 26 minutes, so a hung session fails as a step - with its log,
           # and with the notify step still to come - instead of being killed along with the job.
