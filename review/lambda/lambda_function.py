@@ -27,9 +27,9 @@ ALLOWED_BASE_BRANCH_PATTERNS = tuple(
     for value in os.getenv("ALLOWED_BASE_BRANCH_PATTERNS", "main,master,develop,release/*,hotfix/*").split(",")
     if value.strip()
 )
-# Head>base branch pairs that are never reviewed: promoting release/hotfix to the stable branch
-# only moves code that was already reviewed on its way into that release/hotfix branch.
-DEFAULT_SKIP_BRANCH_MERGES = "release/*>master,release/*>main,hotfix/*>master,hotfix/*>main"
+# Head>base branch pairs that are never reviewed: a release/hotfix branch only carries code that was
+# already reviewed on its way in, so merging it anywhere (master, develop, hotfix) adds nothing new.
+DEFAULT_SKIP_BRANCH_MERGES = "release/*>*,hotfix/*>*"
 ALLOWED_REPOSITORIES = tuple(
     value.strip()
     for value in os.getenv("ALLOWED_REPOSITORIES", "").split(",")
@@ -432,7 +432,7 @@ def lambda_handler(event, context):
         return response(200, {"ok": True, "ignored": True, "reason": "base branch not allowed"})
 
     if is_skipped_branch_merge(inputs["pr_branch"], inputs["base_branch"], config["skip_branch_merges"]):
-        return response(200, {"ok": True, "ignored": True, "reason": "release/hotfix merge into stable branch"})
+        return response(200, {"ok": True, "ignored": True, "reason": "merge from a release/hotfix branch"})
 
     pr_url = f"{config['gitea_url']}/{full_name}/pulls/{inputs['pr_number']}"
     dispatch_inputs = {"pr_url": pr_url}
