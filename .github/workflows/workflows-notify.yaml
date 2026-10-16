@@ -99,25 +99,14 @@ jobs:
           # Workflows/Buildservers: daily, whenever enabled.
           FULL_MESSAGE=""
           [[ "$PUBLISH_WORKFLOWS" == "true" || "$PUBLISH_BUILDSERVERS" == "true" ]] && FULL_MESSAGE="$(build_workflows_report)"
+          SEND_FAILED=0
+          send_telegram "$FULL_MESSAGE" || SEND_FAILED=1
 
           # Claude Review: weekly, Fridays only — or any day via manual dispatch (testing).
           IS_FRIDAY=false; [[ "$(date -u +%u)" == "5" ]] && IS_FRIDAY=true
-          FULL_REVIEW_MESSAGE=""
           if [[ "$PUBLISH_CLAUDE_REVIEW" == "true" ]] && { $IS_FRIDAY || [[ "$EVENT_NAME" == "workflow_dispatch" ]]; }; then
-            FULL_REVIEW_MESSAGE="$(render_claude_review)"
+            REVIEW_MESSAGES=()
+            render_claude_review REVIEW_MESSAGES
+            send_telegram "${REVIEW_MESSAGES[@]}" || SEND_FAILED=1
           fi
-
-          # Combine and send once.
-          COMBINED_MESSAGE="$FULL_MESSAGE"
-          [[ -n "$FULL_REVIEW_MESSAGE" && -n "$COMBINED_MESSAGE" ]] && COMBINED_MESSAGE+=$'\n\n'
-          COMBINED_MESSAGE+="$FULL_REVIEW_MESSAGE"
-          [[ -z "$COMBINED_MESSAGE" ]] && exit 0
-
-          echo "$COMBINED_MESSAGE"
-          for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
-            PAYLOAD="$(jq -n --arg chat_id "$CHAT_ID" --arg text "$COMBINED_MESSAGE" \
-              '{chat_id: ($chat_id|tonumber), text: $text, parse_mode: "HTML", disable_web_page_preview: true}')"
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -H "Content-Type: application/json" \
-              -d "$PAYLOAD"
-          done
+          exit "$SEND_FAILED"

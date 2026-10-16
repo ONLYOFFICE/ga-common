@@ -83,6 +83,33 @@ html_escape() {
   printf '%s' "$VALUE"
 }
 
+# Count rendered text conservatively: entities may be overcounted, emoji use
+# two UTF-16 units. printf matches the report renderer's escaped newlines.
+telegram_text_length() {
+  local BYTES
+  BYTES="$(printf '%b' "$1" | sed 's/<[^>]*>//g' | iconv -f UTF-8 -t UTF-16LE | wc -c)"
+  printf '%s' "$((BYTES / 2))"
+}
+
+# Send each report to every configured chat; a failed delivery must fail the job
+# without preventing delivery to the remaining recipients.
+send_telegram() {
+  local MESSAGE CHAT_ID PAYLOAD FAILED=0
+  for MESSAGE in "$@"; do
+    [[ -z "$MESSAGE" ]] && continue
+    echo "$MESSAGE"
+    for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
+      PAYLOAD="$(jq -n --arg chat_id "$CHAT_ID" --arg text "$MESSAGE" \
+        '{chat_id: ($chat_id|tonumber), text: $text, parse_mode: "HTML", disable_web_page_preview: true}')" || { FAILED=1; continue; }
+      curl --fail-with-body -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -H "Content-Type: application/json" -d "$PAYLOAD" || FAILED=1
+    done
+    # Telegram recommends at most one message per second to the same chat.
+    sleep 1
+  done
+  return "$FAILED"
+}
+
 buildserver_url() {
   local SERVER_VAR="$1" PATH_PART="${2:-}" BASE
   [[ "$SERVER_VAR" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
@@ -312,10 +339,14 @@ build_workflows_report() {
 # state" row per PR (verdict, severity/fixed counts, open errors), and renders
 # the stats digest — a <pre> block (run count, PRs reviewed, pass/fail bar,
 # one bar per severity) plus an error list and a collapsible PR list, both
-# linking out. Echoes the finished HTML message, or nothing if there's no data.
+# linking out. Fills the array named by $1 with complete HTML messages; long
+# reports continue between entries, preserving every error link and repository.
 render_claude_review() {
+  local -n _REVIEW_MESSAGES=$1
+  _REVIEW_MESSAGES=()
   local AUTH="token $GITEA_TOKEN"
   local API_BASE="https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/ga-common"
+  local MAX_LENGTH=3900 # Leave room for part numbers below Telegram's limit.
 
   local CUTOFF
   case "${CLAUDE_REVIEW_PERIOD:-week}" in
@@ -505,6 +536,10 @@ render_claude_review() {
     BLOCK+="⚠️ ${R_ERRCOUNT} PR(s) with errors:\n"
     local ENTRY
     for ENTRY in "${R_ERRLIST[@]}"; do
+      if (( $(telegram_text_length "${BLOCK}${ENTRY}\n") > MAX_LENGTH )); then
+        _REVIEW_MESSAGES+=("$(printf '%b' "$BLOCK")")
+        BLOCK="<pre>Claude Review</pre>\n⚠️ Errors (continued):\n"
+      fi
       BLOCK+="${ENTRY}\n"
     done
   fi
@@ -563,10 +598,15 @@ render_claude_review() {
       fi
     }
 
-    BLOCK+="<blockquote expandable>\n"
-    BLOCK+="<i>reviewed PRs · bugs found/fixed</i>\n\n"
+    local REPO_HEADER="<blockquote expandable>\n<i>reviewed PRs · bugs found/fixed</i>\n\n"
+    if (( $(telegram_text_length "${BLOCK}${REPO_HEADER}") > MAX_LENGTH )); then
+      _REVIEW_MESSAGES+=("$(printf '%b' "$BLOCK")")
+      BLOCK="<pre>Claude Review</pre>\n"
+    fi
+    BLOCK+="$REPO_HEADER"
+    local REPO_ENTRY
     for REPO in "${SREPOS[@]}"; do
-      BLOCK+="<b><a href=\"https://${GITEA_HOST}/${GITHUB_ORG}/${REPO}\">${REPO}</a></b> · <code>${REPO_TOTAL[$REPO]}</code>\n"
+      REPO_ENTRY="<b><a href=\"https://${GITEA_HOST}/${GITHUB_ORG}/${REPO}\">${REPO}</a></b> · <code>${REPO_TOTAL[$REPO]}</code>\n"
       # The whole severity row is a single <code> span: the padding only lines
       # up if it sits inside one monospace entity, not per-severity pills.
       local BUG_ROW=""
@@ -576,10 +616,20 @@ render_claude_review() {
       repo_bug_slot "🟣" "${REPO_LEG[$REPO]:-0}" "${REPO_FLEG[$REPO]:-0}"
       # Drop the padding of the last slot so the <code> background ends on a digit.
       if [[ "$BUG_ROW" =~ ^(.*[^[:space:]]) ]]; then BUG_ROW="${BASH_REMATCH[1]}"; fi
-      BLOCK+="<code>${BUG_ROW}</code>\n\n"
+      REPO_ENTRY+="<code>${BUG_ROW}</code>\n\n"
+      if (( $(telegram_text_length "${BLOCK}${REPO_ENTRY}") > MAX_LENGTH )); then
+        _REVIEW_MESSAGES+=("$(printf '%b' "${BLOCK}</blockquote>")")
+        BLOCK="<pre>Claude Review</pre>\n${REPO_HEADER}"
+      fi
+      BLOCK+="$REPO_ENTRY"
     done
     BLOCK+="</blockquote>"
   fi
 
-  printf '%b' "$BLOCK"
+  _REVIEW_MESSAGES+=("$(printf '%b' "$BLOCK")")
+  if (( ${#_REVIEW_MESSAGES[@]} > 1 )); then
+    for i in "${!_REVIEW_MESSAGES[@]}"; do
+      _REVIEW_MESSAGES[$i]="${_REVIEW_MESSAGES[$i]/Claude Review/Claude Review ($((i + 1))\/${#_REVIEW_MESSAGES[@]})}"
+    done
+  fi
 }
