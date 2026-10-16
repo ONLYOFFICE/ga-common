@@ -23,11 +23,17 @@ JQ_QUERY='(if type=="object" then .workflow_runs//[] else [] end|if type!="array
 fetch() {
   local AUTH="Authorization: $1" URL=$2 CUTOFF="${3:-$T24}"
   [[ ! "$URL" =~ \?page=[0-9]+ ]] && { curl -s --retry 3 --retry-delay 1 -H "$AUTH" "$URL"; return; }
-  local ORIG="${BASH_REMATCH[0]}" TMP="$(mktemp)" PAGE=1 OLDEST
+  local ORIG="${BASH_REMATCH[0]}" TMP="$(mktemp)" PAGE=1 PAGE_RUNS NEWEST
   while true; do
-    curl -s --retry 3 --retry-delay 1 -H "$AUTH" "${URL/$ORIG/?page=$PAGE}" | jq -c '.workflow_runs[]?' 2>/dev/null >> "$TMP"
-    OLDEST="$(tail -1 "$TMP" | jq -r '.created_at//.started_at//.updated_at//""' 2>/dev/null)"
-    [[ -z "$OLDEST" || "$OLDEST" < "$CUTOFF" ]] && break; (( PAGE++ ))
+    PAGE_RUNS="$(curl -fsS --retry 3 --retry-delay 1 -H "$AUTH" "${URL/$ORIG/?page=$PAGE}")" || { rm -f "$TMP"; return 1; }
+    PAGE_RUNS="$(jq -c '.workflow_runs[]' <<< "$PAGE_RUNS")" || { rm -f "$TMP"; return 1; }
+    [[ -z "$PAGE_RUNS" ]] && break
+    printf '%s\n' "$PAGE_RUNS" >> "$TMP"
+    # Gitea uses the Unix epoch for runs canceled before starting. A single
+    # such run at the end of a page must not cut off the rest of the history.
+    NEWEST="$(jq -sr 'map(.created_at//.started_at//.updated_at//"") | max // ""' <<< "$PAGE_RUNS")"
+    [[ "$NEWEST" > "1970-01-02" && "$NEWEST" < "$CUTOFF" ]] && break
+    (( PAGE++ ))
   done
   jq -sc '{workflow_runs:.}' "$TMP"; rm -f "$TMP"
 }
