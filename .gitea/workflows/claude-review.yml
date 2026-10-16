@@ -53,6 +53,10 @@ on:
 
 env:
   GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+  # Head>base branch pairs whose review is off by default (only the non-ASCII check runs, plus a one-time notice on the PR):
+  # a release/hotfix/develop branch only carries code that was already reviewed on its way in. `force` (the /review comment) overrides it.
+  SKIP_REVIEW_MERGES: 'release/*>*,hotfix/*>*,develop>*'
+  SKIP_REVIEW_CONTACT: '@evgeniy-antonyuk'
 
 concurrency:
   group: Claude-Review-${{ inputs.pr_url }}
@@ -70,6 +74,7 @@ jobs:
       CHECK_ONLY: ${{ inputs.check_only }}
     steps:
       - name: Resolve inputs
+        id: resolve
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
@@ -96,9 +101,28 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Resolved: $ORG_NAME/$REPO_NAME!$PR_NUMBER ($PR_BRANCH → $BASE_BRANCH @ ${PR_SHA:0:10})"
 
+          # A skipped pair runs in check-only mode; a repository that is check-only anyway gets no notice, and an explicit force overrides the skip.
+          REVIEW_SKIPPED=false
+          if [ "$CHECK_ONLY" != "true" ] && [ "$FORCE_REVIEW" != "true" ]; then
+            IFS=',' read -ra SKIP_RULES <<< "${SKIP_REVIEW_MERGES// /}"
+            for rule in "${SKIP_RULES[@]}"; do
+              [[ "$rule" == *">"* ]] || continue
+              # Unquoted on the right-hand side on purpose: the patterns are globs.
+              if [[ "$PR_BRANCH" == ${rule%%>*} && "$BASE_BRANCH" == ${rule#*>} ]]; then
+                REVIEW_SKIPPED=true
+                break
+              fi
+            done
+          fi
+          ONLY_CHECK=$CHECK_ONLY
+          [ "$REVIEW_SKIPPED" = "true" ] && ONLY_CHECK=true
+          { echo "ONLY_CHECK=$ONLY_CHECK"; echo "REVIEW_SKIPPED=$REVIEW_SKIPPED"; } >> "$GITHUB_ENV"
+          { echo "only_check=$ONLY_CHECK"; echo "skipped=$REVIEW_SKIPPED"; } >> "$GITHUB_OUTPUT"
+          [ "$REVIEW_SKIPPED" = "true" ] && echo "Review skipped by default for $PR_BRANCH → $BASE_BRANCH (check-only mode)" || true
+
       - name: Select API key
         id: select_key
-        if: env.CHECK_ONLY != 'true'
+        if: steps.resolve.outputs.only_check != 'true'
         env:
           ANTHROPIC_KEYS: ${{ secrets.ANTHROPIC_KEYS }}
           ANTHROPIC_KEY_DEFAULT: ${{ secrets.ANTHROPIC_KEY_DEFAULT }}
@@ -141,7 +165,7 @@ jobs:
           git config --global credential.helper '!f(){ echo "username=oauth2"; echo "password=$GITEA_TOKEN"; }; f'
           git clone "https://$GITEA_HOST/$ORG_NAME/ga-common" --depth=1 --branch "$REF_NAME" .
           # The check-only path needs nothing but the PR diff, so it skips cloning the target repo.
-          if [ "$CHECK_ONLY" = "true" ]; then
+          if [ "$ONLY_CHECK" = "true" ]; then
             mkdir repo
             exit 0
           fi
@@ -163,16 +187,25 @@ jobs:
 
       - name: Fetch PR diff (check only)
         id: diff
-        if: env.CHECK_ONLY == 'true'
+        if: steps.resolve.outputs.only_check == 'true'
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
         run: |
           set -euo pipefail
           bash .gitea/scripts/review-run.sh fetch-diff
 
+      - name: Post skipped-review notice
+        if: steps.resolve.outputs.skipped == 'true' && steps.diff.outputs.skip != 'true'
+        continue-on-error: true
+        env:
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash .gitea/scripts/review-run.sh skip-notice
+
       - name: Prepare review context
         id: prepare
-        if: env.CHECK_ONLY != 'true'
+        if: steps.resolve.outputs.only_check != 'true'
         env:
           GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
           BUGZILLA_API_KEY: ${{ secrets.BUGZILLA_API_KEY }}
@@ -192,7 +225,7 @@ jobs:
           bash .gitea/scripts/review-run.sh english-check
 
       - name: Run review (isolated container)
-        if: env.CHECK_ONLY != 'true' && steps.prepare.outputs.skip != 'true'
+        if: steps.resolve.outputs.only_check != 'true' && steps.prepare.outputs.skip != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ steps.select_key.outputs.api_key }}
           CLAUDE_MODEL: ${{ inputs.model }}

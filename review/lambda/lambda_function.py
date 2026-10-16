@@ -27,9 +27,6 @@ ALLOWED_BASE_BRANCH_PATTERNS = tuple(
     for value in os.getenv("ALLOWED_BASE_BRANCH_PATTERNS", "main,master,develop,release/*,hotfix/*").split(",")
     if value.strip()
 )
-# Head>base branch pairs that are never reviewed: a release/hotfix/develop branch only carries code that was
-# already reviewed on its way in, so merging it anywhere adds nothing new.
-DEFAULT_SKIP_BRANCH_MERGES = "release/*>*,hotfix/*>*,develop>*"
 ALLOWED_REPOSITORIES = tuple(
     value.strip()
     for value in os.getenv("ALLOWED_REPOSITORIES", "").split(",")
@@ -107,11 +104,6 @@ def load_config():
             for value in os.getenv("WIP_PREFIXES", DEFAULT_WIP_PREFIXES).split(",")
             if value.strip()
         ),
-        "skip_branch_merges": tuple(
-            value.strip()
-            for value in os.getenv("SKIP_BRANCH_MERGES", DEFAULT_SKIP_BRANCH_MERGES).split(",")
-            if value.strip()
-        ),
         "review_command": os.getenv("REVIEW_COMMAND", DEFAULT_REVIEW_COMMAND).strip() or DEFAULT_REVIEW_COMMAND,
     }
 
@@ -167,17 +159,6 @@ def is_branch_allowed(branch, patterns):
         if pattern.endswith("*") and branch.startswith(pattern[:-1]):
             return True
         if branch == pattern:
-            return True
-
-    return False
-
-
-def is_skipped_branch_merge(head_branch, base_branch, skip_merges):
-    for rule in skip_merges:
-        head_pattern, separator, base_pattern = rule.partition(">")
-        if not separator:
-            continue
-        if is_branch_allowed(head_branch, (head_pattern.strip(),)) and is_branch_allowed(base_branch, (base_pattern.strip(),)):
             return True
 
     return False
@@ -430,9 +411,6 @@ def lambda_handler(event, context):
 
     if not is_branch_allowed(inputs["base_branch"], config["allowed_base_branch_patterns"]):
         return response(200, {"ok": True, "ignored": True, "reason": "base branch not allowed"})
-
-    if is_skipped_branch_merge(inputs["pr_branch"], inputs["base_branch"], config["skip_branch_merges"]):
-        return response(200, {"ok": True, "ignored": True, "reason": "merge from a release/hotfix branch"})
 
     pr_url = f"{config['gitea_url']}/{full_name}/pulls/{inputs['pr_number']}"
     dispatch_inputs = {"pr_url": pr_url}

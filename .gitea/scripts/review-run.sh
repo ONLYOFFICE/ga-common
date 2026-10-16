@@ -3,6 +3,7 @@
 #
 #   review-run.sh prepare        resolve the PR, fetch bug and discussion context
 #   review-run.sh fetch-diff     check-only mode: just fetch the PR diff for the non-ASCII gate
+#   review-run.sh skip-notice    post the one-time "review is off by default for this branch pair" comment
 #   review-run.sh english-check  the non-ASCII comment gate (its own commit status)
 #   review-run.sh sandbox        run the review in the isolated container
 #   review-run.sh post           render the review, post the comment and set the commit status
@@ -974,6 +975,28 @@ fetch_pr_diff_only() {
   fi
 }
 
+# Skipped-review mode: tells the PR once that the review is off by default for this branch pair. The text never
+# changes between pushes, so an existing notice is left alone instead of being edited or re-posted.
+post_skip_notice() {
+  local marker="<!-- Claude-Review-Skipped -->" existing
+  existing=$(fetch_all_comments "$ORG_NAME/$REPO_NAME/issues/$PR_NUMBER/comments" | jq -r --arg marker "$marker" '[.[] | select(.body | contains($marker))] | length') || {
+    echo "::warning::Could not list the PR comments - skipped-review notice not posted"
+    return 0
+  }
+  if [ "$existing" != "0" ]; then
+    echo "Skipped-review notice already present"
+    return 0
+  fi
+  local head="${PR_BRANCH//\`/}" base="${BASE_BRANCH//\`/}"
+  cat > /tmp/skip-notice.md <<EOF
+**Claude Code Review** is off by default for \`$head\` → \`$base\`: these changes were already reviewed.
+
+To run it anyway, the PR author can comment \`/review\`. Think this is a mistake? Contact ${SKIP_REVIEW_CONTACT}.
+EOF
+  upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/skip-notice.md "" "" "$marker" \
+    || echo "::warning::Could not post the skipped-review notice"
+}
+
 # The "Non-ASCII comment check" step: passes or fails a commit status of its own and keeps one
 # comment up to date, independently of the review itself.
 check_english_comments() {
@@ -1025,11 +1048,12 @@ review_main() {
   case "${1:-}" in
     prepare)        prepare_review_context ;;
     fetch-diff)     fetch_pr_diff_only ;;
+    skip-notice)    post_skip_notice ;;
     english-check)  check_english_comments ;;
     sandbox)        review_sandbox_step ;;
     post)           post_review_and_set_status ;;
     *)
-      echo "usage: review-run.sh {prepare|fetch-diff|english-check|sandbox|post}" >&2
+      echo "usage: review-run.sh {prepare|fetch-diff|skip-notice|english-check|sandbox|post}" >&2
       return 2
       ;;
   esac
