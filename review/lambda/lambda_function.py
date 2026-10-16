@@ -27,9 +27,9 @@ ALLOWED_BASE_BRANCH_PATTERNS = tuple(
     for value in os.getenv("ALLOWED_BASE_BRANCH_PATTERNS", "main,master,develop,release/*,hotfix/*").split(",")
     if value.strip()
 )
-# Head>base branch pairs that are never reviewed: a release/hotfix branch only carries code that was
-# already reviewed on its way in, so merging it anywhere (master, develop, hotfix) adds nothing new.
-DEFAULT_SKIP_BRANCH_MERGES = "release/*>*,hotfix/*>*"
+# Head>base branch pairs that are never reviewed: a release/hotfix/develop branch only carries code that was
+# already reviewed on its way in, so merging it anywhere adds nothing new.
+DEFAULT_SKIP_BRANCH_MERGES = "release/*>*,hotfix/*>*,develop>*"
 ALLOWED_REPOSITORIES = tuple(
     value.strip()
     for value in os.getenv("ALLOWED_REPOSITORIES", "").split(",")
