@@ -103,7 +103,7 @@ jobs:
           ANTHROPIC_KEYS: ${{ secrets.ANTHROPIC_KEYS }}
           ANTHROPIC_KEY_DEFAULT: ${{ secrets.ANTHROPIC_KEY_DEFAULT }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID_OPS: ${{ secrets.TELEGRAM_CHAT_ID_OPS }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
           printf '%s' "$ANTHROPIC_KEYS" | jq '.' > /dev/null 2>&1 || echo "::warning::ANTHROPIC_KEYS is not valid JSON"
@@ -118,10 +118,10 @@ jobs:
             # alerts. Written out here rather than shared, because ga-common is not
             # checked out yet at this step. --max-time because a hung curl here would block the
             # whole run on a notification nobody is waiting for.
-            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID_OPS:-}" ]; then
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               curl -s --max-time 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -H "Content-Type: application/json" \
-                -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID_OPS" --arg r "$REPO_NAME" \
+                -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID" --arg r "$REPO_NAME" \
                       '{chat_id:$id,text:("⚠️ Claude Review: add Anthropic key for `"+$r+"`"),parse_mode:"Markdown"}')" > /dev/null || true
             fi
           fi
@@ -242,7 +242,7 @@ jobs:
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID_OPS: ${{ secrets.TELEGRAM_CHAT_ID_OPS }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           JOB_STATUS: ${{ job.status }}
         run: |
           set -uo pipefail
@@ -256,8 +256,8 @@ jobs:
             *)         [ -s pipeline-failure.txt ] && REASON=$(tr -d "\r" < pipeline-failure.txt | head -1) ;;
           esac
           [ -n "$REASON" ] || exit 0
-          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID_OPS:-}" ]; then
-            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID_OPS is unset - alert not sent"; exit 0
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - alert not sent"; exit 0
           fi
           # No literal host: it comes from the CI_GITEA_HOST secret, and ga-common is mirrored to public
           # GitHub. Without the secret the alert simply carries no link.
@@ -270,6 +270,6 @@ jobs:
           curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID_OPS" --arg text "$TEXT" \
+            -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID" --arg text "$TEXT" \
                   '{chat_id:$id,text:$text,disable_web_page_preview:true}')" || true
           echo "Failure alert sent"

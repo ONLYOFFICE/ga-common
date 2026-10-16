@@ -211,7 +211,7 @@ jobs:
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID_OPS: ${{ secrets.TELEGRAM_CHAT_ID_OPS }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           JOB_STATUS: ${{ job.status }}
         run: |
           set -uo pipefail
@@ -234,8 +234,8 @@ jobs:
                        fi ;;
           esac
           [ -n "$KIND" ] || exit 0
-          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID_OPS:-}" ]; then
-            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID_OPS is unset - alert not sent"; exit 0
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - alert not sent"; exit 0
           fi
           # No literal host: it comes from the CI_GITEA_HOST secret, and ga-common is mirrored to public
           # GitHub. Without the secret the alert simply carries no link.
@@ -259,6 +259,6 @@ jobs:
           curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID_OPS" --arg text "$TEXT" \
+            -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID" --arg text "$TEXT" \
                   '{chat_id:$id,text:$text,disable_web_page_preview:true}')" || true
           echo "Alert sent ($KIND)"
