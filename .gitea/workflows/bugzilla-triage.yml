@@ -15,9 +15,9 @@ on:
         default: 'true'
       fix_pr:
         # After a high- or medium-confidence analysis of an open bug in a repository on the routing map's
-        # pr_repos list, a second session drafts the change and a draft pull request is opened.
+        # pr_repos list, a second session drafts the change and a pull request is opened.
         # Every other case costs nothing extra: the gate is checked before anything is spent.
-        description: 'Open a draft pull request with a proposed fix when the analysis is confident'
+        description: 'Open a pull request with a proposed fix when the analysis is confident'
         required: false
         type: string
         default: 'true'

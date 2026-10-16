@@ -1363,7 +1363,7 @@ def render(data, bug_id, product, component, analysed=(), refs=None, run_url="",
         out += [""]
 
     if pr_url:
-        out.append("PR".ljust(LABEL_WIDTH) + clean(pr_url, 300) + "  (draft, not reviewed)")
+        out.append("PR".ljust(LABEL_WIDTH) + clean(pr_url, 300))
         out.append("")
 
     # Never wrapped and never inside field(): wrapping is what would break these.

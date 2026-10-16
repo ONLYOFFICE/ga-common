@@ -3,7 +3,7 @@
 #
 #   triage-run.sh prepare   fetch the bug, run the guards, choose and clone repositories, render the prompt
 #   triage-run.sh sandbox   run the analysis in the isolated container and, when it is confident, the fix session
-#   triage-run.sh open-pr   validate the fix patch and open a draft pull request (the only step that can push)
+#   triage-run.sh open-pr   validate the fix patch and open a pull request (the only step that can push)
 #   triage-run.sh report    render the result into the job log and step summary
 #   triage-run.sh publish   post the result to Bugzilla
 #
@@ -700,7 +700,7 @@ prepare_triage_context() {
   { echo "PRODUCT=$PRODUCT"; echo "COMPONENT=$COMPONENT"; echo "BUG_URL=$BUG_URL"; echo "BUG_STATUS=$BUG_STATUS"; } >> "$GITHUB_ENV"
 }
 
-# The body of the Bugzilla comment: the link to the draft pull request the fix stage opened, and nothing
+# The body of the Bugzilla comment: the link to the pull request the fix stage opened, and nothing
 # else. What a bug needs from this pipeline is the proposed fix; the analysis stays in the run, so nothing
 # from the repositories (paths, code, names) is copied into the tracker. Returns 1 when there is no
 # pull request to link to.
@@ -715,11 +715,11 @@ _publish_body() {
     return 1
   fi
   printf 'Claude Bug Triage\n'
-  printf 'Pull request (draft, not reviewed): %s\n' "$PR_URL"
+  printf 'Pull request: %s\n' "$PR_URL"
   return 0
 }
 
-# Posts a short comment on the bug with the link to the draft pull request, when the fix stage opened one.
+# Posts a short comment on the bug with the link to the pull request, when the fix stage opened one.
 # Called by its own step, after the full message has already been written to the job log and the step summary.
 #
 # A comment, never the description: the description is the reporter's text and belongs to them.
@@ -1258,13 +1258,13 @@ run_claude_fix() {
 }
 
 # ============================================================================
-# Bug -> draft pull request
+# Bug -> pull request
 # ============================================================================
 # Runner-side helpers for the "bug -> pull request" stage of bugzilla-triage.yml. Used by two steps:
 #   attempt_fix   (inside "Run triage", where the sandbox is still alive) - decides whether a fix is
 #                 worth attempting, and if so runs the fix session and collects its patch;
 #   open_fix_pr   (its own step, the only one holding a token that can push) - validates that patch
-#                 and turns it into a draft pull request.
+#                 and turns it into a pull request.
 #
 # The split is the point. The model that writes the change works in the sandbox with no token, no
 # Bugzilla key and no route to Gitea; everything it produces crosses to this side as a patch, and the
@@ -1303,7 +1303,7 @@ fix_eligibility() {
   REPO=$(jq -r '(.locations // [])[0].repository // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   FIX_SCOPE=$(jq -r '.summary.fix_scope // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
 
-  # High and medium both go ahead: a person reads the draft either way, and the analysis, with its stated
+  # High and medium both go ahead: a person reads the change either way, and the analysis, with its stated
   # confidence, is in the pull request description.
   if [ "$CONFIDENCE" != "high" ] && [ "$CONFIDENCE" != "medium" ]; then
     FIX_WHY="confidence is '${CONFIDENCE:-unstated}', not high or medium"
@@ -1467,7 +1467,7 @@ _pr_analysis_block() {
   printf '### Analysis (generated, not reviewed)\n\n%s\n' "$(_fenced_block "$TEXT")"
 }
 
-# Turns the collected patch into a draft pull request. Its own step, and the only one that holds a
+# Turns the collected patch into a pull request. Its own step, and the only one that holds a
 # token able to push. Every early return is a quiet one: no patch is the normal outcome.
 open_fix_pr() {
   scrub_claude_output
@@ -1582,7 +1582,7 @@ open_fix_pr() {
   if [ -n "${GITHUB_RUN_ID:-}" ]; then
     RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
   fi
-  BODY="**Automated proposal for Bug $BUG_ID.** Written by the Claude Bug Triage pipeline and **not reviewed by a person**; treat it as a suggestion to check, not a change to trust."
+  BODY="**Automated proposal for Bug $BUG_ID.** Written by the Claude Bug Triage pipeline."
   BODY+=$'\n\n'"**What it does** (the fix session's own confidence: $FIX_CONFIDENCE):"$'\n'"$(_fenced_block "$SUMMARY")"
   BODY+=$'\n\n'"**Analysis confidence:** ${ANALYSIS_CONFIDENCE:-unstated}"
   local SCOPE_WORD
@@ -1612,9 +1612,7 @@ open_fix_pr() {
   if [ -n "$ANALYSIS_BLOCK" ]; then
     BODY="$BODY"$'\n\n'"$ANALYSIS_BLOCK"
   fi
-  # The WIP: prefix is what makes Gitea treat this as a draft, which it will not let anyone merge
-  # until the prefix is removed - a deliberate second step by a person.
-  PAYLOAD=$(jq -n --arg title "WIP: $SUBJECT" --arg head "$BRANCH" --arg base "$REF" --arg body "$BODY" \
+  PAYLOAD=$(jq -n --arg title "$SUBJECT" --arg head "$BRANCH" --arg base "$REF" --arg body "$BODY" \
     '{title: $title, head: $head, base: $base, body: $body}')
   RESPONSE=$(_fix_api POST "/repos/$TRIAGE_ORG/$REPO/pulls" -d "$PAYLOAD" || true)
   PR_URL=$(jq -r '.html_url // empty' <<< "$RESPONSE" 2>/dev/null | tr -d '\r' || true)
@@ -1624,7 +1622,7 @@ open_fix_pr() {
     return 0
   fi
   echo "$PR_URL" > fix-pr-url.txt
-  echo "Opened draft pull request: $PR_URL"
+  echo "Opened pull request: $PR_URL"
   return 0
 }
 
