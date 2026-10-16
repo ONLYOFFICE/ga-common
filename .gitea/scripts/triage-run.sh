@@ -1449,24 +1449,6 @@ _fenced_block() {
   printf '%s\n%s\n%s' "$FENCE" "$TEXT" "$FENCE"
 }
 
-# The analysis as the reader of the pull request should see it: the same message the run logs, in a fence
-# so that nothing in it is read as markup, without its closing disclaimer (it says nothing was changed, which
-# is the one thing a pull request contradicts). Prints nothing and fails when there is no analysis to show.
-_pr_analysis_block() {
-  [ -s claude-structured.json ] || return 1
-  local RENDER_ARGS=(--structured claude-structured.json --bug-id "$BUG_ID" --product "${PRODUCT:-}" --component "${COMPONENT:-}" --output pr-analysis.txt)
-  if [ -s repos-cloned.txt ]; then RENDER_ARGS+=(--repos-file repos-cloned.txt); fi
-  if [ -n "${GITEA_HOST:-}" ]; then RENDER_ARGS+=(--gitea-host "$GITEA_HOST" --org "$TRIAGE_ORG"); fi
-  if [ -s related-bugs.txt ]; then RENDER_ARGS+=(--related-file related-bugs.txt); fi
-  python3 .gitea/scripts/triage-tools.py render "${RENDER_ARGS[@]}" > /dev/null 2>&1 || return 1
-  [ -s pr-analysis.txt ] || return 1
-
-  local TEXT
-  TEXT=$(sed '/^--$/,$d' pr-analysis.txt | _trim_chars 30000)
-  [ -n "$TEXT" ] || return 1
-  printf '### Analysis (generated, not reviewed)\n\n%s\n' "$(_fenced_block "$TEXT")"
-}
-
 # Turns the collected patch into a pull request. Its own step, and the only one that holds a
 # token able to push. Every early return is a quiet one: no patch is the normal outcome.
 open_fix_pr() {
@@ -1575,9 +1557,8 @@ open_fix_pr() {
     return 0
   fi
 
-  local RUN_URL="" BODY PAYLOAD RESPONSE PR_URL ANALYSIS_BLOCK ANALYSIS_CONFIDENCE NOTE_KIND
+  local RUN_URL="" BODY PAYLOAD RESPONSE PR_URL ANALYSIS_CONFIDENCE NOTE_KIND
   NOTE_KIND=$(jq -r '.summary.note_kind // ""' claude-structured.json 2>/dev/null | tr -d '\r' || true)
-  ANALYSIS_BLOCK=$(_pr_analysis_block || true)
   ANALYSIS_CONFIDENCE=$(jq -r '.summary.confidence // "unstated"' claude-structured.json 2>/dev/null | tr -d '\r' || true)
   if [ -n "${GITHUB_RUN_ID:-}" ]; then
     RUN_URL="https://$GITEA_HOST/${GITHUB_REPOSITORY:-$TRIAGE_ORG/ga-common}/actions/runs/$GITHUB_RUN_ID"
@@ -1606,11 +1587,9 @@ open_fix_pr() {
     BODY+=$'\n\n'"**Not verified:**"$'\n'"$(_fenced_block "$UNVERIFIED")"
   fi
   BODY+=$'\n\n'"**Analysed at:** \`$REPO@$REF\` - this branch is based on it; port it to another line if the fix belongs there."
+  # The full analysis stays in the run's summary and is not copied into the pull request.
   if [ -n "$RUN_URL" ]; then
-    BODY+=$'\n\n'"**Run:** $RUN_URL"
-  fi
-  if [ -n "$ANALYSIS_BLOCK" ]; then
-    BODY="$BODY"$'\n\n'"$ANALYSIS_BLOCK"
+    BODY+=$'\n\n'"**Full analysis:** $RUN_URL"
   fi
   PAYLOAD=$(jq -n --arg title "$SUBJECT" --arg head "$BRANCH" --arg base "$REF" --arg body "$BODY" \
     '{title: $title, head: $head, base: $base, body: $body}')
