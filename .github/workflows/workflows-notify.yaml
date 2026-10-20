@@ -80,7 +80,7 @@ jobs:
           WORKFLOWS_GITEA: |
             ga-common                 | claude-review         | Claude Review
           BUILDSERVER_JOBS: |
-            Docs                      | release               | TEAMLAB_URL               | /view/OO/job/oo/ | ^release/v[0-9]+\.[0-9]+\.[0-9]+$
+            Docs                      | latest                | TEAMLAB_URL               | /view/OO/job/oo/ | ^(release|hotfix)/v[0-9]+\.[0-9]+\.[0-9]+$
             DocSpace                  | appserver rpm         | BUILDSERVER_URL           | /job/appserver.rpm/
                                       | appserver deb         | BUILDSERVER_URL           | /job/appserver.deb/
                                       | release deb           | BUILDSERVER_URL           | /job/release.deb/
