@@ -1,0 +1,468 @@
+# .github/workflows/jenkins-analyze-build.yaml
+#
+# Triggered ON DEMAND by the "🤖 Ask Claude" button under the Jenkins
+# build message in Telegram (tg-bot/bot.py dispatches it), or manually:
+#   gh workflow run jenkins-analyze-build.yaml --repo ONLYOFFICE/ga-common \
+#      -f branch="release/v10.0.0" -f build_number="157"
+# Jenkins no longer starts it automatically.
+#
+# Prerequisites (Settings -> Secrets and variables -> Actions):
+#   vars:    JENKINS_URL, GITEA_URL
+#   secrets: JENKINS_USER, JENKINS_TOKEN, GITEA_TOKEN,
+#            JENKINS_ANTHROPIC_API_KEY, BUILD_NOTIFY_TELEGRAM_BOT_TOKEN, BUILD_NOTIFY_TELEGRAM_CHAT_ID,
+#            ARTIFACT_PASSPHRASE   (e.g. `openssl rand -base64 32`)
+#
+# PUBLIC REPO: run logs and artifacts are world-readable. So nothing from the
+# analysis is printed to the log, and the only artifact is an AES-256 gpg
+# archive that just the report job (holding ARTIFACT_PASSPHRASE) can open.
+# To inspect it locally:
+#   gpg --batch --pinentry-mode loopback --passphrase "$PASS" -d analysis.tar.gpg | tar -x
+#
+# jenkins_review_tools/ : fetch_failed_stages.sh, jenkins_checkout.py, select-repos.tmpl,
+#          select_repos.py, build-prompt.tmpl, build-overview.md,
+#          diag-schema.json, extract_diag.py, render_md.py, make_summary.py
+ 
+name: Analyze build failure
+ 
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name (Jenkins $BRANCH_NAME, e.g. release/v10.0.0)"
+        required: true
+      build_number:
+        description: "Failed build number"
+        required: true
+      repos:
+        description: "Manual repo override (space-separated). Empty = Claude auto-selects."
+        required: false
+        default: ""
+      tg_message_id:
+        description: "Jenkins build message to reply to / update the button on (set by the bot)"
+        required: false
+        default: ""
+ 
+permissions:
+  contents: read
+ 
+concurrency:
+  group: analyze-${{ github.event.inputs.branch }}-${{ github.event.inputs.build_number }}
+  cancel-in-progress: false
+ 
+jobs:
+  analyze:
+    runs-on: ubuntu-latest          # self-hosted if Jenkins/Gitea are internal-only
+    timeout-minutes: 45
+    outputs:
+      total_cost: ${{ steps.rootcause.outputs.total_cost }}
+    env:
+      TOOLS_DIR: jenkins_review_tools
+      JENKINS_PROJECT: oo
+      JENKINS_URL: ${{ vars.JENKINS_URL }}
+      GITEA_URL:   ${{ vars.GITEA_URL || 'https://git.onlyoffice.com' }}
+      BRANCH: ${{ github.event.inputs.branch }}
+      BUILD:  ${{ github.event.inputs.build_number }}
+      REPOS_INPUT: ${{ github.event.inputs.repos }}
+      BASE_REPOS: "build_tools core"
+      CLAUDE_MODEL: claude-opus-5-5
+      SELECT_MODEL: claude-opus-5-5
+      MAX_BUDGET_USD: "5"
+      SELECT_BUDGET_USD: "1"
+      # Keep the Claude CLI's own egress to api.anthropic.com only (no telemetry,
+      # error reporting or autoupdater), so the allowlist below stays minimal.
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      QUIET: "1"                    # fetch_failed_stages.sh: no progress output
+    steps:
+       # Containment for the Claude steps below: they run `claude -p` over UNTRUSTED
+      # Jenkins logs and cloned proprietary source, with the Bash tool and the
+      # Anthropic key in env. A prompt injection in a log/source file could try to
+      # curl the key or the source to an attacker. harden-runner blocks ALL outbound
+      # traffic from the whole job except the hosts listed here, so there is nowhere
+      # to exfiltrate to even if the model is successfully hijacked.
+      #
+      # Rollout: to extend/verify the allowlist, run once with `egress-policy: audit`
+      # (logs every endpoint, blocks nothing), read the StepSecurity insights in the
+      # run summary, then switch back to `block`. A missed endpoint fails its step.
+      - name: Harden runner (egress allowlist)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: block
+          disable-sudo: false          # steps fall back to `apt-get` for envsubst/zip
+          allowed-endpoints: >
+            api.anthropic.com:443
+            jenkins.teamlab.info:443
+            git.onlyoffice.com:443
+            registry.npmjs.org:443
+            nodejs.org:443
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            results-receiver.actions.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+
+      - name: Checkout tooling
+        uses: actions/checkout@v4
+        with:
+          # Only the analyzer's own scripts/prompts. Non-cone mode on purpose:
+          # cone mode also checks out every root file, and the repo's root
+          # CLAUDE.md (~37 KB, about the PR-review pipeline) would then be
+          # auto-loaded by `claude -p` into every analysis session.
+          sparse-checkout: |
+            jenkins_review_tools/
+          sparse-checkout-cone-mode: false
+ 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+ 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.285    # pin a version for reproducibility
+ 
+      - name: Build Jenkins URLs
+        run: |
+          enc="${BRANCH//\//%252F}"
+          echo "BASE=$JENKINS_URL/job/$JENKINS_PROJECT/job/$enc/$BUILD" >> "$GITHUB_ENV"
+          echo "GOOD_BASE=$JENKINS_URL/job/$JENKINS_PROJECT/job/$enc/lastSuccessfulBuild" >> "$GITHUB_ENV"
+ 
+      # --- 1. clean logs of failed stages + index (id slug name) ---
+      - name: Fetch failed stages
+        env:
+          JENKINS_AUTH: "${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_TOKEN }}"
+        run: |
+          bash "$TOOLS_DIR/fetch_failed_stages.sh" "$BASE" > stages.txt
+          echo "failed stages: $(grep -c . stages.txt || true)"
+ 
+      # --- 2. repo -> commit map ---
+      - name: Get checkout map
+        env:
+          JENKINS_AUTH: "${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_TOKEN }}"
+        run: |
+          python3 "$TOOLS_DIR/jenkins_checkout.py" "$BASE" -o checkout.json 2>/dev/null
+          echo "repos in checkout: $(jq '.checked_out | length' checkout.json)"
+ 
+      # --- 3. phase 1: Claude picks which repos are needed (no tools) ---
+      - name: Select repos
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.JENKINS_ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$REPOS_INPUT" ]; then
+            echo "manual repo override"
+            echo "SELECTED_REPOS=$REPOS_INPUT" >> "$GITHUB_ENV"; exit 0
+          fi
+          command -v envsubst >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gettext-base; }
+          export REPO_LIST="$(jq -r '.checked_out[] | "\(.name) @ \(.commit[0:12])"' checkout.json)"
+          logs=""
+          for f in stage_*.log; do
+            [ -e "$f" ] || continue
+            logs="${logs}"$'\n'"=== $f ==="$'\n'"$(tail -n 500 "$f")"
+          done
+          export STAGE_LOGS="$logs"
+          envsubst '$REPO_LIST $STAGE_LOGS' < "$TOOLS_DIR/select-repos.tmpl" > prompt_select.txt
+          claude -p "$(cat prompt_select.txt)" \
+            --model "$SELECT_MODEL" --output-format json \
+            --permission-mode dontAsk --allowedTools "" \
+            --max-turns 3 --max-budget-usd "$SELECT_BUDGET_USD" \
+            > raw_select.json || true
+          if ! jq -e '.is_error == false and ((.result // "") | length > 0)' raw_select.json >/dev/null 2>&1; then
+            echo "::warning::repo selection failed (subtype: $(jq -r '.subtype // "?"' raw_select.json)) — using base repos"
+          fi
+          echo "select cost: $(jq -r '.total_cost_usd // "?"' raw_select.json) USD"
+          sel="$(python3 "$TOOLS_DIR/select_repos.py")"
+          echo "selected repos: $(wc -w <<< "$sel")"
+          echo "SELECTED_REPOS=$sel" >> "$GITHUB_ENV"
+ 
+      # --- 4. clone the selected repos at their as-built commits ---
+      - name: Clone source repos
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          mkdir -p src
+          for name in $SELECTED_REPOS; do
+            sha=$(jq -r --arg n "$name" '.checked_out[]|select(.name==$n)|.commit' checkout.json)
+            if [ -z "$sha" ] || [ "$sha" = "null" ]; then continue; fi
+            url="$GITEA_URL/ONLYOFFICE/$name.git"
+            git -c http.extraHeader="AUTHORIZATION: token $GITEA_TOKEN" \
+                clone -q --filter=blob:none --no-checkout "$url" "src/$name"
+            git -C "src/$name" -c http.extraHeader="AUTHORIZATION: token $GITEA_TOKEN" checkout -q "$sha"
+            git -C "src/$name" remote set-url origin "$url"
+          done
+          echo "cloned: $(ls src | wc -l) repo(s)"
+ 
+      # --- 5. phase 2: root-cause each failed stage (with tools + schema) ---
+      - name: Root-cause with Claude Code
+        id: rootcause
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.JENKINS_ANTHROPIC_API_KEY }}
+        run: |
+          command -v envsubst >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gettext-base; }
+          export REPOS_LIST="$(ls src 2>/dev/null | sed 's#^#  - src/#')"
+          export BUILD_OVERVIEW="$(cat "$TOOLS_DIR/build-overview.md")"
+          schema="$(cat "$TOOLS_DIR/diag-schema.json")"
+          while read -r stage_id slug name; do
+            [ -z "$stage_id" ] && continue
+            log="stage_${stage_id}_${slug}.log"
+            [ -f "$log" ] || continue
+ 
+            STAGE_NAME="$name" STAGE_LOG="$log" \
+              envsubst '$STAGE_NAME $STAGE_LOG $REPOS_LIST $BUILD_OVERVIEW' \
+              < "$TOOLS_DIR/build-prompt.tmpl" > "prompt_${slug}.txt"
+ 
+            n=$((${n:-0}+1)); echo "::group::Claude: stage $n"
+            claude -p "$(cat "prompt_${slug}.txt")" \
+              --model "$CLAUDE_MODEL" \
+              --output-format json \
+              --json-schema "$schema" \
+              --permission-mode dontAsk \
+              --allowedTools "Read,Grep,Glob,Bash" \
+              --max-turns 80 \
+              --max-budget-usd "$MAX_BUDGET_USD" \
+              > "raw_${slug}.json" || echo "claude exited non-zero"
+ 
+            python3 "$TOOLS_DIR/extract_diag.py" "$slug" > /dev/null   # it prints the diagnosis
+            cost=$(jq -r '.total_cost_usd // 0' "raw_${slug}.json")
+            jq --argjson c "$cost" '. + {cost_usd: $c}' "diag_${slug}.json" > "diag_${slug}.tmp" \
+              && mv "diag_${slug}.tmp" "diag_${slug}.json"
+            python3 "$TOOLS_DIR/render_md.py" "$slug" > /dev/null   # -> stage_${slug}.md
+            echo "stage cost: ${cost} USD"
+            echo "::endgroup::"
+          done < stages.txt
+ 
+          python3 "$TOOLS_DIR/make_summary.py"            # -> summary.tsv (short, for Telegram)
+          total=$(jq -s 'map(.total_cost_usd // 0) | add' raw_*.json 2>/dev/null || echo 0)
+          printf 'total_cost=%.4f\n' "$total" >> "$GITHUB_OUTPUT"
+          echo "## Cost: \$$(printf '%.4f' "$total")" >> "$GITHUB_STEP_SUMMARY"
+
+      # --- 6. scrub secrets out of everything before it leaves this job ---
+      # GitHub masks registered secrets in the LOG stream only - never in artifact
+      # or zip contents. A prompt injection in the untrusted logs/source could coax
+      # the key into Claude's answer (`.result` -> raw_*.json -> diag/md -> zip ->
+      # Telegram), which the egress block cannot stop because Telegram is a
+      # legitimate outbound channel of the `report` job. So redact the key value and
+      # any sk-ant-... token from the collected files here, before archive + upload.
+      - name: Redact secrets from outputs
+        if: always()
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.JENKINS_ANTHROPIC_API_KEY }}
+        run: |
+          shopt -s nullglob
+          files=(raw_*.json diag_*.json stage_*.md prompt_*.txt stages.txt summary.tsv checkout.json repos.json)
+          [ ${#files[@]} -eq 0 ] && { echo "nothing to scrub"; exit 0; }
+          # Key passed via env (not argv) so it never lands in `ps`/traces. \Q..\E
+          # quotemetas the literal value; the pattern catches any other sk-ant token.
+          KEY="$ANTHROPIC_API_KEY" perl -i -pe '
+            BEGIN { $k = $ENV{KEY}; }
+            s/\Q$k\E/***REDACTED***/g if length $k;
+            s/sk-ant-[A-Za-z0-9_-]{16,}/***REDACTED***/g;
+          ' "${files[@]}"
+          echo "scrubbed ${#files[@]} file(s)"
+          
+      # --- 7. Telegram zip + encrypted bundle for the report job ---
+      # The repo is public, so artifacts are downloadable by anyone. Everything the
+      # report job needs goes into one tar, encrypted with AES-256 (gpg, symmetric).
+      # Raw stage logs and cloned sources are NOT included - they never leave.
+      - name: Build encrypted bundle
+        if: always()
+        env:
+          PASS: ${{ secrets.ARTIFACT_PASSPHRASE }}
+        run: |
+          [ -n "$PASS" ] || { echo "::error::ARTIFACT_PASSPHRASE secret is not set"; exit 1; }
+          shopt -s nullglob
+          command -v zip >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq zip; }
+          zip -q "stages_report_${BUILD}.zip" \
+            stage_*.md diag_*.json raw_*.json prompt_*.txt checkout.json repos.json 2>/dev/null || true
+          files=(stages.txt summary.tsv stage_*.md stages_report_*.zip)
+          [ ${#files[@]} -eq 0 ] && { echo "nothing to bundle"; exit 0; }
+          tar -cf analysis.tar "${files[@]}"
+          printf '%s' "$PASS" | gpg --batch --yes --quiet --pinentry-mode loopback \
+            --passphrase-fd 0 --symmetric --cipher-algo AES256 \
+            -o analysis.tar.gpg analysis.tar
+          rm -f analysis.tar
+          echo "bundle: ${#files[@]} file(s), $(du -h analysis.tar.gpg | cut -f1) encrypted"
+
+      # --- 8. the encrypted bundle is the only thing that crosses into the report job ---
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-analysis-${{ github.event.inputs.build_number }}
+          # The report job deletes this artifact once it has posted to Telegram;
+          # the short retention is only a backstop for a run that never reaches it.
+          retention-days: 1
+          path: analysis.tar.gpg
+          if-no-files-found: ignore
+
+# The report job runs in a SEPARATE trust domain: it never runs Claude, never
+  # clones source, and has no untrusted Bash - it only downloads the finished
+  # analysis artifacts and posts them to Telegram. That is why it is the only job
+  # allowed to reach api.telegram.org (an open, token-agnostic write endpoint): a
+  # prompt-injected Claude session in `analyze` cannot reach this host at all.
+  report:
+    needs: analyze
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    env:
+      BUILD:  ${{ github.event.inputs.build_number }}
+      BRANCH: ${{ github.event.inputs.branch }}
+      TOTAL_COST: ${{ needs.analyze.outputs.total_cost }}
+      TG_MSG: ${{ github.event.inputs.tg_message_id }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Harden runner (egress allowlist)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: block
+          disable-sudo: false
+          allowed-endpoints: >
+            api.telegram.org:443
+            github.com:443
+            api.github.com:443
+            results-receiver.actions.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+
+      - name: Download analysis artifacts
+        continue-on-error: true       # analyze may have failed before producing any
+        uses: actions/download-artifact@v4
+        with:
+          name: build-analysis-${{ github.event.inputs.build_number }}
+
+      - name: Decrypt bundle
+        env:
+          PASS: ${{ secrets.ARTIFACT_PASSPHRASE }}
+        run: |
+          [ -f analysis.tar.gpg ] || { echo "no bundle (analyze failed early)"; exit 0; }
+          printf '%s' "$PASS" | gpg --batch --quiet --pinentry-mode loopback \
+            --passphrase-fd 0 -d analysis.tar.gpg | tar -x
+          rm -f analysis.tar.gpg
+          echo "decrypted: $(ls | wc -l) file(s)"
+
+      - name: Report to Telegram
+        if: always()
+        env:
+          TG_TOKEN: ${{ secrets.BUILD_NOTIFY_TELEGRAM_BOT_TOKEN }}
+          TG_CHAT:  ${{ secrets.BUILD_NOTIFY_TELEGRAM_CHAT_ID }}
+        run: |
+          shopt -s nullglob
+          mds=(stage_*.md)
+
+          # reply to the Jenkins build message the button was pressed on
+          rp=()
+          if [[ "$TG_MSG" =~ ^[0-9]+$ ]]; then
+            rp=( --form-string "reply_parameters={\"message_id\":${TG_MSG},\"allow_sending_without_reply\":true}" )
+          fi
+
+          failed=""
+          if [ -f stages.txt ]; then
+            while read -r sid slug name; do [ -z "$sid" ] && continue
+              failed="${failed}"$'\n'"• ${name}"; done < stages.txt
+          fi
+          mdnames=""; for m in "${mds[@]}"; do mdnames="${mdnames}"$'\n'"${m}"; done
+
+          cap="Hey! It's Claude!"$'\n'"Docs Build №${BUILD} (${BRANCH}) is <b>failed</b>"$'\n\n'
+          cap="${cap}<b>Stages that failed:</b>${failed}"$'\n\n'
+          cap="${cap}<b>Analysis per stage (md):</b>${mdnames}"$'\n\n'
+          cap="${cap}💰 <b>total:</b> \$${TOTAL_COST:-?}"
+
+          # short per-stage summary from Claude: bold stage name, blank line between
+          # stages. Telegram allows 4096 chars per message, so stages are added whole
+          # while they fit (never cut inside <b>..</b>); the rest is just counted.
+          if [ -s summary.tsv ]; then
+            esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<< "$1"; }
+            mapfile -t rows < summary.tsv
+            limit=$(( 3900 - ${#cap} - 150 ))
+            sum=""; shown=0
+            for row in "${rows[@]}"; do
+              name="${row%%$'\t'*}"; text="${row#*$'\t'}"
+              entry="• <b>$(esc "$name")</b>: $(esc "$text")"
+              (( ${#sum} + ${#entry} + 2 > limit )) && break
+              sum="${sum:+${sum}$'\n\n'}${entry}"; shown=$((shown+1))
+            done
+            rest=$(( ${#rows[@]} - shown ))
+            (( rest > 0 )) && sum="${sum:+${sum}$'\n\n'}<i>…and ${rest} more stage(s) — see the reports below.</i>"
+            cap="${cap}"$'\n\n'"<b>Summary:</b>"$'\n'"${sum}"$'\n\n'"<i>Details in the reports below, full report in the zip.</i>"
+          fi
+
+          # NOTE: text/JSON fields go via --form-string. Plain -F treats ';' as an
+          # option separator (so "&amp;" cut the message) and a leading '@'/'<'
+          # as "read this file". Only real file uploads use -F.
+
+          # 1) summary text first
+          curl -sS "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --form-string "chat_id=${TG_CHAT}" --form-string "parse_mode=HTML" --form-string "text=${cap}" "${rp[@]}" \
+            | jq -r 'if .ok then "summary OK" else "FAIL: \(.description)" end'
+
+          # 2) then ONE album below it: per-stage md files + the full zip.
+          #    sendMediaGroup takes 2-10 items, so a lone file goes via sendDocument;
+          #    more than 10 files are split into several albums.
+          att=( "${mds[@]}" )
+          [ -f "stages_report_${BUILD}.zip" ] && att+=( "stages_report_${BUILD}.zip" )
+          mime() { case "$1" in *.zip) echo application/zip ;; *) echo text/markdown ;; esac; }
+          for ((s0=0; s0<${#att[@]}; s0+=10)); do
+            chunk=("${att[@]:s0:10}")
+            if [ ${#chunk[@]} -eq 1 ]; then
+              curl -sS "https://api.telegram.org/bot${TG_TOKEN}/sendDocument" \
+                --form-string "chat_id=${TG_CHAT}" -F "document=@${chunk[0]};type=$(mime "${chunk[0]}")" "${rp[@]}" \
+                | jq -r 'if .ok then "file OK" else "FAIL: \(.description)" end'
+              continue
+            fi
+            media="["; i=0; files=()
+            for m in "${chunk[@]}"; do
+              files+=( -F "file${i}=@${m};type=$(mime "$m")" )
+              [ $i -gt 0 ] && media="${media},"
+              media="${media}{\"type\":\"document\",\"media\":\"attach://file${i}\"}"
+              i=$((i+1))
+            done
+            media="${media}]"
+            curl -sS "https://api.telegram.org/bot${TG_TOKEN}/sendMediaGroup" \
+              --form-string "chat_id=${TG_CHAT}" --form-string "media=${media}" "${files[@]}" "${rp[@]}" \
+              | jq -r 'if .ok then "album OK (\(.result|length) files)" else "FAIL: \(.description)" end'
+          done
+
+      # Swap the "⏳ Claude is analyzing…" button on the Jenkins message:
+      # success -> link to this run; failure -> allow a retry.
+      - name: Update Telegram button
+        if: always() && github.event.inputs.tg_message_id != ''
+        env:
+          TG_TOKEN: ${{ secrets.BUILD_NOTIFY_TELEGRAM_BOT_TOKEN }}
+          TG_CHAT:  ${{ secrets.BUILD_NOTIFY_TELEGRAM_CHAT_ID }}
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
+        run: |
+          [[ "$TG_MSG" =~ ^[0-9]+$ ]] || { echo "bad tg_message_id"; exit 0; }
+          if [ "$ANALYZE_RESULT" = "success" ]; then
+            kb=$(jq -nc --arg u "$RUN_URL" \
+              '{inline_keyboard:[[{text:"✅ Claude: report in replies", url:$u}]]}')
+          else
+            kb=$(jq -nc --arg u "$RUN_URL" --arg cb "ai:${BUILD}:${BRANCH}" \
+              '{inline_keyboard:[[{text:"🔁 Ask Claude again", callback_data:$cb},{text:"⚠️ Log", url:$u}]]}')
+          fi
+          curl -sS "https://api.telegram.org/bot${TG_TOKEN}/editMessageReplyMarkup" \
+            --form-string "chat_id=${TG_CHAT}" --form-string "message_id=${TG_MSG}" --form-string "reply_markup=${kb}" \
+            | jq -r 'if .ok then "button updated" else "FAIL: \(.description)" end'
+
+      # Delete the analysis artifact now that it has served its only purpose
+      # (handing files from `analyze` to this job). Nothing should linger in the
+      # run's UI afterwards; the upload's retention-days is just the backstop.
+      - name: Delete analysis artifact
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="build-analysis-${BUILD}"
+          ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --paginate --jq ".artifacts[] | select(.name==\"${name}\") | .id") || {
+              echo "could not list artifacts"; exit 0; }
+          [ -z "$ids" ] && { echo "no artifact named ${name}"; exit 0; }
+          for id in $ids; do
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" \
+              && echo "deleted artifact ${id}" || echo "could not delete ${id}"
+          done

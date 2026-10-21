@@ -71,3 +71,45 @@ An AWS Lambda webhook (`review/lambda/`) receives PR events, verifies the signat
 - `.gitea/scripts/review-run.sh` — the workflow's shell steps (Gitea API helpers, prepare/post, sandbox)
 - `.gitea/scripts/common.py bugzilla-context` — extracts referenced bug IDs, fetches each via the REST API, renders them for the prompt
 - `review/lambda/` — Lambda webhook dispatcher
+
+### Jenkins Build-Failure Review
+
+Automated AI root-cause analysis for failed Jenkins builds of the ONLYOFFICE editors.
+
+When a Jenkins build fails, Jenkins triggers `.github/workflows/jenkins-analyze-build.yaml` (via `gh workflow run`, passing the branch and build number). The workflow pulls only the failed stages' logs from the Jenkins API, resolves the exact as-built commit of every repo, lets Claude pick which repos it needs and clones them at those commits, then runs Claude Code against each failed stage to find the root cause. It reports a per-stage diagnosis (cause + fix) to Telegram as Markdown files plus a full report archive.
+
+#### Flow
+
+1. **Fetch failed stages** — `wfapi` lists the pipeline stages; only `FAILED` ones are pulled, decoded (HTML/ANSI stripped) and saved as `stage_<id>_<slug>.log`.
+2. **Resolve checkout** — the build's `BuildData` (Git plugin) gives `repo -> commit` for all repos, straight from the Jenkins API (no console log parsing).
+3. **Select repos (phase 1)** — Claude reads the stage logs + the repo list and returns the smallest set of repos needed to investigate (base repos always added).
+4. **Clone** — the selected repos are cloned at their exact as-built commits under `src/`.
+5. **Root-cause (phase 2)** — Claude Code analyzes each failed stage over `src/`, guided by a build map, and emits a schema-validated JSON diagnosis.
+6. **Report** — each diagnosis is rendered to `stage_<slug>.md` and sent to Telegram, with a full `stages_report_<build>.zip`.
+
+#### Egress containment
+
+Phases 1–2 run `claude -p` over **untrusted** input — Jenkins build logs (arbitrary tool/compiler output) and cloned proprietary source — with the `Bash` tool and the Anthropic key in the job env. A prompt injection could otherwise try to exfiltrate the key or the source. Rather than rely on "treat as data" prompt wording alone, the workflow splits into two jobs by trust domain, each pinning a `step-security/harden-runner` egress allowlist (`egress-policy: block`) as its first step so there is nowhere to exfiltrate to even if the model is hijacked:
+
+- **`analyze`** runs Claude. Its allowlist covers only what phases 1–5 legitimately fetch (Anthropic, Jenkins, Gitea, npm, GitHub). It deliberately does **not** include `api.telegram.org`: the Telegram Bot API is an open, token-agnostic write endpoint (an attacker would use their own bot, not ours), so leaving it reachable from the Claude job would re-open the exfiltration channel. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` keeps the CLI itself to `api.anthropic.com`.
+- **`report`** (`needs: analyze`, `if: always()`) posts the finished analysis to Telegram. It never runs Claude, never clones source, and has no untrusted Bash — it only downloads the analysis artifacts and `curl`s them to the fixed org chat. It is the only job allowed to reach `api.telegram.org`.
+
+When adding a step that calls a new host, add it to that job's `allowed-endpoints` (an `egress-policy: audit` run lists what gets blocked). This is the GitHub-Actions-native counterpart of the Docker/Squid sandbox the Gitea PR-review pipeline uses for the same reason.
+
+#### Files
+
+- `.github/workflows/jenkins-analyze-build.yaml` — workflow definition (triggered by Jenkins)
+- `jenkins_review_tools/fetch_failed_stages.sh` — pulls & cleans the logs of the FAILED pipeline stages via `wfapi`
+- `jenkins_review_tools/jenkins_checkout.py` — builds `checkout.json` (repo → commit → branch) from the Jenkins `BuildData` API
+- `jenkins_review_tools/select-repos.tmpl` — phase-1 prompt: which repos to clone
+- `jenkins_review_tools/select_repos.py` — validates Claude's picks against the checkout and adds base repos
+- `jenkins_review_tools/build-prompt.tmpl` — phase-2 prompt: the root-cause task template
+- `jenkins_review_tools/build-overview.md` — static map of how ONLYOFFICE builds (orientation for Claude)
+- `jenkins_review_tools/diag-schema.json` — JSON schema that the diagnosis must match (`--json-schema`)
+- `jenkins_review_tools/extract_diag.py` — extracts the diagnosis object from the `claude -p` output
+- `jenkins_review_tools/render_md.py` — renders a diagnosis into a readable `stage_<slug>.md`
+
+#### Configuration
+
+- **vars:** `JENKINS_URL`, `GITEA_URL`
+- **secrets:** `JENKINS_USER`, `JENKINS_TOKEN`, `GITEA_TOKEN`, `JENKINS_ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
