@@ -1,14 +1,14 @@
 name: Cleanup old Docker Hub tags
 
 on:
-  #schedule:
-  #  - cron: '0 3 1 * *'        # 1st day of every month, 03:00 UTC
-  #workflow_dispatch:
-  #  inputs:
-  #    dry_run:
-    #      description: 'Only show what would be deleted (delete nothing)'
-    #    type: boolean
-    #    default: true
+  schedule:
+    - cron: '0 3 1 * *'        # 1st day of every month, 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+      description: 'Only show what would be deleted (delete nothing)'
+      type: boolean
+      default: true
 
 jobs:
   cleanup:
