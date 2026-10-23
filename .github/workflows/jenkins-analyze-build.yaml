@@ -1,7 +1,7 @@
 # .github/workflows/jenkins-analyze-build.yaml
 #
 # Triggered ON DEMAND by the "🤖 Ask Claude" button under the Jenkins
-# build message in Telegram (tg-bot/bot.py dispatches it), or manually:
+# build message in Telegram (jenkins_review_bot/bot.py dispatches it), or manually:
 #   gh workflow run jenkins-analyze-build.yaml --repo ONLYOFFICE/ga-common \
 #      -f branch="release/v10.0.0" -f build_number="157"
 # Jenkins no longer starts it automatically.

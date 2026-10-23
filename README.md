@@ -76,7 +76,7 @@ An AWS Lambda webhook (`review/lambda/`) receives PR events, verifies the signat
 
 Automated AI root-cause analysis for failed Jenkins builds of the ONLYOFFICE editors.
 
-When a Jenkins build fails, Jenkins triggers `.github/workflows/jenkins-analyze-build.yaml` (via `gh workflow run`, passing the branch and build number). The workflow pulls only the failed stages' logs from the Jenkins API, resolves the exact as-built commit of every repo, lets Claude pick which repos it needs and clones them at those commits, then runs Claude Code against each failed stage to find the root cause. It reports a per-stage diagnosis (cause + fix) to Telegram as Markdown files plus a full report archive.
+The analysis runs on demand. Jenkins posts the build-result message to Telegram with a "🤖 Ask Claude" button; the bot in `jenkins_review_bot/` catches the press, checks the chat and user against its allowlists and dispatches `.github/workflows/jenkins-analyze-build.yaml` with the branch, build number and message id (it can also be started manually with `gh workflow run`). The workflow pulls only the failed stages' logs from the Jenkins API, resolves the exact as-built commit of every repo, lets Claude pick which repos it needs and clones them at those commits, then runs Claude Code against each failed stage to find the root cause. It reports a per-stage diagnosis (cause + fix) to Telegram as Markdown files plus a full report archive.
 
 #### Flow
 
@@ -98,7 +98,8 @@ When adding a step that calls a new host, add it to that job's `allowed-endpoint
 
 #### Files
 
-- `.github/workflows/jenkins-analyze-build.yaml` — workflow definition (triggered by Jenkins)
+- `.github/workflows/jenkins-analyze-build.yaml` — workflow definition (dispatched by the Telegram button bot or manually)
+- `jenkins_review_bot/` — Telegram bot behind the "🤖 Ask Claude" button; setup and `.env` in its own README
 - `jenkins_review_tools/fetch_failed_stages.sh` — pulls & cleans the logs of the FAILED pipeline stages via `wfapi`
 - `jenkins_review_tools/jenkins_checkout.py` — builds `checkout.json` (repo → commit → branch) from the Jenkins `BuildData` API
 - `jenkins_review_tools/select-repos.tmpl` — phase-1 prompt: which repos to clone
@@ -112,4 +113,4 @@ When adding a step that calls a new host, add it to that job's `allowed-endpoint
 #### Configuration
 
 - **vars:** `JENKINS_URL`, `GITEA_URL`
-- **secrets:** `JENKINS_USER`, `JENKINS_TOKEN`, `GITEA_TOKEN`, `JENKINS_ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- **secrets:** `JENKINS_USER`, `JENKINS_TOKEN`, `GITEA_TOKEN`, `JENKINS_ANTHROPIC_API_KEY`, `BUILD_NOTIFY_TELEGRAM_BOT_TOKEN`, `BUILD_NOTIFY_TELEGRAM_CHAT_ID`, `ARTIFACT_PASSPHRASE` (e.g. `openssl rand -base64 32`)

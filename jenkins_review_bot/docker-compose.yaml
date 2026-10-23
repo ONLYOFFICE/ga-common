@@ -1,0 +1,5 @@
+services:
+  claude-button:
+    build: .
+    restart: unless-stopped
+    env_file: .env          # TG_BOT_TOKEN, GH_TOKEN, ALLOWED_CHAT_IDS, ALLOWED_USER_IDS, ...
