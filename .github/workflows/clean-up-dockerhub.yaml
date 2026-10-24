@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-      description: 'Only show what would be deleted (delete nothing)'
-      type: boolean
-      default: true
+        description: 'Only show what would be deleted (delete nothing)'
+        type: boolean
+        default: true
 
 jobs:
   cleanup:
