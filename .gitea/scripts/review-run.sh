@@ -225,8 +225,14 @@ prepare_review_context() {
 
   # --- diff ---
   gitea_api "$REPO_PATH/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
-  # Early return exits the step entirely - post_review_and_set_status never runs on this path.
-  [ -s repo/pr.diff ] || { set_commit_status "$REPO_PATH" "$PR_SHA" "error" "PR diff is empty"; return 1; }
+  # A PR with no changes (head == base) is a skip, not an error - same handling as a submodule-only bump.
+  if [ ! -s repo/pr.diff ]; then
+    echo "PR has no changes (${PR_BRANCH} is identical to ${BASE_BRANCH}) — nothing to review"
+    set_commit_status "$REPO_PATH" "$PR_SHA" "success" "No changes — nothing to review" "Claude Code Review"
+    set_commit_status "$REPO_PATH" "$PR_SHA" "success" "No changes" "Non-ASCII Check"
+    echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+    return 0
+  fi
 
   local DIFF_LINES DIFF_BYTES
   DIFF_LINES=$(wc -l < repo/pr.diff | tr -d ' '); DIFF_BYTES=$(wc -c < repo/pr.diff | tr -d ' ')
