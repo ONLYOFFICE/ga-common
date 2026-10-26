@@ -228,12 +228,23 @@ jobs:
             TEXT=$(printf "%s\n%s - %s" "[notice] Claude Weekly Review" "$WEEKLY_REPO" "$REASON")
           fi
           [ -n "$LINK" ] && TEXT=$(printf "%s\n%s" "$TEXT" "$LINK")
-          # TELEGRAM_CHAT_ID may hold several chat IDs separated by commas
-          for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
-            curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
+          # TELEGRAM_CHAT_ID may hold several chat IDs separated by commas; blanks and repeats are skipped
+          SENT_COUNT=0
+          SEEN_IDS=","
+          IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_ID"
+          for CHAT_ID in "${CHAT_IDS[@]}"; do
+            CHAT_ID="${CHAT_ID//[[:space:]]/}"
+            [ -n "$CHAT_ID" ] || continue
+            case "$SEEN_IDS" in *",$CHAT_ID,"*) continue ;; esac
+            SEEN_IDS+="$CHAT_ID,"
+            if curl -sS --fail --max-time 20 --retry 2 -o /dev/null -X POST \
               "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "$(jq -n --arg id "$CHAT_ID" --arg text "$TEXT" \
-                    '{chat_id:$id,text:$text,disable_web_page_preview:true}')" || true
+                    '{chat_id:$id,text:$text,disable_web_page_preview:true}')"; then
+              SENT_COUNT=$((SENT_COUNT + 1))
+            else
+              echo "::warning::Telegram alert was not delivered to chat $CHAT_ID"
+            fi
           done
-          echo "Alert sent ($KIND)"
+          if [ "$SENT_COUNT" -gt 0 ]; then echo "Alert sent ($KIND)"; else echo "::warning::Telegram alert was not delivered to any chat"; fi
