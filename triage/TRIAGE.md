@@ -72,9 +72,13 @@ Rank `locations` deliberately: the first entry is read as your answer for which 
 
 State confidence for what you actually established. `high` means you read the responsible code and the mechanism explains the symptom. `medium` means the area is right but the exact line is unproven. `low` means direction only. A `medium` that names the right module is a good outcome; a `high` that turns out wrong burns the developer's trust in every later run.
 
+`high` also requires every link in the chain to be established, not only the last one. If your own answer says that something is not proven, such as why the code reaches a state, what triggers the path or which build or setting produces the input, then `confidence` is at most `medium`, whatever the code at the end of the chain looks like. A change that removes the visible symptom while the trigger stays unexplained treats a symptom, and it is one of the proposals people closed unread.
+
 ## Size of the fix
 
 Set `summary.fix_scope` once you know the cause: `small` is one place a reviewer checks in a minute, `medium` is a few places in one repository, `large` is a redesign or many files, and `needs_decision` is a bug with several reasonable fixes where a person has to choose. Only `small` and `medium` lead to a proposed change, so do not understate it, and leave the field out when you cannot tell.
+
+Judge the size by what the change makes reachable, not by how few lines it touches. When the obvious fix removes or relaxes a guard (an architecture check, a version gate, a port or platform restriction), read what the code behind the guard needs and count that work too: opening a gate that the rest of the installer is not ready for turns a one-line change into a feature, and the honest answer is `medium`, `large` or `needs_decision`. The same holds when the code you would edit belongs to a function that restores state on failure: the change then has to fit that rollback, which is more than the lines that show up in the diff.
 
 ## Length
 

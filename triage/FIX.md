@@ -41,6 +41,21 @@ The repository is checked out at `/workspace/$FIX_REPO`, on branch `$FIX_REF`, a
 - **Do not commit.** Leave the edit in the working tree; the pipeline collects it.
 - **Run what is cheap to run.** If the repository has a quick syntax check or linter for the file type (`bash -n`, `python -m py_compile`, `docker build` is not cheap), run it on what you changed. Do not try to build the whole product.
 
+## Fixing shell and installer code
+
+Most fixes here land in installers and uninstallers that run as root on a customer's machine, where a step that fails silently leaves the host half-changed. Reviewers of earlier proposals rewrote exactly these things:
+
+- **Never swallow a failure that the result depends on.** No `|| true`, and no `>/dev/null 2>&1` on a command whose success matters. Let it fail loudly: print a clear error and return non-zero, and let the caller stop. A best-effort step is fine only when its failure really changes nothing.
+- **Check preconditions before changing anything.** A step that can fail (installing a tool, labelling a port, validating a config) goes before the first edit, restart or removal that it guards, never after it. A failure then leaves the host as it was found.
+- **Work inside the existing rollback.** When the code you edit is part of a function that already restores state on failure (a `trap`, a `finish_*` or `rollback` helper, a backup file), put the change inside it and register its undo there. A step added outside it, such as a service stop before the function is called, is not undone when the function fails.
+- **Act on what is there, not on a pattern.** Stop or touch only the units, files and containers that actually exist and are active, found by asking the system, rather than by a glob that matches by luck.
+- **Know which distribution you are on.** A shared script is often sourced by both the apt and the yum/dnf installer. Do not fall back to `yum` or `apt` by default; if the variable that names the package manager is not set on a path, fail clearly there instead.
+- **Before removing or relaxing a guard** (an architecture check, a version gate, an early `exit`), find what it was protecting and read the code after it. If the code behind it breaks for the case you just let through, the guard was hiding a larger problem: do not open it, say so in `not_verified` and leave the tree untouched.
+
+## Before you finish
+
+Read your own diff once as a reviewer would. Anything you find wrong in it is fixed now, not listed. A known defect in the change must never appear in `not_verified`, which is only for what cannot be checked here (a real host, a build, another platform), and a change you know is incomplete is a reason to leave the tree untouched.
+
 ## If you cannot fix it
 
 Say so and leave the tree untouched. A run that changes nothing and explains why is a good outcome: it costs a reviewer nothing. A guess that compiles is not.
