@@ -1228,7 +1228,7 @@ notify_weekly_result() {
     echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - message not sent"
     return 0
   fi
-  local TEXT BRANCH PR_URL FIXES INDEX STATS
+  local TEXT BRANCH PR_URL FIXES INDEX STATS CHAT_ID
   TEXT="Claude Weekly Review: $WEEKLY_REPO"
   while IFS=$'\t' read -r BRANCH PR_URL FIXES INDEX; do
     # What the pull request does not say at a glance: how many commits were really reviewed and how many need a person.
@@ -1241,10 +1241,13 @@ notify_weekly_result() {
     TEXT+=$'\n'"$BRANCH - $FIXES proposed fix(es)${STATS:+, $STATS}: $PR_URL"
   done < weekly-pr-urls.txt
   TEXT+=$'\n'"Run cost: \$$(_spent_usd)"
-  curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
-    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID" --arg text "$TEXT" '{chat_id: $id, text: $text, disable_web_page_preview: true}')" || true
+  # TELEGRAM_CHAT_ID may hold several chat IDs separated by commas
+  for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
+    curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
+      "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -H "Content-Type: application/json" \
+      -d "$(jq -n --arg id "$CHAT_ID" --arg text "$TEXT" '{chat_id: $id, text: $text, disable_web_page_preview: true}')" || true
+  done
   echo "Message sent"
 }
 

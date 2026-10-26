@@ -138,15 +138,18 @@ jobs:
             ANTHROPIC_API_KEY="$ANTHROPIC_KEY_DEFAULT"
             echo "::warning::No dedicated API key for $ORG_NAME/$REPO_NAME - using default key"
             # Ops-only: a missing key is a configuration problem for whoever runs the pipeline,
-            # not news for the team channel, so it goes to the same single chat as the failure
+            # not news for the team channel, so it goes to the same chats as the failure
             # alerts. Written out here rather than shared, because ga-common is not
             # checked out yet at this step. --max-time because a hung curl here would block the
             # whole run on a notification nobody is waiting for.
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              curl -s --max-time 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -H "Content-Type: application/json" \
-                -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID" --arg r "$REPO_NAME" \
-                      '{chat_id:$id,text:("⚠️ Claude Review: add Anthropic key for `"+$r+"`"),parse_mode:"Markdown"}')" > /dev/null || true
+              # TELEGRAM_CHAT_ID may hold several chat IDs separated by commas
+              for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
+                curl -s --max-time 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -H "Content-Type: application/json" \
+                  -d "$(jq -n --arg id "$CHAT_ID" --arg r "$REPO_NAME" \
+                        '{chat_id:$id,text:("⚠️ Claude Review: add Anthropic key for `"+$r+"`"),parse_mode:"Markdown"}')" > /dev/null || true
+              done
             fi
           fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
@@ -300,9 +303,12 @@ jobs:
           fi
           TEXT=$(printf "%s problem\n%s - %s" "⚠️ Claude Review" "$PR_URL" "$REASON")
           [ -n "$LINK" ] && TEXT=$(printf "%s\n%s" "$TEXT" "$LINK")
-          curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg id "$TELEGRAM_CHAT_ID" --arg text "$TEXT" \
-                  '{chat_id:$id,text:$text,disable_web_page_preview:true}')" || true
+          # TELEGRAM_CHAT_ID may hold several chat IDs separated by commas
+          for CHAT_ID in ${TELEGRAM_CHAT_ID//,/ }; do
+            curl -s --max-time 20 --retry 2 -o /dev/null -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg id "$CHAT_ID" --arg text "$TEXT" \
+                    '{chat_id:$id,text:$text,disable_web_page_preview:true}')" || true
+          done
           echo "Failure alert sent"
