@@ -184,6 +184,13 @@ is_pr_stale() {
   [ -n "$live_sha" ] && [ "$live_sha" != "$PR_SHA" ]
 }
 
+# True only when Gitea itself lists no changed files, so a truncated empty diff body is never taken for an empty PR.
+pr_has_no_changed_files() {
+  local files_json
+  files_json=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER/files?limit=1") || return 1
+  jq -e 'type == "array" and length == 0' <<< "$files_json" > /dev/null
+}
+
 # ---------------------------------------------------------------------------
 # Carries review statuses to a sync-merge commit (statuses are SHA-bound, so a
 # required check would otherwise block the PR). Best-effort.
@@ -227,6 +234,11 @@ prepare_review_context() {
   gitea_api "$REPO_PATH/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
   # A PR with no changes (head == base) is a skip, not an error - same handling as a submodule-only bump.
   if [ ! -s repo/pr.diff ]; then
+    if ! pr_has_no_changed_files; then
+      echo "::error::The PR diff came back empty but Gitea does not confirm an empty PR"
+      set_commit_status "$REPO_PATH" "$PR_SHA" "error" "PR diff is empty"
+      return 1
+    fi
     echo "PR has no changes (${PR_BRANCH} is identical to ${BASE_BRANCH}) — nothing to review"
     set_commit_status "$REPO_PATH" "$PR_SHA" "success" "No changes — nothing to review" "Claude Code Review"
     set_commit_status "$REPO_PATH" "$PR_SHA" "success" "No changes" "Non-ASCII Check"
@@ -975,6 +987,11 @@ fetch_pr_diff_only() {
   fi
   gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
   if [ ! -s repo/pr.diff ]; then
+    if ! pr_has_no_changed_files; then
+      echo "::error::The PR diff came back empty but Gitea does not confirm an empty PR"
+      set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "error" "PR diff is empty" "Non-ASCII Check"
+      return 1
+    fi
     echo "PR diff is empty — nothing to check"
     set_commit_status "$ORG_NAME/$REPO_NAME" "$PR_SHA" "success" "No changes" "Non-ASCII Check"
     echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
