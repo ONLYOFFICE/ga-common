@@ -1,0 +1,42 @@
+name: Download Analytics
+
+on:
+  schedule:
+    # Thursdays at 10:00 Asia/Tashkent (05:00 UTC).
+    - cron: '0 5 * * 4'
+  workflow_dispatch:
+
+concurrency:
+  group: download-analytics-nct2
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout ga-common
+        uses: actions/checkout@v4
+        with:
+          github-server-url: ${{ github.server_url }}
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/download-analytics-venv"
+          "$RUNNER_TEMP/download-analytics-venv/bin/python" -m pip install --disable-pip-version-check -r download-analytics/requirements.in
+
+      - name: Build report and update nct2
+        working-directory: download-analytics
+        env:
+          DOCSPACE_API_KEY: ${{ secrets.DOCSPACE_API_KEY }}
+          DOCSPACE_URL: ${{ vars.DOCSPACE_URL || 'https://nct2.onlyoffice.com' }}
+          DOCSPACE_FOLDER_ID: ${{ vars.DOCSPACE_FOLDER_ID }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/download-analytics-venv/bin/python" download_analytics.py --timezone Asia/Tashkent --publish
