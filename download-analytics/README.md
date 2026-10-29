@@ -9,7 +9,7 @@ the five latest stable releases per product; previous yearly reports are left un
 
 ## Report
 
-- Two permanent visible sheets: **Desktop Editors** and **Document Server**.
+- Three permanent visible sheets: **Desktop Editors**, **Document Server**, and **Docker Docs**.
 - Every run collects the five latest published stable releases of each product.
 - New releases appear automatically. Versions outside the latest five retain their
   earlier history, but no longer receive fresh counts; new date columns show a dash.
@@ -21,6 +21,20 @@ the five latest stable releases per product; previous yearly reports are left un
 - Drafts, prereleases, and automatic source archives are excluded.
 - Missing observations show a dash; actual zero counts remain zero.
 - The hidden `_history` sheet stores history. Do not edit or delete it.
+
+## Docker Docs
+
+Collects the public Docker Hub lifetime `pull_count` for `onlyoffice/documentserver`
+without authentication. The Docker Docs sheet records the total and the increase
+since the previous observation, using the same date columns as the GitHub sheets.
+No per-tag or per-architecture counters are available from this public endpoint.
+Pulls are not installations or unique users.
+
+The first observation has no increase value. If the counter decreases, the raw
+count is retained and the increase is unavailable for that interval. Existing
+yearly reports gain this sheet automatically; earlier dates remain unavailable.
+A Docker Hub collection error stops publication, preserving the existing report.
+Source: https://hub.docker.com/v2/repositories/onlyoffice/documentserver/
 
 ## Gitea setup
 
@@ -37,7 +51,7 @@ GitHub release metadata is collected without authentication; no GitHub token is 
 The public API limit is 60 requests per hour per source IP, shared with other jobs.
 The DocSpace key owner must have access to the destination folder.
 The Linux runner needs Git, Bash, Python 3.10+ with venv support, and network access
-to Gitea, GitHub API, PyPI, and DocSpace. Dependencies are installed in a temporary venv.
+to Gitea, GitHub API, Docker Hub API, PyPI, and DocSpace. Dependencies are installed in a temporary venv.
 
 ## Run
 

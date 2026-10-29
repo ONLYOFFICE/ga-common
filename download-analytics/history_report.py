@@ -1,4 +1,4 @@
-"""Two persistent product sheets, with one column per collection run."""
+"""Persistent product and Docker sheets, with one column per collection run."""
 from collections import Counter
 import os
 import tempfile
@@ -13,6 +13,7 @@ GROUPS = ('Installations', 'Updates', 'Add-ons')
 PLATFORMS = ('Windows', 'Linux', 'macOS')
 SCHEMA = 'onlyoffice-download-history-v1'
 METADATA = '_history'
+DOCKER_REPOSITORY = 'onlyoffice/documentserver'
 
 
 class HistoryError(ValueError):
@@ -20,7 +21,7 @@ class HistoryError(ValueError):
 
 
 def empty_history():
-    return {'runs': [], 'releases': {}, 'assets': {}}
+    return {'runs': [], 'releases': {}, 'assets': {}, 'docker': []}
 
 
 def run_label(existing, collected_at):
@@ -40,9 +41,12 @@ def record_release(state, product, release):
     return key
 
 
-def add_run(state, products, label):
+def add_run(state, products, label, docker_count=None):
     if label in state['runs']:
         raise ValueError('Duplicate collection timestamp')
+    if docker_count is not None and (type(docker_count) is not int or docker_count < 0):
+        raise ValueError('Invalid Docker pull count')
+    state['docker'].append(docker_count)
     for entry in state['assets'].values():
         entry['values'].append(None)
     state['runs'].append(label)
@@ -65,8 +69,19 @@ def read_metadata(sheet):
         raise ValueError('Invalid history timestamps')
     if len(set(state['runs'])) != len(state['runs']):
         raise ValueError('Duplicate history timestamps')
+    state['docker'] = [None] * len(state['runs'])
+    docker_seen = False
     for row in sheet.iter_rows(min_row=3, values_only=True):
         kind, product, release_id, asset_id, tag, published, name, group, platform = row[:9]
+        if kind == 'docker':
+            values = list(row[9:9 + len(state['runs'])])
+            if docker_seen or product != 'Docker Docs' or name != DOCKER_REPOSITORY:
+                raise ValueError('Invalid or duplicate Docker history')
+            if not all(value is None or type(value) is int and value >= 0 for value in values):
+                raise ValueError('Invalid historical Docker pull count')
+            state['docker'] = values
+            docker_seen = True
+            continue
         if product not in PRODUCTS:
             raise ValueError('Unknown product in history')
         key = (product, str(release_id))
@@ -178,6 +193,37 @@ def write_product(book, product, state, styles):
     return sheet
 
 
+
+def write_docker(book, state, styles):
+    sheet = book.add_worksheet('Docker Docs')
+    sheet.hide_gridlines(2)
+    sheet.freeze_panes(4, 1)
+    sheet.set_default_row(25)
+    sheet.set_row(3, 36)
+    sheet.set_column(0, 0, 64)
+    sheet.set_column(1, len(state['runs']), 22)
+    last = max(1, len(state['runs']))
+    sheet.merge_range(0, 0, 1, last, 'Docker Docs', styles['title'])
+    sheet.merge_range(2, 0, 2, last, f'Docker Hub / {DOCKER_REPOSITORY}', styles['note'])
+    sheet.write_row(3, 0, ['Metric', *state['runs']], styles['header'])
+    sheet.write_string(4, 0, 'Total pulls (lifetime)', styles['text'])
+    sheet.write_string(5, 0, 'Increase since previous observation', styles['total'])
+    for column, value in enumerate(state['docker'], 1):
+        sheet.write(4, column, value if value is not None else '—', styles['number'])
+        previous = state['docker'][column - 2] if column > 1 else None
+        if value is None or previous is None or value < previous:
+            sheet.write_string(5, column, '—', styles['total'])
+        else:
+            current_cell = xl_rowcol_to_cell(4, column)
+            previous_cell = xl_rowcol_to_cell(4, column - 1)
+            sheet.write_formula(5, column, f'={current_cell}-{previous_cell}',
+                                styles['total'], value - previous)
+    sheet.merge_range(7, 0, 7, last, 'Pulls are not installations or unique users.', styles['note'])
+    sheet.merge_range(8, 0, 8, last, 'First observation or decreased counter: no increase value.', styles['note'])
+    sheet.set_landscape()
+    sheet.print_area(0, 0, 8, len(state['runs']))
+
+
 def save_history(path, state):
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(suffix='.xlsx', dir=path.parent)
@@ -197,6 +243,7 @@ def save_history(path, state):
             styles = {key: book.add_format(dict(base, **value)) for key, value in definitions.items()}
             for product in PRODUCTS:
                 write_product(book, product, state, styles)
+            write_docker(book, state, styles)
             sheet = book.add_worksheet(METADATA)
             sheet.hide()
             sheet.write_string(0, 0, SCHEMA)
@@ -210,6 +257,8 @@ def save_history(path, state):
                 sheet.write_row(row, 0, ['asset', *key, None, None, entry['name'], entry['group'],
                                        entry['platform'], *entry['values']])
                 row += 1
+            sheet.write_row(row, 0, ['docker', 'Docker Docs', None, None, None, None,
+                                    DOCKER_REPOSITORY, None, None, *state['docker']])
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):

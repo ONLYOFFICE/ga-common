@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from history_report import HistoryError, PRODUCTS, add_run, load_history, run_label, save_history
+from history_report import HistoryError, PRODUCTS, DOCKER_REPOSITORY, add_run, load_history, run_label, save_history
 
 
 LOG = logging.getLogger("desktop-downloads")
@@ -125,6 +125,16 @@ def collect_tracked(client, repository=REPOSITORY):
         assets = collect_assets(client, release, repository)
         result.append((release, assets))
     return result
+
+
+def collect_docker(client):
+    data = request_json(client, 'GET', f'https://hub.docker.com/v2/repositories/{DOCKER_REPOSITORY}/')
+    if not isinstance(data, dict) or f"{data.get('namespace')}/{data.get('name')}" != DOCKER_REPOSITORY:
+        raise ReportError('Docker Hub returned an unexpected repository')
+    count = data.get('pull_count')
+    if type(count) is not int or count < 0:
+        raise ReportError('Docker Hub returned an invalid pull count')
+    return count
 
 
 class DocSpace:
@@ -248,12 +258,15 @@ def main():
                 portal.download(history, expected)
             github = session(github=True)
             state = load_history(history)
+            with session() as docker:
+                docker_count = collect_docker(docker)
             products = {name: collect_tracked(github, repository) for name, repository in PRODUCTS.items()}
-            add_run(state, products, run_label(state['runs'], now))
+            add_run(state, products, run_label(state['runs'], now), docker_count)
             save_history(args.output, state)
             for product, releases in products.items():
                 LOG.info("%s: %d releases, %d assets", product, len(releases),
                          sum(len(assets) for _, assets in releases))
+            LOG.info("Docker Hub %s: %d lifetime pulls", DOCKER_REPOSITORY, docker_count)
             LOG.info("History updated: %d run columns", len(state["runs"]))
             if portal:
                 portal.publish(args.output, expected)
