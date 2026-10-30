@@ -402,6 +402,12 @@ render_claude_review() {
   # every executed run consumed real CI time, including reruns on the same PR.
   local TOTAL_RUN_SECONDS=0 TOTAL_RUN_TIMED=0
 
+  # Runs that fell back to the default Anthropic key, per repository: every such run is
+  # a request to add a dedicated key. Counted per run and per distinct PR, before the
+  # verdict check below, because skipped and failed runs asked for a key as well.
+  local -A KEY_RUNS KEY_PRS KEY_PR_SEEN KEY_DISPLAY
+  local -a KEY_ORDER=()
+
   local i LOG REPO PR KEY VERDICT COUNTS_LINE C M L G F JOB_LINE
   for i in "${!PIDS[@]}"; do
     wait "${PIDS[$i]}" || true
@@ -424,6 +430,20 @@ render_claude_review() {
     # that's the latest run's casing) for display.
     KEY="$(tr '[:upper:]' '[:lower:]' <<< "$REPO")#${PR}"
     [[ -z "${PR_DISPLAY_REPO[$KEY]:-}" ]] && PR_DISPLAY_REPO[$KEY]="$REPO"
+
+    # The line is printed by claude-review.yml's "Select API key" step - keep the wording in sync.
+    if grep -qF 'No dedicated API key for' <<< "$LOG"; then
+      local KEY_REPO="${KEY%%#*}"
+      if [[ -z "${KEY_RUNS[$KEY_REPO]:-}" ]]; then
+        KEY_ORDER+=("$KEY_REPO"); KEY_DISPLAY[$KEY_REPO]="$REPO"
+        KEY_RUNS[$KEY_REPO]=0; KEY_PRS[$KEY_REPO]=0
+      fi
+      KEY_RUNS[$KEY_REPO]=$((${KEY_RUNS[$KEY_REPO]} + 1))
+      if [[ -z "${KEY_PR_SEEN[$KEY]:-}" ]]; then
+        KEY_PR_SEEN[$KEY]=1
+        KEY_PRS[$KEY_REPO]=$((${KEY_PRS[$KEY_REPO]} + 1))
+      fi
+    fi
 
     if [[ -z "${PR_SEEN[$KEY]:-}" ]]; then
       PR_SEEN[$KEY]=1; PR_ORDER+=("$KEY")
@@ -493,7 +513,32 @@ render_claude_review() {
     fi
   done
   local R_ERRCOUNT="${#R_ERRLIST[@]}"
-  (( R_COUNT == 0 && R_ERRCOUNT == 0 )) && return
+
+  # Repositories that ran on the default key, as a collapsible quote placed right under
+  # the stats box so it always lands in the first message, however long the lists below get.
+  local KEYS_BLOCK=""
+  if (( ${#KEY_ORDER[@]} > 0 )); then
+    local KEY_REPO
+    KEYS_BLOCK="<blockquote expandable>\n<i>⚠️ no dedicated Anthropic key · default key used</i>\n\n"
+    local -a KEY_PARTS=()
+    # Most requests first, alphabetical among ties.
+    while IFS= read -r KEY_REPO; do
+      [[ -n "$KEY_REPO" ]] && KEY_PARTS+=("$KEY_REPO")
+    done < <(
+      for KEY_REPO in "${KEY_ORDER[@]}"; do
+        printf '%d\t%s\n' "${KEY_RUNS[$KEY_REPO]}" "$KEY_REPO"
+      done | sort -t $'\t' -k1,1nr -k2,2f | cut -f2-
+    )
+    for KEY_REPO in "${KEY_PARTS[@]}"; do
+      KEYS_BLOCK+="<a href=\"https://${GITEA_HOST}/${GITHUB_ORG}/${KEY_DISPLAY[$KEY_REPO]}\">${KEY_DISPLAY[$KEY_REPO]}</a> · runs: ${KEY_RUNS[$KEY_REPO]}, PRs: ${KEY_PRS[$KEY_REPO]}\n"
+    done
+    KEYS_BLOCK+="</blockquote>"
+  fi
+
+  if (( R_COUNT == 0 && R_ERRCOUNT == 0 )); then
+    [[ -n "$KEYS_BLOCK" ]] && _REVIEW_MESSAGES+=("$(printf '%b' "<pre>Claude Review</pre>\n${KEYS_BLOCK}")")
+    return
+  fi
 
   local BLOCK="" STATS="Claude Review\n\n"
   if (( R_COUNT > 0 )); then
@@ -536,9 +581,11 @@ render_claude_review() {
   # The error list and PR list below contain <a href> links and must stay
   # outside any code/pre tag, since Telegram doesn't allow nested entities there.
   BLOCK+="<pre>${STATS}</pre>"
+  # The trailing newline keeps this quote from fusing with the next one into a single quote.
+  [[ -n "$KEYS_BLOCK" ]] && BLOCK+="\n${KEYS_BLOCK}\n"
 
   if (( R_ERRCOUNT > 0 )); then
-    [[ "$R_COUNT" -gt 0 ]] && BLOCK+="\n"
+    [[ "$R_COUNT" -gt 0 && -z "$KEYS_BLOCK" ]] && BLOCK+="\n"
     BLOCK+="⚠️ ${R_ERRCOUNT} PR(s) with errors:\n"
     local ENTRY
     for ENTRY in "${R_ERRLIST[@]}"; do

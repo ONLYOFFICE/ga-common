@@ -126,8 +126,6 @@ jobs:
         env:
           ANTHROPIC_KEYS: ${{ secrets.ANTHROPIC_KEYS }}
           ANTHROPIC_KEY_DEFAULT: ${{ secrets.ANTHROPIC_KEY_DEFAULT }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
           printf '%s' "$ANTHROPIC_KEYS" | jq '.' > /dev/null 2>&1 || echo "::warning::ANTHROPIC_KEYS is not valid JSON"
@@ -136,28 +134,8 @@ jobs:
             'to_entries | map(select(.key | ascii_downcase == ($repo | ascii_downcase))) | (.[0].value // empty)' 2>/dev/null || true)
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             ANTHROPIC_API_KEY="$ANTHROPIC_KEY_DEFAULT"
+            # The weekly Claude Review stats digest greps this exact line from the job logs - keep the wording in sync with notify-workflows.sh.
             echo "::warning::No dedicated API key for $ORG_NAME/$REPO_NAME - using default key"
-            # Ops-only: a missing key is a configuration problem for whoever runs the pipeline,
-            # not news for the team channel, so it goes to the same chats as the failure
-            # alerts. Written out here rather than shared, because ga-common is not
-            # checked out yet at this step. --max-time because a hung curl here would block the
-            # whole run on a notification nobody is waiting for.
-            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              # TELEGRAM_CHAT_ID may hold several chat IDs separated by commas; blanks and repeats are skipped
-              SEEN_IDS=","
-              IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_ID"
-              for CHAT_ID in "${CHAT_IDS[@]}"; do
-                CHAT_ID="${CHAT_ID//[[:space:]]/}"
-                [ -n "$CHAT_ID" ] || continue
-                case "$SEEN_IDS" in *",$CHAT_ID,"*) continue ;; esac
-                SEEN_IDS+="$CHAT_ID,"
-                curl -sS --fail --max-time 20 -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                  -H "Content-Type: application/json" \
-                  -d "$(jq -n --arg id "$CHAT_ID" --arg r "$REPO_NAME" \
-                        '{chat_id:$id,text:("⚠️ Claude Review: add Anthropic key for `"+$r+"`"),parse_mode:"Markdown"}')" \
-                  || echo "::warning::Telegram alert was not delivered to chat $CHAT_ID"
-              done
-            fi
           fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "::error::No Anthropic API key available (neither ANTHROPIC_KEYS[$REPO_NAME] nor ANTHROPIC_KEY_DEFAULT is set)"
