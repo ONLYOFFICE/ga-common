@@ -345,8 +345,9 @@ build_workflows_report() {
 # state" row per PR (verdict, severity/fixed counts, open errors), and renders
 # the stats digest — a <pre> block (run count, PRs reviewed, pass/fail bar,
 # one bar per severity) plus an error list and a collapsible PR list, both
-# linking out. Fills the array named by $1 with complete HTML messages; long
-# reports continue between entries, preserving every error link and repository.
+# linking out. Fills the array named by $1 with complete HTML messages; a long
+# error list continues in further messages, while the per-repository PR list is
+# cut to fit the message it follows.
 render_claude_review() {
   local -n _REVIEW_MESSAGES=$1
   _REVIEW_MESSAGES=()
@@ -432,7 +433,8 @@ render_claude_review() {
     [[ -z "${PR_DISPLAY_REPO[$KEY]:-}" ]] && PR_DISPLAY_REPO[$KEY]="$REPO"
 
     # The line is printed by claude-review.yml's "Select API key" step - keep the wording in sync.
-    if grep -qF 'No dedicated API key for' <<< "$LOG"; then
+    # The job log also echoes that step's source, where the same text carries literal $ORG_NAME/$REPO_NAME, so only a filled-in ORG/REPO counts.
+    if grep -qP 'No dedicated API key for [^\s$/]+/[^\s$]+ - using default key' <<< "$LOG"; then
       local KEY_REPO="${KEY%%#*}"
       if [[ -z "${KEY_RUNS[$KEY_REPO]:-}" ]]; then
         KEY_ORDER+=("$KEY_REPO"); KEY_DISPLAY[$KEY_REPO]="$REPO"
@@ -651,11 +653,9 @@ render_claude_review() {
       fi
     }
 
+    # The rollup never spills into a message of its own: repos that do not fit are cut off (busiest ones are listed first).
     local REPO_HEADER="<blockquote expandable>\n<i>reviewed PRs · bugs found/fixed</i>\n\n"
-    if (( $(telegram_text_length "${BLOCK}${REPO_HEADER}") > MAX_LENGTH )); then
-      _REVIEW_MESSAGES+=("$(printf '%b' "$BLOCK")")
-      BLOCK="<pre>Claude Review</pre>\n"
-    fi
+    local BLOCK_BEFORE_ROLLUP="$BLOCK" REPOS_SHOWN=0
     BLOCK+="$REPO_HEADER"
     local REPO_ENTRY
     for REPO in "${SREPOS[@]}"; do
@@ -670,13 +670,16 @@ render_claude_review() {
       # Drop the padding of the last slot so the <code> background ends on a digit.
       if [[ "$BUG_ROW" =~ ^(.*[^[:space:]]) ]]; then BUG_ROW="${BASH_REMATCH[1]}"; fi
       REPO_ENTRY+="<code>${BUG_ROW}</code>\n\n"
-      if (( $(telegram_text_length "${BLOCK}${REPO_ENTRY}") > MAX_LENGTH )); then
-        _REVIEW_MESSAGES+=("$(printf '%b' "${BLOCK}</blockquote>")")
-        BLOCK="<pre>Claude Review</pre>\n${REPO_HEADER}"
-      fi
+      (( $(telegram_text_length "${BLOCK}${REPO_ENTRY}") > MAX_LENGTH )) && break
       BLOCK+="$REPO_ENTRY"
+      REPOS_SHOWN=$((REPOS_SHOWN + 1))
     done
-    BLOCK+="</blockquote>"
+    if (( REPOS_SHOWN == 0 )); then
+      BLOCK="$BLOCK_BEFORE_ROLLUP"
+    else
+      (( REPOS_SHOWN < ${#SREPOS[@]} )) && BLOCK+="<i>… +$((${#SREPOS[@]} - REPOS_SHOWN)) more</i>\n"
+      BLOCK+="</blockquote>"
+    fi
   fi
 
   _REVIEW_MESSAGES+=("$(printf '%b' "$BLOCK")")
