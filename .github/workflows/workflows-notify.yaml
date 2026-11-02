@@ -75,6 +75,7 @@ jobs:
                                       | ci-update             | OCI Packages Update
                                       | readme-update         | Update readme
             Docker-DocumentServer     | 4testing-build        | Build docker
+                                      | docker-tests          | Docker tests
             Docker-Docs               | build.yaml            | Build docker
             ga-common                 | keeplive              | Actions Keepalive
           WORKFLOWS_GITEA: |
