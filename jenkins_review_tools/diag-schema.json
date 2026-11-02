@@ -49,6 +49,33 @@
       "type": "string",
       "description": "Concrete fix: a code change (which repo/file/what) or, if not code, the action to take on the build machine/environment."
     },
+    "agent": {
+      "type": "string",
+      "description": "Jenkins agent/node the stage ran on, as seen in the log (e.g. NODE_NAME), or empty string."
+    },
+    "remediation": {
+      "type": "array",
+      "maxItems": 10,
+      "description": "Only for category environment or tooling: ordered steps for whoever maintains the build agent - first confirm the diagnosis, then fix, then verify. Empty array for code or dependency causes.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "command"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "What to do and why, one or two sentences."
+          },
+          "command": {
+            "type": "string",
+            "description": "Exact command(s) to run on that agent's OS, or empty string if the step is not a command."
+          }
+        }
+      }
+    },
     "confidence": {
       "type": "string",
       "enum": [

@@ -36,6 +36,26 @@ broke and why so a developer understands the failure without opening the report.
 Do NOT start with or repeat the stage name - it is already shown in bold right before
 your text. Start directly with what happened (e.g. "Checkout failed: ...").
 
+## Runner remediation (`agent`, `remediation` fields)
+
+Set `agent` to the Jenkins agent/node name if the log shows it (e.g. NODE_NAME).
+
+When the category is `environment` or `tooling` (the build agent itself is the
+problem: network, disk, permissions, missing/wrong toolchain, SDK, signing setup,
+etc.), fill `remediation` with 3-8 ordered steps for the person who maintains that
+agent:
+  1. diagnostic steps that confirm (or rule out) your conclusion,
+  2. the fix,
+  3. a check that it worked (e.g. re-run the failing command).
+Commands must match the agent's OS - infer it from the stage name and log: bash on
+Linux, zsh/bash on macOS, PowerShell on Windows. Prefer read-only commands for
+diagnosis; if a step changes the machine, say so in `action`. Use only hosts, paths
+and tool names that appear in the log or sources - never invent them, and never
+put secrets in commands. You only see the logs and sources, not the machine, so
+make the diagnostic steps decisive.
+
+For `code` and `dependency` causes, `remediation` must be an empty array.
+
 ALWAYS finish with your answer. Your FINAL message must be exactly one JSON object
 matching the required schema (stage, category, summary, root_cause, repo, file,
-evidence, fix, confidence) and nothing else - never end the session without it.
+evidence, fix, agent, remediation, confidence) and nothing else - never end the session without it.
