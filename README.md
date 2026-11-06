@@ -60,6 +60,12 @@ Manually dispatched job that installs a given Document Server / Desktop Editors 
 
 Runs on the Monday between December 20 and 26 at 07:00 UTC to open copyright update PRs for the next year, then sends one Telegram summary with the created PRs and any repository failures. Repositories are configured in `.gitea/workflows/update-year.yml`, which also supports manual dry runs.
 
+### Renovate
+
+Keeps the GitHub Actions pinned by commit SHA in the workflows of connected Gitea repositories up to date. Runs every Monday at 03:00 UTC (`.gitea/workflows/renovate.yml`) and opens one pull request per repository with all the action bumps. A repository takes part only when it has its own `renovate.json` (nothing is onboarded automatically); the list of repositories comes from the `repositories` input or the `RENOVATE_REPOSITORIES` variable. A manual run is a dry run unless `dry_run` is set to `false`. A failed run sends a Telegram alert.
+
+Needs the `CI_GITEA_HOST`, `PAT_GITEA_TOKEN` (write access to the listed repositories), `RENOVATE_GITHUB_COM_TOKEN` (a public read-only GitHub token, Renovate looks the versions up on github.com) and `TELEGRAM_*` secrets.
+
 ### Claude Code Review
 
 Automated AI code review for pull requests across all connected Gitea repositories.

@@ -1,0 +1,139 @@
+name: Renovate
+
+on:
+  schedule:
+    # Mondays at 03:00 UTC: inside the "before 6am on monday" window the repositories' renovate.json files allow.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: 'Comma-separated ORG/repo list; empty means the RENOVATE_REPOSITORIES variable'
+        required: false
+        type: string
+      dry_run:
+        description: 'Log what Renovate would do without creating branches or pull requests'
+        required: false
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
+      renovate_version:
+        description: 'Renovate image tag; empty means the version this workflow was last tested with'
+        required: false
+        type: string
+      log_level:
+        description: 'Renovate log level'
+        required: false
+        type: choice
+        default: 'info'
+        options:
+          - 'info'
+          - 'debug'
+
+concurrency:
+  group: Renovate
+  cancel-in-progress: false
+
+env:
+  # Last tested image tag; bump it here after checking a manual dry run.
+  DEFAULT_RENOVATE_VERSION: '44.221.4'
+  # Repositories processed when neither the input nor the RENOVATE_REPOSITORIES variable names any.
+  DEFAULT_REPOSITORIES: 'ONLYOFFICE/DocSpace-buildtools'
+
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Run Renovate
+        env:
+          GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+          # The token needs write access to every repository listed: it pushes the branches and opens the pull requests.
+          RENOVATE_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          # Renovate looks the action versions up on github.com even when the repository lives on Gitea (read-only public token).
+          # Gitea refuses secret names that start with GITHUB_, so the secret is named differently and mapped below.
+          GITHUB_COM_TOKEN: ${{ secrets.RENOVATE_GITHUB_COM_TOKEN }}
+          REPOSITORIES_VARIABLE: ${{ vars.RENOVATE_REPOSITORIES }}
+          GIT_AUTHOR_VARIABLE: ${{ vars.RENOVATE_GIT_AUTHOR }}
+          INPUT_REPOSITORIES: ${{ github.event.inputs.repositories }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          INPUT_VERSION: ${{ github.event.inputs.renovate_version }}
+          INPUT_LOG_LEVEL: ${{ github.event.inputs.log_level }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          : "${GITEA_HOST:?CI_GITEA_HOST is required}"
+          : "${RENOVATE_TOKEN:?PAT_GITEA_TOKEN is required}"
+          : "${GITHUB_COM_TOKEN:?RENOVATE_GITHUB_COM_TOKEN is required}"
+
+          repositories="${INPUT_REPOSITORIES:-${REPOSITORIES_VARIABLE:-$DEFAULT_REPOSITORIES}}"
+          repositories="${repositories//[[:space:]]/}"
+          # Names only: the value is handed to Renovate as a list and must not carry anything else
+          if ! [[ "$repositories" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)*$ ]]; then
+            echo "::error::repositories must be a comma-separated list of ORG/repo names"; exit 1
+          fi
+
+          version="${INPUT_VERSION:-$DEFAULT_RENOVATE_VERSION}"
+          if ! [[ "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "::error::renovate_version must look like 44 or 44.221.4"; exit 1
+          fi
+
+          # A manual run is a dry run unless asked otherwise; the schedule always does the real work
+          dry_run=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_DRY_RUN:-true}" = "true" ]; then
+            dry_run=true
+          fi
+
+          options=(
+            -e RENOVATE_PLATFORM=gitea
+            -e "RENOVATE_ENDPOINT=https://${GITEA_HOST}/api/v1/"
+            -e RENOVATE_TOKEN
+            -e GITHUB_COM_TOKEN
+            -e "RENOVATE_REPOSITORIES=${repositories}"
+            # Only repositories that carry their own renovate.json take part, and none is onboarded automatically
+            -e RENOVATE_REQUIRE_CONFIG=required
+            -e RENOVATE_ONBOARDING=false
+            -e "LOG_LEVEL=${INPUT_LOG_LEVEL:-info}"
+          )
+          [ -z "${GIT_AUTHOR_VARIABLE:-}" ] || options+=(-e "RENOVATE_GIT_AUTHOR=${GIT_AUTHOR_VARIABLE}")
+          [ "$dry_run" = "false" ] || options+=(-e RENOVATE_DRY_RUN=full)
+
+          echo "Renovate ${version}, repositories: ${repositories}, dry run: ${dry_run}"
+          docker run --rm "${options[@]}" "renovate/renovate:${version}"
+
+      - name: Notify on failure
+        if: failure()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+        run: |
+          set -uo pipefail
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - alert not sent"; exit 0
+          fi
+          # No literal host: it comes from the CI_GITEA_HOST secret, and ga-common is mirrored to public GitHub
+          TEXT=$(printf "%s\n%s" "⚠️ Renovate run failed" "ga-common / Renovate")
+          if [ -n "${GITEA_HOST:-}" ]; then
+            TEXT=$(printf "%s\nhttps://%s/%s/actions/runs/%s" "$TEXT" "$GITEA_HOST" "${GITHUB_REPOSITORY:-ONLYOFFICE/ga-common}" "$GITHUB_RUN_ID")
+          fi
+          # TELEGRAM_CHAT_ID may hold several chat IDs separated by commas; blanks and repeats are skipped
+          SEEN_IDS=","
+          IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_ID"
+          for CHAT_ID in "${CHAT_IDS[@]}"; do
+            CHAT_ID="${CHAT_ID//[[:space:]]/}"
+            [ -n "$CHAT_ID" ] || continue
+            case "$SEEN_IDS" in *",$CHAT_ID,"*) continue ;; esac
+            SEEN_IDS+="$CHAT_ID,"
+            curl -sS --fail --max-time 20 --retry 2 -o /dev/null -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg id "$CHAT_ID" --arg text "$TEXT" \
+                    '{chat_id:$id,text:$text,disable_web_page_preview:true}')" \
+              || echo "::warning::alert to chat ${CHAT_ID} was not delivered"
+          done
