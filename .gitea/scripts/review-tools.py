@@ -474,7 +474,8 @@ MAXLEN = env_number("REVIEW_DISCUSSION_COMMENT_MAXLEN", 400)
 NO_DISCUSSION = "No prior discussion or review comments found."
 # Every marker this pipeline stamps on its own comments - the non-ASCII report included,
 # which used to come back into the prompt as if a human had written it.
-BOT_MARKERS = ("<!-- Claude-Review:", "<!-- Non-ASCII-Check -->", "<!-- claude-review-state:")
+BOT_MARKERS = ("<!-- Claude-Review:", "<!-- Non-ASCII-Check -->", "<!-- claude-review-state:",
+               "<!-- Claude-Review-Skipped -->", "<!-- Claude-Review-Manual-Only -->")
 
 
 def sanitize(text, cap=None):

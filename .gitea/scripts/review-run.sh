@@ -314,7 +314,7 @@ prepare_review_context() {
   # the skip/state logic. _unwrap_previous_review peels any error/spinner layers first, so
   # what gets re-wrapped is always a real review and never a wrapper around one.
   if [ -n "$PREVIOUS_REVIEW_ANY" ]; then
-    sed -e '/^<!-- Claude-Review:/d' -e '/^<!-- claude-review-state:/d' -e "/$MANUAL_ONLY_MARKER/d" <<< "$PREVIOUS_REVIEW_ANY" \
+    sed -e '/^<!-- Claude-Review:/d' -e '/^<!-- claude-review-state:/d' -e "/^ℹ️ .*$MANUAL_ONLY_MARKER[[:space:]]*\$/d" <<< "$PREVIOUS_REVIEW_ANY" \
       | _unwrap_previous_review > repo/previous-claude-output.md
     # No genuine review in there (first round, or nothing but error/spinner layers) - drop the
     # file so neither re-wrap point has anything to quote.
@@ -687,12 +687,10 @@ post_review_and_set_status() {
   local IS_FALLBACK=false
   if [ ! -s claude-output.md ] || ! grep -q "<details>" claude-output.md 2>/dev/null; then
     IS_FALLBACK=true
+    local push_hint=' or push a new commit'
+    [ "${MANUAL_ONLY:-false}" = "true" ] && push_hint=''
     { printf '**Review error** — could not complete. See the [workflow run](%s) for details.' "$(_run_url)"
-      if [ "${MANUAL_ONLY:-false}" = "true" ]; then
-        printf '\n\nTo retry, comment `/review` (PR author only). If it keeps failing, write to @evgeniy-antonyuk.'
-      else
-        printf '\n\nTo retry, comment `/review` (PR author only) or push a new commit. If it keeps failing, write to @evgeniy-antonyuk.'
-      fi
+      printf '\n\nTo retry, comment `/review` (PR author only)%s. If it keeps failing, write to @evgeniy-antonyuk.' "$push_hint"
       # Skip the wrap if the previous comment is itself an error fallback - otherwise consecutive
       # failures nest a "Previous review" wrapper inside a "Previous review" wrapper each time.
       if [ -f repo/previous-claude-output.md ] && ! grep -q '^\*\*Review error\*\*' repo/previous-claude-output.md; then

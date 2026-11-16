@@ -440,6 +440,7 @@ def lambda_handler(event, context):
         "repository": full_name,
         "pr_number": inputs["pr_number"],
         "check_only": check_only,
+        "manual_only": manual_only,
         "workflow": f"{config['workflow_owner']}/{config['workflow_repo']}/{config['workflow_id']}",
         "ref": config["workflow_ref"],
     }
