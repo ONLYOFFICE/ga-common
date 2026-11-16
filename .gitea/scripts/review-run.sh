@@ -38,6 +38,9 @@ _gitea_raw() {
 gitea_api()      { _gitea_raw 3 "$@"; }
 gitea_api_json() { _gitea_raw 0 "$1" -H "Content-Type: application/json" "${@:2}"; }
 
+# Ends the manual-only notice line that post_review_and_set_status appends to the review comment.
+MANUAL_ONLY_MARKER="<!-- Claude-Review-Manual-Only -->"
+
 _run_url() { echo "https://$GITEA_HOST/${WORKFLOW_REPO:-$ORG_NAME/ga-common}/actions/runs/$GITHUB_RUN_ID"; }
 
 fetch_all_comments() {
@@ -311,7 +314,7 @@ prepare_review_context() {
   # the skip/state logic. _unwrap_previous_review peels any error/spinner layers first, so
   # what gets re-wrapped is always a real review and never a wrapper around one.
   if [ -n "$PREVIOUS_REVIEW_ANY" ]; then
-    sed -e '/^<!-- Claude-Review:/d' -e '/^<!-- claude-review-state:/d' <<< "$PREVIOUS_REVIEW_ANY" \
+    sed -e '/^<!-- Claude-Review:/d' -e '/^<!-- claude-review-state:/d' -e "/$MANUAL_ONLY_MARKER/d" <<< "$PREVIOUS_REVIEW_ANY" \
       | _unwrap_previous_review > repo/previous-claude-output.md
     # No genuine review in there (first round, or nothing but error/spinner layers) - drop the
     # file so neither re-wrap point has anything to quote.
@@ -685,7 +688,11 @@ post_review_and_set_status() {
   if [ ! -s claude-output.md ] || ! grep -q "<details>" claude-output.md 2>/dev/null; then
     IS_FALLBACK=true
     { printf '**Review error** — could not complete. See the [workflow run](%s) for details.' "$(_run_url)"
-      printf '\n\nTo retry, comment `/review` (PR author only) or push a new commit. If it keeps failing, write to @evgeniy-antonyuk.'
+      if [ "${MANUAL_ONLY:-false}" = "true" ]; then
+        printf '\n\nTo retry, comment `/review` (PR author only). If it keeps failing, write to @evgeniy-antonyuk.'
+      else
+        printf '\n\nTo retry, comment `/review` (PR author only) or push a new commit. If it keeps failing, write to @evgeniy-antonyuk.'
+      fi
       # Skip the wrap if the previous comment is itself an error fallback - otherwise consecutive
       # failures nest a "Previous review" wrapper inside a "Previous review" wrapper each time.
       if [ -f repo/previous-claude-output.md ] && ! grep -q '^\*\*Review error\*\*' repo/previous-claude-output.md; then
@@ -702,6 +709,12 @@ post_review_and_set_status() {
         printf '\n\n<!-- claude-review-state:%s -->' "$(base64 -w0 < repo/previous-state.json)"
       fi
     } > claude-output.md
+  fi
+
+  # One marked line, so prepare_review_context can strip it before quoting this comment as the previous review.
+  if [ "${MANUAL_ONLY:-false}" = "true" ]; then
+    printf '\n\nℹ️ New commits in a PR into `%s` are not reviewed automatically: comment `/review` (PR author only) after pushing to review them. %s\n' \
+      "${BASE_BRANCH//\`/}" "$MANUAL_ONLY_MARKER" >> claude-output.md
   fi
 
   # notify-workflows.sh's Claude Review stats digest scrapes THIS job's log for the

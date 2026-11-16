@@ -409,7 +409,9 @@ def lambda_handler(event, context):
     if not is_repository_allowed(full_name, inputs["repo_name"], config["allowed_repositories"]):
         return response(200, {"ok": True, "ignored": True, "reason": "repository not allowed"})
 
-    if not is_branch_allowed(inputs["base_branch"], config["allowed_base_branch_patterns"]):
+    # A PR into any other base branch (e.g. a feature branch) is reviewed only on the explicit review command.
+    manual_only = not is_branch_allowed(inputs["base_branch"], config["allowed_base_branch_patterns"])
+    if manual_only and not force:
         return response(200, {"ok": True, "ignored": True, "reason": "base branch not allowed"})
 
     pr_url = f"{config['gitea_url']}/{full_name}/pulls/{inputs['pr_number']}"
@@ -418,6 +420,8 @@ def lambda_handler(event, context):
         dispatch_inputs["check_only"] = "true"
     if force:
         dispatch_inputs["force"] = "true"
+    if manual_only:
+        dispatch_inputs["manual_only"] = "true"
     status, body = dispatch_workflow(config, dispatch_inputs)
     if status < 200 or status >= 300:
         return response(

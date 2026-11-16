@@ -50,6 +50,11 @@ on:
         required: false
         type: boolean
         default: false
+      manual_only:
+        description: 'The base branch is not reviewed on push, only on the /review command (set by the Lambda); the review comment says so'
+        required: false
+        type: boolean
+        default: false
 
 env:
   GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
@@ -72,6 +77,7 @@ jobs:
       PR_URL: ${{ inputs.pr_url }}
       FORCE_REVIEW: ${{ inputs.force }}
       CHECK_ONLY: ${{ inputs.check_only }}
+      MANUAL_ONLY: ${{ inputs.manual_only }}
     steps:
       - name: Resolve inputs
         id: resolve
