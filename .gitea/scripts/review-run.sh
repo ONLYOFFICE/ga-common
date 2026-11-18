@@ -418,7 +418,8 @@ prepare_review_context() {
   # --- sync-merge guard: skip a pure base-branch sync merge (no new feature work) ---
   # Only skips if a previous reviewed SHA exists to carry statuses from - otherwise a
   # PR's first push being such a merge still gets a real review. "HEAD^2 == base tip"
-  # alone isn't enough: also require no new commits since the last review.
+  # alone isn't enough: also require no new commits since the last review. An explicit
+  # /review (FORCE_REVIEW) never skips here and reviews the whole PR instead.
   #
   # Deliberately does NOT look at whether the merge itself resolved conflicts (dropped an
   # earlier "evil merge" --cc combined-diff check that ran a real review whenever it found
@@ -449,6 +450,10 @@ prepare_review_context() {
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but the commits since ${PREVIOUS_SHA:0:10} could not be enumerated — running review anyway"
       elif [ -n "$NEW_COMMITS" ]; then
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH), but $(grep -c . <<< "$NEW_COMMITS") new commit(s) landed on $PR_BRANCH since ${PREVIOUS_SHA:0:10} — running review"
+      elif [ "${FORCE_REVIEW:-false}" = "true" ]; then
+        # The delta since the last review is only what the merge brought from base, so review the whole PR.
+        echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) with no new commits since ${PREVIOUS_SHA:0:10} — force review requested, reviewing the whole PR"
+        PREV_AVAILABLE=false
       else
         echo "HEAD is a base-branch sync merge ($BASE_BRANCH → $PR_BRANCH) with no new commits since ${PREVIOUS_SHA:0:10} — skipping review"
         carry_over_statuses "$REPO_PATH" "$PREVIOUS_SHA" "$PR_SHA"
