@@ -39,7 +39,7 @@ env:
   # Last tested image tag; bump it here after checking a manual dry run.
   DEFAULT_RENOVATE_VERSION: '44.221.4'
   # Repositories processed when neither the input nor the RENOVATE_REPOSITORIES variable names any.
-  DEFAULT_REPOSITORIES: 'ONLYOFFICE/ga-common'
+  DEFAULT_REPOSITORIES: 'ONLYOFFICE/ga-common,ONLYOFFICE/DocSpace-buildtools'
 
 jobs:
   renovate:
