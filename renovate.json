@@ -24,6 +24,13 @@
       "enabled": false
     },
     {
+      "description": "Tool versions passed to setup actions (with: version) are chosen deliberately, only actions are tracked",
+      "matchDepTypes": [
+        "uses-with"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Gitea does not support the artifact actions v4 and later",
       "matchFileNames": [
         ".gitea/**"
