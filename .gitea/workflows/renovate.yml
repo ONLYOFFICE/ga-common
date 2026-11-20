@@ -121,6 +121,8 @@ jobs:
             # Only repositories that carry their own renovate.json take part, and none is onboarded automatically
             -e RENOVATE_REQUIRE_CONFIG=required
             -e RENOVATE_ONBOARDING=false
+            # One pull request per repository: majors go into the same group instead of a second branch that conflicts with it
+            -e RENOVATE_SEPARATE_MAJOR_MINOR=false
             -e "LOG_LEVEL=${INPUT_LOG_LEVEL:-info}"
           )
           [ -z "${GIT_AUTHOR_VARIABLE:-}" ] || options+=(-e "RENOVATE_GIT_AUTHOR=${GIT_AUTHOR_VARIABLE}")
