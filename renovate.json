@@ -1,0 +1,41 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "enabledManagers": [
+    "github-actions"
+  ],
+  "pinDigests": true,
+  "semanticCommits": "disabled",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "workflow actions"
+    },
+    {
+      "description": "Runner images and Node versions are chosen deliberately, only actions are tracked",
+      "matchDatasources": [
+        "github-runners",
+        "node-version"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Gitea does not support the artifact actions v4 and later",
+      "matchFileNames": [
+        ".gitea/**"
+      ],
+      "matchPackageNames": [
+        "actions/upload-artifact",
+        "actions/download-artifact"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    }
+  ]
+}

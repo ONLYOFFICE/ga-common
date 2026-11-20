@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two distinct CI platforms live side by side and must not be conflated:
 
 - **`.github/`** — GitHub Actions. Reusable workflows (`workflow_call`) plus scheduled org-wide jobs.
-- **`.gitea/`** — Gitea Actions. The Claude Code Review pipeline (`workflow_dispatch` only), Bugzilla triage (`workflow_dispatch` only) and the weekly release review (`schedule` + `workflow_dispatch`). Gitea ≠ GitHub: some action features and contexts differ, and Gitea is self-hosted at `$GITEA_HOST`.
+- **`.gitea/`** — Gitea Actions. The Claude Code Review pipeline (`workflow_dispatch` only), Bugzilla triage (`workflow_dispatch` only) and the weekly release review (`schedule` + `workflow_dispatch`), plus Renovate for pinned actions (`schedule` + `workflow_dispatch`). Gitea ≠ GitHub: some action features and contexts differ, and Gitea is self-hosted at `$GITEA_HOST`.
 
 ## Architecture: the Claude Code Review pipeline
 
@@ -82,6 +82,20 @@ Cron (Saturday 06:00 UTC) or manual `workflow_dispatch`. For `DocSpace-buildtool
 - **Prompts** live in `weekly/` (`REVIEW.md`, `FIX.md`, two schemas). Commit subjects/messages/authors are untrusted and go through `_sanitize` (HTML-escaped once, on the shell side) like PR text in `review-run.sh`; `weekly-review-tools.py`'s `clean()` unescapes before it escapes, so nothing is ever escaped twice. Finding text reaching `FIX.md` and the PR body goes through it too.
 - **Keys/secrets**: `ANTHROPIC_KEY_WEEKLY` (a dedicated key that keeps the weekly spend apart from the review keys; optional) falling back to `ANTHROPIC_KEYS[<repo>]` and then `ANTHROPIC_KEY_DEFAULT`, `PAT_GITEA_TOKEN`, `TELEGRAM_CHAT_ID` (one chat ID or several separated by commas - every alert loop trims blanks, skips repeats and warns per chat that did not receive it; the five loops in the workflows and `weekly-review-run.sh` are copies, keep them identical. Opened PRs, with how many commits were reviewed, need a person or could not be reviewed, the run cost, and failures and notices). The pipeline's git identity is `claude-weekly@noreply.$GITEA_HOST` (`WEEKLY_GIT_EMAIL`) — `prepare` filters on it, so don't change it without clearing the old one.
 - The sandbox functions are a copy of `triage-run.sh`'s, not a shared library (see the note above `name_weekly_resources`) — port fixes by hand.
+
+## Renovate (`.gitea/workflows/renovate.yml`)
+
+Central Renovate run for the Gitea repositories: cron Monday 03:00 UTC (inside the `before 6am on monday` window the repositories' own `renovate.json` files use) or `workflow_dispatch`. One `docker run renovate/renovate:<version>` on the runner's Docker, no checkout and no repository files needed.
+
+- **Repositories**: `repositories` input, else the `RENOVATE_REPOSITORIES` variable, else `DEFAULT_REPOSITORIES` in the workflow `env`. The value is validated as a comma-separated `ORG/repo` list before it reaches Renovate.
+- **Opt-in per repository**: `RENOVATE_REQUIRE_CONFIG=required` and `RENOVATE_ONBOARDING=false`, so no onboarding PR is ever opened and what gets updated is decided by that repository's `renovate.json`. Renovate reads it from the **default branch only** (`master` in git-flow repos): a file that lives only on `develop` or a release branch does not count. A listed repository without it is skipped by Renovate ("Repository is disabled", exit code 0), so the step greps the log for that line and fails, otherwise the run would stay green while doing nothing.
+- **Target branch**: Renovate opens its pull requests against the default branch unless the repository's `renovate.json` sets `baseBranchPatterns` (e.g. `["develop"]`) - set it before listing a git-flow repository.
+- **Dry run**: a manual run defaults to `dry_run: true` (`RENOVATE_DRY_RUN=full`); the schedule always does the real work. A manual run also ignores the repositories' `schedule` (`RENOVATE_FORCE`), otherwise a run outside the Monday window would create nothing.
+- **ga-common itself** is the first connected repository (`DEFAULT_REPOSITORIES`, its own `renovate.json`): same rules as DocSpace-buildtools plus no major updates of `actions/upload-artifact`/`actions/download-artifact` under `.gitea/` (Gitea does not support the artifact actions v4 and later; Node 24 actions such as `checkout` v5+ do run on its runners).
+- **Version**: `renovate_version` input, default `DEFAULT_RENOVATE_VERSION` in `env` (the last tag tested with a dry run). Bump it by hand after a successful manual dry run.
+- **Secrets**: `PAT_GITEA_TOKEN` (becomes `RENOVATE_TOKEN`, needs write access to every listed repository), `RENOVATE_GITHUB_COM_TOKEN` (becomes `GITHUB_COM_TOKEN`; Gitea refuses secret names that start with `GITHUB_`; Renovate would skip every lookup without it, so the step fails before starting Renovate when it is unset, as it does for the two others), `CI_GITEA_HOST`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` (failure alert; the loop is a copy of the review pipelines' alert loops, keep it identical). Optional variable `RENOVATE_GIT_AUTHOR`.
+- **Log level**: `log_level` input (`info` or `debug`), passed to Renovate as `LOG_LEVEL`; `debug` shows the extracted dependencies and the lookups.
+- Tested against a throwaway Gitea (connects, skips a repository without config, reads `renovate.json`, extracts the pinned actions) and with a dry run on the production Gitea, where DocSpace-buildtools was skipped because its `renovate.json` is not on `master` yet.
 
 ## Script layout in `.gitea/scripts/`
 
