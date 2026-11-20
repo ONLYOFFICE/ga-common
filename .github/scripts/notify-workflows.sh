@@ -340,6 +340,46 @@ build_workflows_report() {
   [[ -n "$BUILDERS_BLOCK" ]] && printf '%s' "$BUILDERS_BLOCK"
 }
 
+# Start of the window shared by the Claude Review and AI pipelines digests ($CLAUDE_REVIEW_PERIOD).
+digest_cutoff() {
+  case "${CLAUDE_REVIEW_PERIOD:-week}" in
+    day)   printf '%s' "$T24" ;;
+    month) printf '%s' "$T30" ;;
+    *)     printf '%s' "$T7" ;;
+  esac
+}
+
+# Prints the log of the first job of a ga-common run on Gitea; prints nothing when it cannot be read.
+gitea_run_log() {
+  local API_BASE="https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/ga-common" AUTH="Authorization: token $GITEA_TOKEN" JOB_ID
+  JOB_ID="$(curl -fsS --max-time 60 --retry 3 --retry-delay 1 -H "$AUTH" "$API_BASE/actions/runs/$1/jobs" 2>/dev/null \
+    | jq -r '.jobs[0].id // empty' 2>/dev/null || true)"
+  [[ -z "$JOB_ID" ]] && return 0
+  curl -fsS --max-time 120 --retry 3 --retry-delay 1 -H "$AUTH" "$API_BASE/actions/jobs/$JOB_ID/logs" 2>/dev/null || true
+}
+
+# Prints the log of the job named $2 (else the first job) of a ga-common run on GitHub; nothing on error.
+# Needs the actions: read permission; the logs endpoint redirects to blob storage, hence -L.
+github_run_log() {
+  local API_BASE="https://api.github.com/repos/${GITHUB_ORG}/ga-common/actions" AUTH="Authorization: Bearer $GITHUB_TOKEN" JOB_ID
+  JOB_ID="$(curl -fsS --max-time 60 --retry 3 --retry-delay 1 -H "$AUTH" "$API_BASE/runs/$1/jobs" 2>/dev/null \
+    | jq -r --arg name "${2:-}" '(.jobs // []) as $jobs | (($jobs | map(select(.name == $name))) + $jobs)[0].id // empty' 2>/dev/null || true)"
+  [[ -z "$JOB_ID" ]] && return 0
+  curl -fsSL --max-time 120 --retry 3 --retry-delay 1 -H "$AUTH" "$API_BASE/jobs/$JOB_ID/logs" 2>/dev/null || true
+}
+
+# Sums the amounts that follow the PCRE prefix $1 in a job log on stdin. The match is anchored right
+# after the runner's timestamp, so a model excerpt quoted in the middle of a line does not count.
+log_cost_sum() {
+  { grep -oP "^\S+ +$1\K[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?" || true; } \
+    | awk '{ sum += $1 } END { printf "%.4f", sum + 0 }'
+}
+
+# Adds up decimal amounts given as arguments.
+sum_amounts() {
+  printf '%s\n' "$@" | awk '{ sum += $1 } END { printf "%.4f", sum + 0 }'
+}
+
 # Fetches claude-review.yml run history for the configured period (day/week/
 # month via $CLAUDE_REVIEW_PERIOD, default week), reduces it to one "latest
 # state" row per PR (verdict, severity/fixed counts, open errors), and renders
@@ -355,22 +395,17 @@ render_claude_review() {
   local API_BASE="https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/ga-common"
   local MAX_LENGTH=3900 # Leave room for part numbers below Telegram's limit.
 
-  local CUTOFF
-  case "${CLAUDE_REVIEW_PERIOD:-week}" in
-    day)   CUTOFF="$T24" ;;
-    month) CUTOFF="$T30" ;;
-    *)     CUTOFF="$T7" ;;
-  esac
+  local CUTOFF; CUTOFF="$(digest_cutoff)"
 
-  local RUNS_RAW RUNS_JSON
-  RUNS_RAW="$(fetch "$AUTH" "$API_BASE/actions/runs?page=1&limit=100" "$CUTOFF")"
+  local RUNS_RAW RUNS_JSON RUNS_OK=true
+  RUNS_RAW="$(fetch "$AUTH" "$API_BASE/actions/runs?page=1&limit=100" "$CUTOFF")" || RUNS_OK=false
   RUNS_JSON="$(jq -c --arg t "$CUTOFF" --arg wf "claude-review.yml" '
     (.workflow_runs // []) as $r
     | [$r[] | select(.status=="completed")
       | select((.display_title // "") | startswith("Check") | not)
       | select((.path//"" | split("@")[0] | (. == $wf or endswith("/"+$wf))))
       | select((.created_at//.started_at//.updated_at//"") >= $t)
-      | {id, display_title, html_url}]
+      | {id, display_title, html_url, conclusion}]
   ' <<< "$RUNS_RAW" 2>/dev/null || echo '[]')"
   local RUN_COUNT; RUN_COUNT="$(jq 'length' <<< "$RUNS_JSON" 2>/dev/null || echo 0)"
 
@@ -381,14 +416,14 @@ render_claude_review() {
     TITLE="$(jq -r '.display_title' <<< "$RUN")"
     RUN_URL="$(jq -r '.html_url' <<< "$RUN")"
     TMP="$(mktemp)"
-    (
-      local JOB_ID
-      JOB_ID="$(fetch "$AUTH" "$API_BASE/actions/runs/$RUN_ID/jobs" 2>/dev/null | jq -r '.jobs[0].id // empty' 2>/dev/null || echo '')"
-      [[ -z "$JOB_ID" ]] && exit 0
-      fetch "$AUTH" "$API_BASE/actions/jobs/$JOB_ID/logs" 2>/dev/null
-    ) > "$TMP" &
+    gitea_run_log "$RUN_ID" > "$TMP" &
     PIDS+=($!); TITLES+=("$TITLE"); URLS+=("$RUN_URL"); TMPS+=("$TMP")
   done < <(jq -c '.[]' <<< "$RUNS_JSON")
+
+  # Spend for the AI pipelines digest, per run (not per PR): reruns and failed runs were paid for too.
+  # The amounts come from review-run.sh's "Review OK: ..." and "Session cost: ..." lines - keep the wording in sync.
+  local -a RUN_COSTS=()
+  local RUN_UNREAD=0
 
   # Runs are newest-first (fetch()/pagination assumes descending order), so the
   # first run seen for a given PR key is its latest run — used as current state
@@ -414,6 +449,11 @@ render_claude_review() {
     wait "${PIDS[$i]}" || true
     LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
     TITLE="${TITLES[$i]}"; RUN_URL="${URLS[$i]}"
+    if [[ -z "$LOG" ]]; then
+      RUN_UNREAD=$((RUN_UNREAD + 1))
+    else
+      RUN_COSTS+=("$(log_cost_sum '(?:Review OK|Session cost):[^$]*\$' <<< "$LOG")")
+    fi
     # Title is the run-name, i.e. the raw pr_url ("https://HOST/ORG/REPO/pulls/N") since
     # display_name was dropped - match that first. Runs dispatched before that change (or
     # still in this window) may carry the legacy "ORG/REPO!N" / "ORG/REPO#N" label instead -
@@ -490,6 +530,16 @@ render_claude_review() {
     PR_FIXED_LOW[$KEY]="$(grep -c -F 'Fixed [🔵' <<< "$LOG" || true)"
     PR_FIXED_LEG[$KEY]="$(grep -c -F 'Fixed [🟣' <<< "$LOG" || true)"
   done
+
+  # Read by render_ai_pipelines, so the review logs are fetched once for both digests.
+  if [[ "$RUNS_OK" == "true" ]]; then
+    AI_REVIEW_RUNS="$RUN_COUNT"
+    AI_REVIEW_FAILED="$(jq '[.[] | select(.conclusion == "failure")] | length' <<< "$RUNS_JSON" 2>/dev/null || echo 0)"
+    AI_REVIEW_COST="$(sum_amounts "${RUN_COSTS[@]}")"
+    AI_REVIEW_UNREAD="$RUN_UNREAD"
+  else
+    AI_REVIEW_RUNS="?"
+  fi
 
   local R_COUNT=0 R_APPROVE=0 R_BLOCKED=0
   local R_CRIT=0 R_MED=0 R_LOW=0 R_LEG=0
@@ -688,4 +738,185 @@ render_claude_review() {
       _REVIEW_MESSAGES[$i]="${_REVIEW_MESSAGES[$i]/Claude Review/Claude Review ($((i + 1))\/${#_REVIEW_MESSAGES[@]})}"
     done
   fi
+}
+
+# One digest for every AI pipeline of this repository: Claude Review, Bugzilla triage and the weekly
+# release review on Gitea, the Jenkins build analysis on GitHub. Per pipeline: completed runs in the
+# $CLAUDE_REVIEW_PERIOD window, failed runs, Claude spend summed from the cost lines each pipeline
+# prints to its job log, and the pull requests it opened, with their state now. Fills the array
+# named by $1 with one HTML message.
+render_ai_pipelines() {
+  local -n _AI_MESSAGES=$1
+  _AI_MESSAGES=()
+  local MAX_LENGTH=3900
+  local CUTOFF; CUTOFF="$(digest_cutoff)"
+
+  # Review numbers come from render_claude_review, which reads every review log anyway.
+  if [[ -z "${AI_REVIEW_RUNS:-}" ]]; then
+    local -a REVIEW_UNUSED=()
+    render_claude_review REVIEW_UNUSED
+  fi
+
+  local -a PIPELINES=(Review Triage Weekly Jenkins)
+  local -A RUNS=() FAILED=() COST=() UNREAD=() OPENED=()
+  RUNS[Review]="${AI_REVIEW_RUNS:-?}"; FAILED[Review]="${AI_REVIEW_FAILED:-0}"
+  COST[Review]="${AI_REVIEW_COST:-0}"; UNREAD[Review]="${AI_REVIEW_UNREAD:-0}"
+  OPENED[Review]="-"; OPENED[Jenkins]="-"
+
+  # Runs whose logs are read below, one "pipeline<TAB>platform<TAB>run id" entry each.
+  local -a ENTRIES=()
+  local RAW PIPE PLATFORM RUN_ID CONCLUSION
+
+  if RAW="$(fetch "token $GITEA_TOKEN" "https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/ga-common/actions/runs?page=1&limit=100" "$CUTOFF")"; then
+    RUNS[Triage]=0; RUNS[Weekly]=0; OPENED[Triage]=0; OPENED[Weekly]=0
+    while IFS=$'\t' read -r PIPE RUN_ID CONCLUSION; do
+      [[ -z "$PIPE" ]] && continue
+      ENTRIES+=("$PIPE"$'\t'"gitea"$'\t'"$RUN_ID")
+      RUNS[$PIPE]=$((${RUNS[$PIPE]} + 1))
+      [[ "$CONCLUSION" == "failure" ]] && FAILED[$PIPE]=$((${FAILED[$PIPE]:-0} + 1))
+    done < <(jq -r --arg t "$CUTOFF" '
+      .workflow_runs[]? | select(.status == "completed")
+      | select((.created_at // .started_at // .updated_at // "") >= $t)
+      | ((.path // "") | split("@")[0] | split("/") | last) as $wf
+      | ({"bugzilla-triage.yml": "Triage", "weekly-review.yml": "Weekly"}[$wf]) as $pipeline
+      | select($pipeline != null)
+      | [$pipeline, .id, (.conclusion // "")] | @tsv
+    ' <<< "$RAW" 2>/dev/null || true)
+  else
+    RUNS[Triage]="?"; RUNS[Weekly]="?"
+  fi
+
+  local GITHUB_RUNS_URL="https://api.github.com/repos/${GITHUB_ORG}/ga-common/actions/workflows/jenkins-analyze-build.yaml/runs?per_page=100&status=completed&created=%3E%3D${CUTOFF}"
+  if RAW="$(curl -fsS --max-time 60 --retry 3 --retry-delay 1 -H "Authorization: Bearer $GITHUB_TOKEN" "$GITHUB_RUNS_URL")" \
+    && jq -e '.workflow_runs | type == "array"' <<< "$RAW" > /dev/null 2>&1; then
+    RUNS[Jenkins]=0
+    while IFS=$'\t' read -r RUN_ID CONCLUSION; do
+      [[ -z "$RUN_ID" ]] && continue
+      ENTRIES+=("Jenkins"$'\t'"github"$'\t'"$RUN_ID")
+      RUNS[Jenkins]=$((${RUNS[Jenkins]} + 1))
+      [[ "$CONCLUSION" == "failure" ]] && FAILED[Jenkins]=$((${FAILED[Jenkins]:-0} + 1))
+    done < <(jq -r '.workflow_runs[] | [.id, (.conclusion // "")] | @tsv' <<< "$RAW" 2>/dev/null || true)
+  else
+    RUNS[Jenkins]="?"
+  fi
+
+  local -a PIDS=() TMPS=()
+  local ENTRY TMP
+  for ENTRY in "${ENTRIES[@]}"; do
+    IFS=$'\t' read -r PIPE PLATFORM RUN_ID <<< "$ENTRY"
+    TMP="$(mktemp)"
+    if [[ "$PLATFORM" == "gitea" ]]; then
+      gitea_run_log "$RUN_ID" > "$TMP" &
+    else
+      github_run_log "$RUN_ID" analyze > "$TMP" &
+    fi
+    PIDS+=($!); TMPS+=("$TMP")
+  done
+
+  # Cost lines per pipeline - keep the wording in sync with triage-run.sh ("Triage OK", "Fix session OK",
+  # "Session cost"), weekly-review-run.sh ("[label] finished after ..., run total $X", cumulative, so the
+  # last one counts) and jenkins-analyze-build.yaml ("select cost: X USD", "stage cost: X USD").
+  local -a PR_REFS=() PR_PIPES=()
+  local -A PR_SEEN=()
+  local i LOG RUN_COST REF
+  for i in "${!PIDS[@]}"; do
+    wait "${PIDS[$i]}" || true
+    LOG="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
+    IFS=$'\t' read -r PIPE PLATFORM RUN_ID <<< "${ENTRIES[$i]}"
+    if [[ -z "$LOG" ]]; then
+      UNREAD[$PIPE]=$((${UNREAD[$PIPE]:-0} + 1))
+      continue
+    fi
+    case "$PIPE" in
+      Triage)  RUN_COST="$(log_cost_sum '(?:Triage OK|Fix session OK|Session cost):[^$]*\$' <<< "$LOG")" ;;
+      Weekly)  RUN_COST="$({ grep -oP '^\S+ +\[[^]]+\] finished after .*run total \$\K[0-9]+(?:\.[0-9]+)?' <<< "$LOG" || true; } | tail -1)" ;;
+      Jenkins) RUN_COST="$(log_cost_sum '(?:select|stage) cost: ' <<< "$LOG")" ;;
+      *)       RUN_COST=0 ;;
+    esac
+    COST[$PIPE]="$(sum_amounts "${COST[$PIPE]:-0}" "${RUN_COST:-0}")"
+
+    # "Opened (draft) pull request: URL" from triage-run.sh and weekly-review-run.sh. The host is
+    # masked in the log as a secret, so only ORG/REPO/pulls/N is taken and the host is added back.
+    while IFS= read -r REF; do
+      [[ -z "$REF" || -n "${PR_SEEN[$REF]:-}" ]] && continue
+      PR_SEEN[$REF]=1; PR_REFS+=("$REF"); PR_PIPES+=("$PIPE")
+      OPENED[$PIPE]=$((${OPENED[$PIPE]:-0} + 1))
+    done < <({ grep -oP '^\S+ +Opened (?:draft )?pull request: \K\S+' <<< "$LOG" || true; } \
+      | { grep -oP '[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pulls/[0-9]+$' || true; })
+  done
+
+  local -a STATE_PIDS=() STATE_TMPS=()
+  for REF in "${PR_REFS[@]}"; do
+    TMP="$(mktemp)"
+    { curl -fsS --max-time 30 --retry 3 --retry-delay 1 -H "Authorization: token $GITEA_TOKEN" \
+        "https://$GITEA_HOST/api/v1/repos/$REF" 2>/dev/null \
+      | jq -r 'if .merged == true then "merged" else (.state // "unknown") end' 2>/dev/null || true; } > "$TMP" &
+    STATE_PIDS+=($!); STATE_TMPS+=("$TMP")
+  done
+  local -a PR_STATES=()
+  local -A STATE_COUNT=()
+  local STATE
+  for i in "${!STATE_PIDS[@]}"; do
+    wait "${STATE_PIDS[$i]}" || true
+    STATE="$(head -1 "${STATE_TMPS[$i]}")"; rm -f "${STATE_TMPS[$i]}"
+    [[ "$STATE" =~ ^(open|merged|closed)$ ]] || STATE="unknown"
+    PR_STATES+=("$STATE")
+    STATE_COUNT[$STATE]=$((${STATE_COUNT[$STATE]:-0} + 1))
+  done
+
+  # The table is ASCII-only inside <pre>: printf pads by bytes, so it lines up only without emoji.
+  local TABLE ROW MARK TOTAL_RUNS=0 TOTAL_FAILED=0 TOTAL_OPENED=0 UNREAD_TOTAL=0
+  local -a TOTAL_COSTS=() LIST_FAILED=()
+  TABLE="$(printf '%-8s %5s %5s %9s %4s' "" "runs" "fail" "cost" "PRs")\n"
+  for PIPE in "${PIPELINES[@]}"; do
+    if [[ "${RUNS[$PIPE]:-?}" == "?" ]]; then
+      LIST_FAILED+=("$PIPE")
+      ROW="$(printf '%-8s %5s %5s %9s %4s' "$PIPE" "?" "?" "?" "?")"
+    else
+      MARK=""; (( ${UNREAD[$PIPE]:-0} > 0 )) && MARK="*"
+      ROW="$(printf '%-8s %5s %5s %9s %4s' "$PIPE" "${RUNS[$PIPE]}" "${FAILED[$PIPE]:-0}" \
+        "\$$(printf '%.2f' "${COST[$PIPE]:-0}")$MARK" "${OPENED[$PIPE]:-0}")"
+      TOTAL_RUNS=$((TOTAL_RUNS + ${RUNS[$PIPE]})); TOTAL_FAILED=$((TOTAL_FAILED + ${FAILED[$PIPE]:-0}))
+      [[ "${OPENED[$PIPE]:-0}" =~ ^[0-9]+$ ]] && TOTAL_OPENED=$((TOTAL_OPENED + ${OPENED[$PIPE]}))
+      UNREAD_TOTAL=$((UNREAD_TOTAL + ${UNREAD[$PIPE]:-0}))
+      TOTAL_COSTS+=("${COST[$PIPE]:-0}")
+    fi
+    TABLE+="$ROW\n"
+  done
+  MARK=""; (( UNREAD_TOTAL > 0 || ${#LIST_FAILED[@]} > 0 )) && MARK="*"
+  TABLE+="$(printf '%-8s %5s %5s %9s %4s' "Total" "$TOTAL_RUNS" "$TOTAL_FAILED" \
+    "\$$(printf '%.2f' "$(sum_amounts "${TOTAL_COSTS[@]}")")$MARK" "$TOTAL_OPENED")\n"
+
+  local NOTES=""
+  (( UNREAD_TOTAL > 0 )) && NOTES+="\n* ${UNREAD_TOTAL} run log(s) unreadable, cost is a lower bound"
+  (( ${#LIST_FAILED[@]} > 0 )) && NOTES+="\n? run list unreadable: ${LIST_FAILED[*]}"
+  if (( ${#PR_REFS[@]} > 0 )); then
+    NOTES+="\nPRs now: ${STATE_COUNT[open]:-0} open · ${STATE_COUNT[merged]:-0} merged · ${STATE_COUNT[closed]:-0} closed"
+    (( ${STATE_COUNT[unknown]:-0} > 0 )) && NOTES+=" · ${STATE_COUNT[unknown]} unknown"
+  fi
+
+  local BLOCK="<pre>AI pipelines · ${CLAUDE_REVIEW_PERIOD:-week}\n\n${TABLE}${NOTES}</pre>"
+
+  # Opened pull requests as a collapsible list; entries that do not fit the message are cut off.
+  if (( ${#PR_REFS[@]} > 0 )); then
+    BLOCK+="\n<blockquote expandable>\n<i>opened PRs · 🟢 open · 🟣 merged · ⚪️ closed</i>\n\n"
+    local SHOWN=0 ICON PR_ORG PR_REPO PR_NUMBER PR_ENTRY
+    for i in "${!PR_REFS[@]}"; do
+      IFS=/ read -r PR_ORG PR_REPO _ PR_NUMBER <<< "${PR_REFS[$i]}"
+      case "${PR_STATES[$i]}" in
+        open)   ICON="🟢" ;;
+        merged) ICON="🟣" ;;
+        closed) ICON="⚪️" ;;
+        *)      ICON="❔" ;;
+      esac
+      PR_ENTRY="$ICON <a href=\"https://${GITEA_HOST}/${PR_ORG}/${PR_REPO}/pulls/${PR_NUMBER}\">$(html_escape "$PR_REPO")#${PR_NUMBER}</a> · ${PR_PIPES[$i]}\n"
+      (( $(telegram_text_length "${BLOCK}${PR_ENTRY}") > MAX_LENGTH )) && break
+      BLOCK+="$PR_ENTRY"
+      SHOWN=$((SHOWN + 1))
+    done
+    (( SHOWN < ${#PR_REFS[@]} )) && BLOCK+="<i>… +$((${#PR_REFS[@]} - SHOWN)) more</i>\n"
+    BLOCK+="</blockquote>"
+  fi
+
+  _AI_MESSAGES+=("$(printf '%b' "$BLOCK")")
 }

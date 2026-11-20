@@ -970,6 +970,8 @@ run_claude_review() {
     # rc 137 = SIGKILL (128+9) - the OOM killer, or (before per-run names) another job's cleanup; the sandbox is still alive here (cleanup_sandbox runs on the caller's EXIT trap, after this returns).
     oom=$(docker inspect "$SANDBOX_NAME" --format '{{.State.OOMKilled}}' 2>/dev/null || echo "unknown")
     echo "::error::Review failed (exit $rc, subtype: $subtype, OOMKilled: $oom)"
+    # A failed session is still paid for; notify-workflows.sh sums this line into the AI pipelines digest - keep the wording in sync.
+    echo "Session cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' claude-output/claude-output.json 2>/dev/null || echo '?')"
     echo "Result excerpt: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | head -c 300 || true)"
     return 1
   fi

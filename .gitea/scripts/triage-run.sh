@@ -1162,6 +1162,8 @@ run_claude_triage() {
     subtype=$(jq -r '.subtype // "unknown"' claude-output/claude-output.json 2>/dev/null || echo "unparsable")
     oom=$(docker inspect "$SANDBOX_NAME" --format '{{.State.OOMKilled}}' 2>/dev/null || echo "unknown")
     echo "::error::Triage failed (exit $rc, subtype: $subtype, OOMKilled: $oom)"
+    # A failed session is still paid for; notify-workflows.sh sums this line into the AI pipelines digest - keep the wording in sync.
+    echo "Session cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' claude-output/claude-output.json 2>/dev/null || echo '?')"
     # Flattened: the runner reads workflow commands (::set-env::, ::add-path::, ...) at the start of
     # any log line, and the model's text is untrusted, so no line of it may begin at column 0.
     echo "Result excerpt: $(jq -r '.result // empty' claude-output/claude-output.json 2>/dev/null | head -c 300 | tr '\n\r' '  ' || true)"
@@ -1234,6 +1236,8 @@ run_claude_fix() {
   # still be a valid-looking patch, and a plausible broken fix is the one outcome worse than none,
   # so it is discarded unread rather than collected and hoped about.
   if [ "$rc" -ne 0 ] || ! jq -e '.is_error == false and ((.result // "") | length > 0)' claude-output/fix-output.json > /dev/null 2>&1; then
+    # Same line as the analysis failure path: notify-workflows.sh sums it into the AI pipelines digest.
+    echo "Session cost: \$$(jq -r '.total_cost_usd // 0 | (. * 1000 | round) / 1000' claude-output/fix-output.json 2>/dev/null || echo '?')"
     if [ "$rc" -eq 124 ]; then
       echo "::warning::The fix session hit the ${FIX_CLI_TIMEOUT:-1200}s timeout - its edit is discarded"
     else

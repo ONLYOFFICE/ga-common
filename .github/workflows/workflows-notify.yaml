@@ -18,8 +18,13 @@ on:
         required: false
         type: boolean
         default: true
+      publish_ai_pipelines:
+        description: 'Publish the AI pipelines digest (runs, cost, opened PRs)'
+        required: false
+        type: boolean
+        default: true
       claude_review_period:
-        description: 'Time window for the Claude Review stats digest'
+        description: 'Time window for the Claude Review and AI pipelines digests'
         required: false
         type: choice
         options:
@@ -33,6 +38,10 @@ on:
 jobs:
   check-workflows:
     runs-on: ubuntu-latest
+    # actions: read lets the AI pipelines digest read the Jenkins analysis job logs of this repository.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7
 
@@ -41,6 +50,7 @@ jobs:
           PUBLISH_WORKFLOWS: ${{ inputs.publish_workflows }}
           PUBLISH_BUILDSERVERS: ${{ inputs.publish_buildservers }}
           PUBLISH_CLAUDE_REVIEW: ${{ inputs.publish_claude_review }}
+          PUBLISH_AI_PIPELINES: ${{ inputs.publish_ai_pipelines }}
           CLAUDE_REVIEW_PERIOD: ${{ inputs.claude_review_period }}
           EVENT_NAME: ${{ github.event_name }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -95,6 +105,7 @@ jobs:
           PUBLISH_WORKFLOWS="${PUBLISH_WORKFLOWS:-true}"
           PUBLISH_BUILDSERVERS="${PUBLISH_BUILDSERVERS:-true}"
           PUBLISH_CLAUDE_REVIEW="${PUBLISH_CLAUDE_REVIEW:-true}"
+          PUBLISH_AI_PIPELINES="${PUBLISH_AI_PIPELINES:-true}"
           CLAUDE_REVIEW_PERIOD="${CLAUDE_REVIEW_PERIOD:-week}"
 
           # Workflows/Buildservers: daily, whenever enabled.
@@ -103,11 +114,19 @@ jobs:
           SEND_FAILED=0
           send_telegram "$FULL_MESSAGE" || SEND_FAILED=1
 
-          # Claude Review: weekly, Fridays only — or any day via manual dispatch (testing).
+          # Claude Review and AI pipelines: weekly, Fridays only — or any day via manual dispatch (testing).
           IS_FRIDAY=false; [[ "$(date -u +%u)" == "5" ]] && IS_FRIDAY=true
-          if [[ "$PUBLISH_CLAUDE_REVIEW" == "true" ]] && { $IS_FRIDAY || [[ "$EVENT_NAME" == "workflow_dispatch" ]]; }; then
-            REVIEW_MESSAGES=()
-            render_claude_review REVIEW_MESSAGES
-            send_telegram "${REVIEW_MESSAGES[@]}" || SEND_FAILED=1
+          if $IS_FRIDAY || [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$PUBLISH_CLAUDE_REVIEW" == "true" ]]; then
+              REVIEW_MESSAGES=()
+              render_claude_review REVIEW_MESSAGES
+              send_telegram "${REVIEW_MESSAGES[@]}" || SEND_FAILED=1
+            fi
+            # Reuses the review numbers gathered above, or reads the review logs itself when that digest is off.
+            if [[ "$PUBLISH_AI_PIPELINES" == "true" ]]; then
+              AI_MESSAGES=()
+              render_ai_pipelines AI_MESSAGES
+              send_telegram "${AI_MESSAGES[@]}" || SEND_FAILED=1
+            fi
           fi
           exit "$SEND_FAILED"
