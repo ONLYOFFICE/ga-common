@@ -115,7 +115,7 @@ jobs:
       - name: Upload patches and report
         if: always() && steps.schedule.outputs.run == 'true'
         # Match the artifact version used by the other Gitea workflows.
-        uses: actions/upload-artifact@v3.2.2
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf # v3.2.2
         with:
           name: update-year
           path: update-year-output/

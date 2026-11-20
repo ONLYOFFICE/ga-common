@@ -240,7 +240,7 @@ jobs:
 
       - name: Upload review artifacts
         # v4/v7 (@actions/artifact v2+) intermittently failed here with GHESNotSupportedError - v3 predates that non-github.com host check.
-        uses: actions/upload-artifact@v3.2.2
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf # v3.2.2
         if: always() && steps.prepare.outcome != 'skipped' && steps.prepare.outputs.skip != 'true'
         continue-on-error: true
         with:

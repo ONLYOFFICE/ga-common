@@ -84,7 +84,7 @@ jobs:
       # (logs every endpoint, blocks nothing), read the StepSecurity insights in the
       # run summary, then switch back to `block`. A missed endpoint fails its step.
       - name: Harden runner (egress allowlist)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2
         with:
           egress-policy: block
           disable-sudo: false          # steps fall back to `apt-get` for envsubst/zip
@@ -103,7 +103,7 @@ jobs:
             *.blob.core.windows.net:443
 
       - name: Checkout tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Only the analyzer's own scripts/prompts. Non-cone mode on purpose:
           # cone mode also checks out every root file, and the repo's root
@@ -113,11 +113,11 @@ jobs:
             jenkins_review_tools/
           sparse-checkout-cone-mode: false
  
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
  
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
 
@@ -288,7 +288,7 @@ jobs:
       # --- 8. the encrypted bundle is the only thing that crosses into the report job ---
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: build-analysis-${{ github.event.inputs.build_number }}
           # The report job deletes this artifact once it has posted to Telegram;
@@ -318,7 +318,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Harden runner (egress allowlist)
-        uses: step-security/harden-runner@v2
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2
         with:
           egress-policy: block
           disable-sudo: false
@@ -332,7 +332,7 @@ jobs:
 
       - name: Download analysis artifacts
         continue-on-error: true       # analyze may have failed before producing any
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-analysis-${{ github.event.inputs.build_number }}
 
