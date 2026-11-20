@@ -50,6 +50,7 @@ jobs:
         shell: bash
     steps:
       - name: Run Renovate
+        id: renovate
         env:
           GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
           # The token needs write access to every repository listed: it pushes the branches and opens the pull requests.
@@ -87,6 +88,12 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_DRY_RUN:-true}" = "true" ]; then
             dry_run=true
           fi
+          # For the report step: what is processed, and from when a pull request counts as opened by this run (a minute of clock slack)
+          {
+            echo "repositories=${repositories}"
+            echo "dry_run=${dry_run}"
+            echo "since=$(date -u -d '-1 minute' +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
 
           # The branch the pull requests go to: the newest release/* or hotfix/* line, else develop, else none (the default branch).
           # Same choice as the weekly review: the version must open the name and be dotted, a hotfix wins a tie with a release.
@@ -158,6 +165,81 @@ jobs:
             echo "::error::Renovate failed for: $(IFS=','; echo "${failed[*]}")"
           fi
           [ -z "$disabled" ] && [ "${#failed[@]}" -eq 0 ]
+
+      - name: Report new pull requests
+        # Also after a failed run: the repositories that did go through may have opened pull requests
+        if: always() && steps.renovate.outputs.dry_run == 'false'
+        continue-on-error: true
+        env:
+          GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
+          GITEA_TOKEN: ${{ secrets.PAT_GITEA_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPOSITORIES: ${{ steps.renovate.outputs.repositories }}
+          SINCE: ${{ steps.renovate.outputs.since }}
+        run: |
+          set -uo pipefail
+          # One message for the whole run: per repository, the pull requests Renovate opened and the ones it closed as outdated
+          BODY=""
+          UNCHECKED=()
+          IFS=',' read -ra REPOSITORY_LIST <<< "$REPOSITORIES"
+          for REPOSITORY in "${REPOSITORY_LIST[@]}"; do
+            API="https://${GITEA_HOST}/api/v1/repos/${REPOSITORY}/pulls?sort=recentupdate&limit=50"
+            MISSING=()
+            # Open ones are found by their renovate/* branch; a closed one has lost its branch, Renovate marks it with " - autoclosed"
+            if ! OPENED=$(curl -sS --fail --max-time 30 -H "Authorization: token ${GITEA_TOKEN}" "${API}&state=open" \
+                | jq -r --arg since "$SINCE" '.[] | select((.head.ref | startswith("renovate/")) and .created_at >= $since)
+                    | "• \(.title) → \(.base.ref)\n\(.html_url)"'); then
+              echo "::warning::${REPOSITORY}: cannot list the open pull requests"; OPENED=""; MISSING+=(opened)
+            fi
+            if ! CLOSED=$(curl -sS --fail --max-time 30 -H "Authorization: token ${GITEA_TOKEN}" "${API}&state=closed" \
+                | jq -r --arg since "$SINCE" '.[] | select(.merged == false and (.title | endswith(" - autoclosed")) and (.closed_at // "") >= $since)
+                    | "✖️ closed: #\(.number) \(.title | sub(" - autoclosed$"; ""))"'); then
+              echo "::warning::${REPOSITORY}: cannot list the closed pull requests"; CLOSED=""; MISSING+=(closed)
+            fi
+            # Name what was not checked, so a repository listed above with partial results does not read as entirely unchecked
+            [ "${#MISSING[@]}" -eq 0 ] || UNCHECKED+=("${REPOSITORY} ($(IFS=/; echo "${MISSING[*]}"))")
+            [ -n "$OPENED$CLOSED" ] || continue
+            BODY+=$'\n\n'"${REPOSITORY}"
+            [ -z "$OPENED" ] || BODY+=$'\n'"${OPENED}"
+            [ -z "$CLOSED" ] || BODY+=$'\n'"${CLOSED}"
+          done
+          # A failed lookup must not read as a quiet run: the pull requests it would have found are named as unchecked instead
+          if [ "${#UNCHECKED[@]}" -gt 0 ]; then
+            BODY+=$'\n\n'"⚠️ Could not check: $(printf '%s\n' "${UNCHECKED[@]}" | paste -sd ',' - | sed 's/,/, /g')"
+          fi
+          if [ -z "$BODY" ]; then
+            echo "No pull requests opened or closed by this run"; exit 0
+          fi
+          TEXT="🔄 Renovate: action updates${BODY}"
+          echo "$TEXT"
+          # Telegram takes at most 4096 characters: cut at a line boundary below that (counted by jq in characters, not bytes)
+          LIMITED=$(jq -rn --arg text "$TEXT" --argjson max 3900 \
+            'if ($text | length) > $max then ($text[0:$max] | split("\n") | .[:-1] | join("\n")) + "\n… (truncated, the full list is in the run log)" else $text end')
+          [ -z "$LIMITED" ] || TEXT="$LIMITED"
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is unset - report not sent"; exit 0
+          fi
+          # TELEGRAM_CHAT_ID may hold several chat IDs separated by commas; blanks and repeats are skipped
+          SENT_COUNT=0
+          SEEN_IDS=","
+          IFS=',' read -ra CHAT_IDS <<< "$TELEGRAM_CHAT_ID"
+          for CHAT_ID in "${CHAT_IDS[@]}"; do
+            CHAT_ID="${CHAT_ID//[[:space:]]/}"
+            [ -n "$CHAT_ID" ] || continue
+            case "$SEEN_IDS" in *",$CHAT_ID,"*) continue ;; esac
+            SEEN_IDS+="$CHAT_ID,"
+            if curl -sS --fail --max-time 20 --retry 2 -o /dev/null -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg id "$CHAT_ID" --arg text "$TEXT" \
+                    '{chat_id:$id,text:$text,disable_web_page_preview:true}')"; then
+              SENT_COUNT=$((SENT_COUNT + 1))
+            else
+              echo "::warning::Telegram alert was not delivered to chat $CHAT_ID"
+            fi
+          done
+          if [ "$SENT_COUNT" -gt 0 ]; then echo "Report sent"; else echo "::warning::Telegram alert was not delivered to any chat"; fi
 
       - name: Notify on failure
         if: failure()
