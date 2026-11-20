@@ -88,12 +88,36 @@ jobs:
             dry_run=true
           fi
 
+          # The branch the pull requests go to: the newest release/* or hotfix/* line, else develop, else none (the default branch).
+          # Same choice as the weekly review: the version must open the name and be dotted, a hotfix wins a tie with a release.
+          target_branch() {
+            local repository="$1" page=1 names="" batch branch branch_version rank
+            while [ "$page" -le 100 ]; do
+              batch=$(curl -sS --fail --max-time 30 -H "Authorization: token ${RENOVATE_TOKEN}" \
+                "https://${GITEA_HOST}/api/v1/repos/${repository}/branches?limit=50&page=${page}" | jq -r '.[].name') || return 1
+              [ -n "$batch" ] || break
+              names+="${batch}"$'\n'
+              page=$((page + 1))
+            done
+            branch=$(while IFS= read -r branch; do
+                [[ "$branch" =~ ^(release|hotfix)/[A-Za-z0-9._/-]+$ ]] || continue
+                [[ "${branch#*/}" =~ ^v?([0-9]+(\.[0-9]+)+) ]] || continue
+                branch_version="${BASH_REMATCH[1]}"
+                rank=0
+                [ "${branch%%/*}" = "hotfix" ] && rank=1
+                printf '%s\t%s\t%s\n' "$branch_version" "$rank" "$branch"
+              done <<< "$names" | sort -t$'\t' -k1,1V -k2,2n | tail -n 1 | cut -f3)
+            if [ -z "$branch" ] && grep -qx 'develop' <<< "$names"; then
+              branch=develop
+            fi
+            echo "$branch"
+          }
+
           options=(
             -e RENOVATE_PLATFORM=gitea
             -e "RENOVATE_ENDPOINT=https://${GITEA_HOST}/api/v1/"
             -e RENOVATE_TOKEN
             -e GITHUB_COM_TOKEN
-            -e "RENOVATE_REPOSITORIES=${repositories}"
             # Only repositories that carry their own renovate.json take part, and none is onboarded automatically
             -e RENOVATE_REQUIRE_CONFIG=required
             -e RENOVATE_ONBOARDING=false
@@ -102,17 +126,36 @@ jobs:
           [ -z "${GIT_AUTHOR_VARIABLE:-}" ] || options+=(-e "RENOVATE_GIT_AUTHOR=${GIT_AUTHOR_VARIABLE}")
           [ "$dry_run" = "false" ] || options+=(-e RENOVATE_DRY_RUN=full)
           # A manual run works now, outside the schedule window of the repositories' renovate.json
-          [ "$EVENT_NAME" != "workflow_dispatch" ] || options+=(-e 'RENOVATE_FORCE={"schedule":["at any time"]}')
+          manual=false
+          [ "$EVENT_NAME" != "workflow_dispatch" ] || manual=true
 
           echo "Renovate ${version}, repositories: ${repositories}, dry run: ${dry_run}"
           log=$(mktemp)
-          docker run --rm "${options[@]}" "renovate/renovate:${version}" 2>&1 | tee "$log"
+          failed=()
+          IFS=',' read -ra repository_list <<< "$repositories"
+          # One Renovate run per repository: RENOVATE_FORCE carries that repository's target branch
+          for repository in "${repository_list[@]}"; do
+            # Fail closed: a guess would send the pull requests to the default branch
+            if ! target=$(target_branch "$repository"); then
+              echo "::error::${repository}: cannot list the branches, skipped"; failed+=("$repository"); continue
+            fi
+            force=$(jq -cn --arg branch "$target" --argjson manual "$manual" \
+              '(if $manual then {schedule: ["at any time"]} else {} end) + (if $branch != "" then {baseBranchPatterns: [$branch]} else {} end)')
+            echo "::group::${repository} -> ${target:-default branch}"
+            docker run --rm "${options[@]}" -e "RENOVATE_REPOSITORIES=${repository}" -e "RENOVATE_FORCE=${force}" \
+              "renovate/renovate:${version}" 2>&1 | tee -a "$log" || failed+=("$repository")
+            echo "::endgroup::"
+          done
 
           # A listed repository without renovate.json on its default branch is only an INFO line and exit code 0
           disabled=$(sed -n 's/.*Repository is disabled.*(repository=\([^)]*\)).*/\1/p' "$log" | sort -u | paste -sd ',' -)
           if [ -n "$disabled" ]; then
-            echo "::error::no renovate.json on the default branch, nothing was done for: ${disabled}"; exit 1
+            echo "::error::no renovate.json on the default branch, nothing was done for: ${disabled}"
           fi
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::Renovate failed for: $(IFS=','; echo "${failed[*]}")"
+          fi
+          [ -z "$disabled" ] && [ "${#failed[@]}" -eq 0 ]
 
       - name: Notify on failure
         if: failure()
