@@ -59,8 +59,9 @@ on:
 env:
   GITEA_HOST: ${{ secrets.CI_GITEA_HOST }}
   # Head>base branch pairs whose review is off by default (only the non-ASCII check runs, plus a one-time notice on the PR):
-  # a release/hotfix/develop branch only carries code that was already reviewed on its way in. `force` (the /review comment) overrides it.
-  SKIP_REVIEW_MERGES: 'release/*>*,hotfix/*>*,develop>*'
+  # a release/hotfix/develop branch only carries code that was already reviewed on its way in, a renovate/* branch only bumps pinned actions.
+  # `force` (the /review comment, or a manual run) overrides it.
+  SKIP_REVIEW_MERGES: 'release/*>*,hotfix/*>*,develop>*,renovate/*>*'
   SKIP_REVIEW_CONTACT: '@evgeniy-antonyuk'
 
 concurrency:

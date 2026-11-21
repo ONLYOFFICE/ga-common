@@ -1029,10 +1029,16 @@ post_skip_notice() {
     return 0
   fi
   local head="${PR_BRANCH//\`/}" base="${BASE_BRANCH//\`/}"
+  local reason="these changes were already reviewed" how="the PR author can comment \`/review\`"
+  # Renovate's bot account opens these PRs, so nobody can send /review as their author
+  if [[ "$PR_BRANCH" == renovate/* ]]; then
+    reason="these are automated action updates from Renovate"
+    how="run the Claude Code Review workflow by hand with \`force\`"
+  fi
   cat > /tmp/skip-notice.md <<EOF
-**Claude Code Review** is off by default for \`$head\` → \`$base\`: these changes were already reviewed.
+**Claude Code Review** is off by default for \`$head\` → \`$base\`: $reason.
 
-To run it anyway, the PR author can comment \`/review\`. Think this is a mistake? Contact ${SKIP_REVIEW_CONTACT}.
+To run it anyway, $how. Think this is a mistake? Contact ${SKIP_REVIEW_CONTACT}.
 EOF
   upsert_review_comment "$ORG_NAME/$REPO_NAME" "$PR_NUMBER" /tmp/skip-notice.md "" "" "$marker" \
     || echo "::warning::Could not post the skipped-review notice"
