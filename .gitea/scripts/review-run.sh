@@ -182,9 +182,32 @@ if lines:
 # working-comment placeholder (posted by a run for a newer push that wasn't actually cancelled)
 # landed after it, permanently burying the older run's real, completed result.
 is_pr_stale() {
-  local live_sha
-  live_sha=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER" 2>/dev/null | jq -r '.head.sha // empty')
+  local pr_json live_sha
+  # An already fetched PR object can be passed in to save a request; with no argument it is fetched here.
+  if [ $# -gt 0 ]; then pr_json="$1"; else pr_json=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER" 2>/dev/null) || pr_json=""; fi
+  live_sha=$(jq -r '.head.sha // empty' <<< "$pr_json" 2>/dev/null) || live_sha=""
   [ -n "$live_sha" ] && [ "$live_sha" != "$PR_SHA" ]
+}
+
+# Prints "merged" or "closed" for the given PR object when it is no longer open, nothing otherwise; a forced review still runs.
+pr_closed_state() {
+  [ "${FORCE_REVIEW:-false}" = "true" ] && return 0
+  jq -r 'if .merged == true then "merged" elif .state == "closed" then "closed" else empty end' <<< "$1" 2>/dev/null || true
+}
+
+# Entry check shared by both modes, one PR fetch: skips (skip=true, returns 0) a merged or closed PR (a merge right after a push) or one a newer push superseded.
+skip_if_pr_gone() {
+  local pr_json closed_state
+  pr_json=$(gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER" 2>/dev/null) || pr_json=""
+  closed_state=$(pr_closed_state "$pr_json")
+  if [ -n "$closed_state" ]; then
+    echo "PR is already $closed_state — skipping"
+  elif is_pr_stale "$pr_json"; then
+    echo "A newer push landed on this PR since dispatch — skipping (the superseding run owns it)"
+  else
+    return 1
+  fi
+  echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
 }
 
 # True only when Gitea itself lists no changed files, so a truncated empty diff body is never taken for an empty PR.
@@ -227,11 +250,7 @@ prepare_review_context() {
   local REPO_PATH="$ORG_NAME/$REPO_NAME"
   local PREVIOUS_SHA="" PREV_AVAILABLE=false
 
-  if is_pr_stale; then
-    echo "A newer push landed on this PR since dispatch — skipping (the superseding run owns it)"
-    echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
-    return 0
-  fi
+  skip_if_pr_gone && return 0
 
   # --- diff ---
   gitea_api "$REPO_PATH/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
@@ -417,7 +436,7 @@ prepare_review_context() {
 
   # --- sync-merge guard: skip a pure base-branch sync merge (no new feature work) ---
   # Only skips if a previous reviewed SHA exists to carry statuses from - otherwise a
-  # PR's first push being such a merge still gets a real review. "HEAD^2 == base tip"
+  # PR's first push being such a merge still gets a real review. "HEAD^2 is in the base"
   # alone isn't enough: also require no new commits since the last review. An explicit
   # /review (FORCE_REVIEW) never skips here and reviews the whole PR instead.
   #
@@ -433,7 +452,8 @@ prepare_review_context() {
     local MERGE_P2 BASE_TIP
     MERGE_P2=$(git -C repo rev-parse HEAD^2 2>/dev/null || true)
     BASE_TIP=$(git -C repo rev-parse "origin/$BASE_BRANCH" 2>/dev/null || true)
-    if [ -n "$MERGE_P2" ] && [ "$MERGE_P2" = "$BASE_TIP" ]; then
+    # An ancestor of the base, not just its tip: the base may move (another merge, this PR's own) between the push and this clone.
+    if [ -n "$MERGE_P2" ] && [ -n "$BASE_TIP" ] && git -C repo merge-base --is-ancestor "$MERGE_P2" "$BASE_TIP" 2>/dev/null; then
       # New feature-side commits since the last review; --no-merges drops earlier
       # sync merges, --not <base tip> drops what merges brought from base. A
       # rev-list failure (e.g. force-push) must fail open, not read as "nothing new".
@@ -998,11 +1018,7 @@ summarize_claude_review() {
 
 # Check-only mode: fetches just the diff for the non-ASCII gate, touching no review comment or review status.
 fetch_pr_diff_only() {
-  if is_pr_stale; then
-    echo "A newer push landed on this PR since dispatch — skipping (the superseding run owns it)"
-    echo "skip=true" >> "${GITHUB_OUTPUT:-/dev/null}"
-    return 0
-  fi
+  skip_if_pr_gone && return 0
   gitea_api "$ORG_NAME/$REPO_NAME/pulls/$PR_NUMBER.diff" -H "Accept: text/plain" > repo/pr.diff
   if [ ! -s repo/pr.diff ]; then
     if ! pr_has_no_changed_files; then
