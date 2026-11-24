@@ -338,6 +338,8 @@ build_workflows_report() {
   [[ -n "$WORKFLOWS_BLOCK" ]] && printf '%s' "$WORKFLOWS_BLOCK"
   [[ -n "$WORKFLOWS_BLOCK" && -n "$BUILDERS_BLOCK" ]] && printf '\n\n'
   [[ -n "$BUILDERS_BLOCK" ]] && printf '%s' "$BUILDERS_BLOCK"
+  # An empty block makes the test above fail; the caller runs under bash -e, so the report must not end with that status
+  return 0
 }
 
 # Start of the window shared by the Claude Review and AI pipelines digests ($CLAUDE_REVIEW_PERIOD).
