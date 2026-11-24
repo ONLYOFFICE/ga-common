@@ -66,6 +66,7 @@ jobs:
             DocSpace                  | release               | Release
             DocSpace-buildtools       | oci-release           | Upload on S3
                                       | offline-release       | Upload offline archive
+                                      | release-docker.yaml   | Release Docker
                                       | build_packages        | Build packages
                                       | main-build            | Build docker
                                       | config-build          | Config Trigger
@@ -73,6 +74,7 @@ jobs:
                                       | ci-oci-docker-install | OCI Docker
                                       | ci-oci-install        | OCI Packages
                                       | ci-oci-update         | OCI Packages Update
+                                      | ci-windows-install    | Windows Installer
                                       | readme-update         | Update readme
             OneClickInstall-Workspace | s3-release            | Upload on S3
                                       | ci-docker-install     | OCI Docker
@@ -90,6 +92,9 @@ jobs:
             ga-common                 | keeplive              | Actions Keepalive
           WORKFLOWS_GITEA: |
             ga-common                 | claude-review         | Claude Review
+                                      | renovate              | Renovate
+                                      | weekly-review         | Weekly Review
+                                      | bugzilla-triage       | Bugzilla Triage
           BUILDSERVER_JOBS: |
             Docs                      | latest                | TEAMLAB_URL               | /view/OO/job/oo/ | ^(release|hotfix)/v[0-9]+\.[0-9]+\.[0-9]+$
             Apps                      | appserver rpm         | BUILDSERVER_URL           | /job/appserver.rpm/
