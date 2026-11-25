@@ -10,13 +10,29 @@ T30="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
 T7="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
 BRANCH_PATTERN="^(master|main|release/.+|hotfix/.+|develop)$"
 
-JQ_QUERY='(if type=="object" then .workflow_runs//[] else [] end|if type!="array" then [] else . end) as $r
+# Prints "failures in 24h, newest run date, result, newest failed run URL, branches"; "-" marks an empty field.
+# The result is a failure when the latest successful or failed run of any branch active in the last 24 hours
+# failed (of the newest branch when none was active); the URL is given only when every such branch is green again.
+# Branches ("f|s branch run-URL" items joined by \x1e, failing first) are listed for a red row or several branches.
+JQ_QUERY='def run_date: .created_at//.started_at//.updated_at//"";
+  def failed: .status=="completed" and (.conclusion//""|test("failure|failed|error|startup_failure|timed_out"));
+  def decisive: map(select(failed or (.status=="completed" and .conclusion=="success")));
+  (if type=="object" then .workflow_runs//[] else [] end|if type!="array" then [] else . end) as $r
   |[$r[]?|select((.head_branch//"")|test($b))|select($wf==""
   or(.path//""|split("@")[0]|(. == $wf or endswith("/"+$wf))))] as $all
-  |($all|map(select((.created_at//.started_at//.updated_at//"")>=$t))|if length>0 then . else $all[:1] end) as $runs
-  |[($runs|map(select(.status=="completed" and (.conclusion//""
-  |test("failure|failed|error|startup_failure|timed_out"))))|length),
-  ($runs[0]|.created_at//.started_at//.updated_at//"")] | @tsv'
+  |($all|map(select(run_date>=$t))|decisive) as $recent
+  |(if ($recent|length) > 0 then ($recent|group_by(.head_branch//"")|map(max_by(run_date)))
+    else [$all|decisive|max_by(run_date)|select(. != null)] end) as $heads
+  |(if any($heads[]; failed) then "failure" else "success" end) as $result
+  |($all|map(select(run_date>=$t and failed))|sort_by(run_date)|reverse) as $fails
+  |[($fails|length),
+  ($all|map(run_date)|max|if . == null or . == "" then "-" else . end),
+  $result,
+  (if $result == "success" and ($fails|length) > 0 then ($fails[0].html_url//"-") else "-" end),
+  (if $result == "failure" or ($heads|length) > 1 then
+    ($heads|sort_by([(if failed then 0 else 1 end), (.head_branch//"")])
+    |map("\(if failed then "f" else "s" end) \(.head_branch//"-") \(.html_url//"-")")|join("\u001e"))
+  else "-" end)] | @tsv'
 
 # Paginated Gitea/GitHub Actions runs fetch. CUTOFF (default $T24) controls how
 # far back pagination continues; URLs without a page=N query run unpaginated.
@@ -61,14 +77,31 @@ check_workflows() {
   for i in "${!PIDS[@]}"; do
     wait "${PIDS[$i]}"
     local RAW; RAW="$(cat "${TMPS[$i]}")"; rm -f "${TMPS[$i]}"
-    local FAIL_COUNT LATEST_DATE
-    read -r FAIL_COUNT LATEST_DATE <<< "$(jq -re --arg t "$T24" --arg b "$BRANCH" --arg wf "${WFS[$i]}" "$JQ_QUERY" <<< "$RAW" 2>/dev/null||echo '')"
+    local FAIL_COUNT LATEST_DATE LAST_STATUS FAILED_URL BRANCHES
+    read -r FAIL_COUNT LATEST_DATE LAST_STATUS FAILED_URL BRANCHES <<< "$(jq -re --arg t "$T24" --arg b "$BRANCH" --arg wf "${WFS[$i]}" "$JQ_QUERY" <<< "$RAW" 2>/dev/null||echo '')"
     [[ -z "$FAIL_COUNT" ]] && continue
-    local ICON
+    [[ "$LATEST_DATE" == "-" ]] && LATEST_DATE=""
+    [[ "$FAILED_URL" == "-" ]] && FAILED_URL=""
+    # Failures already fixed by a later run of the same branch become a note instead of a red icon.
+    local ICON FAILED_NOTE=""
     if   [[ -z "$LATEST_DATE" || "$LATEST_DATE" < "$T30" ]]; then ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
-    elif (( FAIL_COUNT > 0 ));                                then ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
-    else                                                           ICON="🟢"; GREEN_COUNT=$((GREEN_COUNT + 1)); fi
-    _STATUS[${REPOS[$i]}]+="$ICON <a href=\"${LINKS[$i]}\">${NAMES[$i]}</a>\n"
+    elif [[ "$LAST_STATUS" == "failure" ]];                    then ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
+    else                                                            ICON="🟢"; GREEN_COUNT=$((GREEN_COUNT + 1)); fi
+    if [[ -n "$FAILED_URL" && "$FAIL_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+      FAILED_NOTE=" (<a href=\"$(html_escape "$FAILED_URL")\">${FAIL_COUNT} failed in 24h</a>)"
+    fi
+    _STATUS[${REPOS[$i]}]+="$ICON <a href=\"${LINKS[$i]}\">${NAMES[$i]}</a>${FAILED_NOTE}\n"
+    # One indented line per branch under a red row or a row with several branches, not under a stale one.
+    [[ "$ICON" == "⚪️" || -z "$BRANCHES" || "$BRANCHES" == "-" ]] && continue
+    local BRANCH_STATE BRANCH_NAME BRANCH_URL BRANCH_ICON
+    while read -r BRANCH_STATE BRANCH_NAME BRANCH_URL; do
+      [[ -z "$BRANCH_NAME" ]] && continue
+      # A run without a branch still decides the colour, so it is listed instead of skipped.
+      [[ "$BRANCH_NAME" == "-" ]] && BRANCH_NAME="(no branch)"
+      [[ "$BRANCH_URL" == "-" || -z "$BRANCH_URL" ]] && BRANCH_URL="${LINKS[$i]}"
+      [[ "$BRANCH_STATE" == "f" ]] && BRANCH_ICON="🔴" || BRANCH_ICON="🟢"
+      _STATUS[${REPOS[$i]}]+="    $BRANCH_ICON <a href=\"$(html_escape "$BRANCH_URL")\">$(html_escape "$BRANCH_NAME")</a>\n"
+    done <<< "${BRANCHES//$'\x1e'/$'\n'}"
   done
 }
 
@@ -142,10 +175,11 @@ jenkins_fetch() {
 }
 
 # Checks Jenkins jobs listed as "group | name | server-url-env | path | optional-child-regex"
-# and fills the _STATUS/_ORDER nameref arrays with status lines. Direct jobs are
-# checked for recent failures. When optional-child-regex is set, host/path is
-# treated as a multibranch parent and the latest completed build of the newest
-# semantic-versioned matching child job is checked.
+# and fills the _STATUS/_ORDER nameref arrays with status lines. The icon follows
+# the latest completed build; an earlier failure in the last 24 hours is shown as
+# a linked note next to it. When optional-child-regex is set, host/path is
+# treated as a multibranch parent and the newest semantic-versioned matching
+# child job is checked.
 # Jenkins API errors are rendered as no data, so one unreachable server does
 # not break the digest.
 check_jenkins_jobs() {
@@ -229,23 +263,20 @@ check_jenkins_jobs() {
     BUILD_REPORT="$(jq -c --arg cutoff "$T24" --arg branch_scoped "${BRANCH_SCOPED[$i]}" '
       def completed: select(.building != true and (.result // "") != "");
       def iso_date: (((.timestamp // 0) / 1000) | strftime("%Y-%m-%dT%H:%M:%SZ"));
-      if $branch_scoped == "true" then
-        ((.builds // []) | map(completed) | max_by([(.timestamp // 0), (.number // 0)])) as $build
-        | {timestamp:$build.timestamp, status:$build.result, build:$build}
-      else
-        ((.builds // []) | map(select(.timestamp != null)) | .[0]) as $latest
-        | ((.builds // []) | map(completed) | length > 0) as $has_completed
-        | ((.builds // [])
-          | map(completed
-            | select(iso_date >= $cutoff)
-            | select((.result // "") | test("FAILURE|UNSTABLE|ABORTED|NOT_BUILT")))
-          | .[0]) as $failed
-        | {
-            timestamp:$latest.timestamp,
-            status:(if $has_completed == false then null elif $failed == null then "SUCCESS" else "FAILURE" end),
-            build:$failed
-          }
-      end
+      def build_key: [(.timestamp // 0), (.number // 0)];
+      ((.builds // []) | map(completed)) as $done
+      | ($done | max_by(build_key)) as $last
+      | ($done | map(select(iso_date >= $cutoff and ((.result // "") | test("FAILURE|UNSTABLE|ABORTED|NOT_BUILT"))))) as $fails
+      | ($fails | max_by(build_key)) as $failed
+      | {
+          # A direct job goes stale by its newest build, a running one included.
+          timestamp:(if $branch_scoped == "true" then $last.timestamp
+            else ((.builds // []) | map(select(.timestamp != null)) | max_by(.timestamp) | .timestamp) end),
+          status:$last.result,
+          build:$last,
+          failed_count:($fails | length),
+          failed_build:(if $failed != null and $failed.number != $last.number then $failed else null end)
+        }
     ' <<< "$RAW" 2>/dev/null || echo '{}')"
     LATEST_DATE="$(jq -r '
       .timestamp // empty
@@ -265,16 +296,22 @@ check_jenkins_jobs() {
     [[ -z "$BUILD_URL" ]] && BUILD_URL="$URL"
     SAFE_BUILD_URL="$(html_escape "$BUILD_URL")"
 
+    local FAILED_COUNT FAILED_URL FAILED_NOTE=""
+    FAILED_COUNT="$(jq -r '.failed_count // 0' <<< "$BUILD_REPORT" 2>/dev/null || echo 0)"
+    FAILED_URL="$(jq -r '.failed_build.url // empty' <<< "$BUILD_REPORT" 2>/dev/null || true)"
+    if [[ -n "$FAILED_URL" && "$FAILED_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+      FAILED_NOTE=" (<a href=\"$(html_escape "$FAILED_URL")\">${FAILED_COUNT} failed in 24h</a>)"
+    fi
+
     if [[ "$LATEST_DATE" < "$T30" ]]; then
       ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
     elif [[ "$REPORT_STATUS" == "SUCCESS" ]]; then
       ICON="🟢"; GREEN_COUNT=$((GREEN_COUNT + 1))
-    elif [[ "$REPORT_STATUS" =~ ^(FAILURE|UNSTABLE)$ ]]; then
-      ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
     else
-      ICON="⚪️"; WHITE_COUNT=$((WHITE_COUNT + 1))
+      # FAILURE, UNSTABLE, ABORTED and NOT_BUILT alike, as in the failure note above.
+      ICON="🔴"; RED_COUNT=$((RED_COUNT + 1))
     fi
-    _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_BUILD_URL\">$SAFE_NAME${BUILD_NUM:+ #$BUILD_NUM}</a>\n"
+    _STATUS["$GROUP"]+="$ICON <a href=\"$SAFE_BUILD_URL\">$SAFE_NAME${BUILD_NUM:+ #$BUILD_NUM}</a>${FAILED_NOTE}\n"
   done
 }
 
@@ -307,8 +344,9 @@ build_workflows_report() {
     check_workflows github_status github_order "Bearer $GITHUB_TOKEN" \
       "https://api.github.com/repos/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__/runs?per_page=100" \
       "https://github.com/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__" <<< "$WORKFLOWS"
+    # Per-workflow runs: the repository-wide list is mostly Claude Review, so a rare workflow fell outside the 24h pages.
     check_workflows gitea_status gitea_order "token $GITEA_TOKEN" \
-      "https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/runs?page=1&limit=100" \
+      "https://$GITEA_HOST/api/v1/repos/${GITHUB_ORG}/__REPO__/actions/workflows/__WF__/runs?page=1&limit=50" \
       "https://$GITEA_HOST/${GITHUB_ORG}/__REPO__/actions?workflow=__WF__" ".*" <<< "$WORKFLOWS_GITEA"
 
     local MESSAGE="" REPO
