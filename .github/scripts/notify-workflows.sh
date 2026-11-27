@@ -384,18 +384,19 @@ build_workflows_report() {
 # Newest Trivy result per branch in the last 24 hours, read from the annotations of the "Scan" jobs of the GitHub
 # workflows in $TRIVY_SCANS ("repo | workflow | label"). Format written by DocSpace-buildtools trivy-scan.yml, keep in sync:
 # title "Trivy <tag> (<branch>)", message "<image>: <n>C/<n>H[/<n>S] | <image>: ok | <image>: err | ...".
-# Only counts are public there, so only counts are sent. Prints one HTML message, or nothing when no scan ran.
+# Only counts are public there, so only counts are sent, summed per branch. Prints one HTML message, or nothing when no scan ran.
 render_trivy_scans() {
   local AUTH="Authorization: Bearer $GITHUB_TOKEN" REPO WF LABEL LAST_REPO="" BODY="" RUNS RUN_ID JOBS JOB
-  local RED=0 ORANGE=0 GREEN=0 FAILED=0 UNREADABLE=0 SCANS LINES ICON NAME TITLE URL DETAILS
+  local LINES ICON NAME URL DETAILS HEADER CLEAN
   while IFS='|' read -r REPO WF LABEL; do
     REPO="$(trim "$REPO")"; WF="$(trim "$WF")"; LABEL="$(trim "$LABEL")"
     [[ -z "$WF" ]] && continue
     [[ -n "$REPO" ]] && LAST_REPO="$REPO" || REPO="$LAST_REPO"; [[ -z "$REPO" ]] && continue
     [[ "$WF" != *.* ]] && WF="$WF.yml"
     local API="https://api.github.com/repos/${GITHUB_ORG}/${REPO}" SCAN_FILE; SCAN_FILE="$(mktemp)"
+    HEADER="🛡 <b>Trivy</b> · $(html_escape "${LABEL:-$REPO}")"
     if ! RUNS="$(curl -fsS --retry 3 --retry-delay 1 -H "$AUTH" "$API/actions/workflows/$WF/runs?per_page=100&status=completed&created=%3E%3D$T24")"; then
-      BODY+="<b>$(html_escape "${LABEL:-$REPO}")</b>\n⚪️ GitHub API unreadable\n\n"; UNREADABLE=$((UNREADABLE + 1)); rm -f "$SCAN_FILE"; continue
+      BODY+="${HEADER}: ⚪️ GitHub API unreadable\n\n"; rm -f "$SCAN_FILE"; continue
     fi
     for RUN_ID in $(jq -r '.workflow_runs[]?.id' <<< "$RUNS"); do
       JOBS="$(curl -fsS --retry 3 --retry-delay 1 -H "$AUTH" "$API/actions/runs/$RUN_ID/jobs?per_page=100")" || continue
@@ -406,37 +407,37 @@ render_trivy_scans() {
               '.[]? | select(.title // "" | startswith("Trivy ")) | {title, message, url: $url, done: $done}' >> "$SCAN_FILE" || true
       done
     done
-    # One line per branch, newest scan wins: icon, branch, tag, findings (images without findings left out).
-    LINES="$(jq -sr '
+    # One row per branch, newest scan wins, worst first: icon, branch, job URL, counts summed over the images plus failed images.
+    LINES="$(jq -sr '[
       map(. + ((.title | capture("^Trivy (?<tag>\\S+)( \\((?<branch>.+)\\))?$")) // {tag: .title, branch: null}))
-      | map(.branch //= .tag) | group_by(.branch) | map(max_by(.done)) | sort_by(.branch)[]
-      | (.message | split(" | ") | map(capture("^(?<image>[^:]+): (?<value>.+)$")) ) as $images
-      | ([$images[] | select(.value == "err")] | length) as $errors
-      | ([$images[] | .value | capture("^(?<c>[0-9]+)C") | .c | tonumber] | add // 0) as $critical
-      | ([$images[] | select(.value != "ok" and .value != "err")] | length) as $dirty
-      | [(if $errors > 0 then "⚠️" elif $critical > 0 then "🔴" elif $dirty > 0 then "🟠" else "🟢" end),
-         .branch, .tag, .url,
-         ([$images[] | select(.value != "ok") | "\(.image) \(.value | sub("^0C/"; ""))"] | join(" · ") | if . == "" then "clean" else . end)]
-      | @tsv' "$SCAN_FILE" 2>/dev/null || true)"
+      | map(.branch //= .tag) | group_by(.branch) | map(max_by(.done))[]
+      | (.message | split(" | ") | map(capture("^(?<image>[^:]+): (?<value>.+)$"))) as $images
+      | [$images[] | select(.value == "err") | "\(.image) err"] as $errors
+      | [$images[] | .value | capture("^(?<c>[0-9]+)C/(?<h>[0-9]+)H(/(?<s>[0-9]+)S)?$")] as $counts
+      | ($counts | map(.c | tonumber) | add // 0) as $critical
+      | ($counts | map(.h | tonumber) | add // 0) as $high
+      | ($counts | map(.s // "0" | tonumber) | add // 0) as $secrets
+      | ([if $critical > 0 then "\($critical)C" else empty end, if $high > 0 then "\($high)H" else empty end,
+          if $secrets > 0 then "\($secrets)S" else empty end] | join("/")) as $sum
+      | (if ($errors | length) > 0 then [1, "⚠️"] elif $critical > 0 then [0, "🔴"] elif $high + $secrets > 0 then [2, "🟠"] else [3, "🟢"] end) as $state
+      | {rank: $state[0], row: [$state[1], .branch, .url, ([$sum | select(. != "")] + $errors | join(", "))]}
+      ] | sort_by(.rank, .row[1])[] | .row | @tsv' "$SCAN_FILE" 2>/dev/null || true)"
     rm -f "$SCAN_FILE"
     [[ -z "$LINES" ]] && continue
-    BODY+="<b>$(html_escape "${LABEL:-$REPO}")</b> · <a href=\"https://github.com/${GITHUB_ORG}/${REPO}/security/code-scanning?query=is%3Aopen+tool%3ATrivy\">code scanning</a>\n"
-    while IFS=$'\t' read -r ICON NAME TITLE URL DETAILS; do
-      case "$ICON" in 🔴) RED=$((RED + 1)) ;; 🟠) ORANGE=$((ORANGE + 1)) ;; 🟢) GREEN=$((GREEN + 1)) ;; *) FAILED=$((FAILED + 1)) ;; esac
-      BODY+="$ICON <a href=\"$(html_escape "$URL")\">$(html_escape "$NAME")</a> <code>$(html_escape "$TITLE")</code>: $(html_escape "$DETAILS")\n"
+    BODY+="${HEADER} · <a href=\"https://github.com/${GITHUB_ORG}/${REPO}/security/code-scanning?query=is%3Aopen+tool%3ATrivy\">code scanning</a>\n"
+    CLEAN=""
+    while IFS=$'\t' read -r ICON NAME URL DETAILS; do
+      if [[ "$ICON" == "🟢" ]]; then
+        CLEAN+="${CLEAN:+, }<a href=\"$(html_escape "$URL")\">$(html_escape "$NAME")</a>"
+      else
+        BODY+="$ICON <a href=\"$(html_escape "$URL")\">$(html_escape "$NAME")</a>: $(html_escape "$DETAILS")\n"
+      fi
     done <<< "$LINES"
+    [[ -n "$CLEAN" ]] && BODY+="🟢 ${CLEAN}\n"
     BODY+="\n"
   done <<< "${TRIVY_SCANS:-}"
   [[ -z "$BODY" ]] && return 0
-
-  local -a PARTS=()
-  (( RED > 0 )) && PARTS+=("${RED} 🔴")
-  (( ORANGE > 0 )) && PARTS+=("${ORANGE} 🟠")
-  (( GREEN > 0 )) && PARTS+=("${GREEN} 🟢")
-  (( FAILED > 0 )) && PARTS+=("${FAILED} ⚠️")
-  (( UNREADABLE > 0 )) && PARTS+=("${UNREADABLE} ⚪️")
-  SCANS="$(IFS='|'; printf '%s' "${PARTS[*]}")"
-  printf '%b' "<pre>Trivy (HIGH/CRITICAL with a fix)\n\n${SCANS//|/ · }</pre>\n${BODY%\\n}"
+  printf '%b' "${BODY%\\n\\n}"
 }
 
 # Start of the window shared by the Claude Review and AI pipelines digests ($CLAUDE_REVIEW_PERIOD).
