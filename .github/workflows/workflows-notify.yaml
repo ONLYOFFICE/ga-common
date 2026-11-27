@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: true
+      publish_trivy:
+        description: 'Publish the Trivy image scan digest'
+        required: false
+        type: boolean
+        default: true
       publish_ai_pipelines:
         description: 'Publish the AI pipelines digest (runs, cost, opened PRs)'
         required: false
@@ -51,6 +56,7 @@ jobs:
           PUBLISH_BUILDSERVERS: ${{ inputs.publish_buildservers }}
           PUBLISH_CLAUDE_REVIEW: ${{ inputs.publish_claude_review }}
           PUBLISH_AI_PIPELINES: ${{ inputs.publish_ai_pipelines }}
+          PUBLISH_TRIVY: ${{ inputs.publish_trivy }}
           CLAUDE_REVIEW_PERIOD: ${{ inputs.claude_review_period }}
           EVENT_NAME: ${{ github.event_name }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -95,6 +101,9 @@ jobs:
                                       | renovate              | Renovate
                                       | weekly-review         | Weekly Review
                                       | bugzilla-triage       | Bugzilla Triage
+          # GitHub workflows that run trivy-scan.yml (repo | workflow | label); their nightly scans go out as one message.
+          TRIVY_SCANS: |
+            DocSpace-buildtools       | main-build            | Apps
           BUILDSERVER_JOBS: |
             Docs                      | latest                | TEAMLAB_URL               | /view/OO/job/oo/ | ^(release|hotfix)/v[0-9]+\.[0-9]+\.[0-9]+$
             Apps                      | appserver rpm         | BUILDSERVER_URL           | /job/appserver.rpm/
@@ -118,6 +127,11 @@ jobs:
           [[ "$PUBLISH_WORKFLOWS" == "true" || "$PUBLISH_BUILDSERVERS" == "true" ]] && FULL_MESSAGE="$(build_workflows_report)"
           SEND_FAILED=0
           send_telegram "$FULL_MESSAGE" || SEND_FAILED=1
+
+          # Trivy: daily, nothing is sent when no scan ran in the last 24 hours.
+          if [[ "${PUBLISH_TRIVY:-true}" == "true" ]]; then
+            send_telegram "$(render_trivy_scans)" || SEND_FAILED=1
+          fi
 
           # Claude Review and AI pipelines: weekly, Fridays only — or any day via manual dispatch (testing).
           IS_FRIDAY=false; [[ "$(date -u +%u)" == "5" ]] && IS_FRIDAY=true

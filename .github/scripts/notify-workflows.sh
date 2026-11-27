@@ -381,6 +381,64 @@ build_workflows_report() {
   return 0
 }
 
+# Newest Trivy result per branch in the last 24 hours, read from the annotations of the "Scan" jobs of the GitHub
+# workflows in $TRIVY_SCANS ("repo | workflow | label"). Format written by DocSpace-buildtools trivy-scan.yml, keep in sync:
+# title "Trivy <tag> (<branch>)", message "<image>: <n>C/<n>H[/<n>S] | <image>: ok | <image>: err | ...".
+# Only counts are public there, so only counts are sent. Prints one HTML message, or nothing when no scan ran.
+render_trivy_scans() {
+  local AUTH="Authorization: Bearer $GITHUB_TOKEN" REPO WF LABEL LAST_REPO="" BODY="" RUNS RUN_ID JOBS JOB
+  local RED=0 ORANGE=0 GREEN=0 FAILED=0 UNREADABLE=0 SCANS LINES ICON NAME TITLE URL DETAILS
+  while IFS='|' read -r REPO WF LABEL; do
+    REPO="$(trim "$REPO")"; WF="$(trim "$WF")"; LABEL="$(trim "$LABEL")"
+    [[ -z "$WF" ]] && continue
+    [[ -n "$REPO" ]] && LAST_REPO="$REPO" || REPO="$LAST_REPO"; [[ -z "$REPO" ]] && continue
+    [[ "$WF" != *.* ]] && WF="$WF.yml"
+    local API="https://api.github.com/repos/${GITHUB_ORG}/${REPO}" SCAN_FILE; SCAN_FILE="$(mktemp)"
+    if ! RUNS="$(curl -fsS --retry 3 --retry-delay 1 -H "$AUTH" "$API/actions/workflows/$WF/runs?per_page=100&status=completed&created=%3E%3D$T24")"; then
+      BODY+="<b>$(html_escape "${LABEL:-$REPO}")</b>\n⚪️ GitHub API unreadable\n\n"; UNREADABLE=$((UNREADABLE + 1)); rm -f "$SCAN_FILE"; continue
+    fi
+    for RUN_ID in $(jq -r '.workflow_runs[]?.id' <<< "$RUNS"); do
+      JOBS="$(curl -fsS --retry 3 --retry-delay 1 -H "$AUTH" "$API/actions/runs/$RUN_ID/jobs?per_page=100")" || continue
+      # The scan job is "Scan <tag>" in trivy-scan.yml, "<caller> / Scan <tag>" when another workflow calls it.
+      for JOB in $(jq -r '.jobs[]? | select(.conclusion != "skipped" and (.name | test("(^|/ )Scan( |$)"))) | "\(.id)|\(.html_url)|\(.completed_at)"' <<< "$JOBS"); do
+        curl -fsS --retry 3 --retry-delay 1 -H "$AUTH" "$API/check-runs/${JOB%%|*}/annotations" \
+          | jq -c --arg url "$(cut -d'|' -f2 <<< "$JOB")" --arg done "${JOB##*|}" \
+              '.[]? | select(.title // "" | startswith("Trivy ")) | {title, message, url: $url, done: $done}' >> "$SCAN_FILE" || true
+      done
+    done
+    # One line per branch, newest scan wins: icon, branch, tag, findings (images without findings left out).
+    LINES="$(jq -sr '
+      map(. + ((.title | capture("^Trivy (?<tag>\\S+)( \\((?<branch>.+)\\))?$")) // {tag: .title, branch: null}))
+      | map(.branch //= .tag) | group_by(.branch) | map(max_by(.done)) | sort_by(.branch)[]
+      | (.message | split(" | ") | map(capture("^(?<image>[^:]+): (?<value>.+)$")) ) as $images
+      | ([$images[] | select(.value == "err")] | length) as $errors
+      | ([$images[] | .value | capture("^(?<c>[0-9]+)C") | .c | tonumber] | add // 0) as $critical
+      | ([$images[] | select(.value != "ok" and .value != "err")] | length) as $dirty
+      | [(if $errors > 0 then "⚠️" elif $critical > 0 then "🔴" elif $dirty > 0 then "🟠" else "🟢" end),
+         .branch, .tag, .url,
+         ([$images[] | select(.value != "ok") | "\(.image) \(.value | sub("^0C/"; ""))"] | join(" · ") | if . == "" then "clean" else . end)]
+      | @tsv' "$SCAN_FILE" 2>/dev/null || true)"
+    rm -f "$SCAN_FILE"
+    [[ -z "$LINES" ]] && continue
+    BODY+="<b>$(html_escape "${LABEL:-$REPO}")</b> · <a href=\"https://github.com/${GITHUB_ORG}/${REPO}/security/code-scanning?query=is%3Aopen+tool%3ATrivy\">code scanning</a>\n"
+    while IFS=$'\t' read -r ICON NAME TITLE URL DETAILS; do
+      case "$ICON" in 🔴) RED=$((RED + 1)) ;; 🟠) ORANGE=$((ORANGE + 1)) ;; 🟢) GREEN=$((GREEN + 1)) ;; *) FAILED=$((FAILED + 1)) ;; esac
+      BODY+="$ICON <a href=\"$(html_escape "$URL")\">$(html_escape "$NAME")</a> <code>$(html_escape "$TITLE")</code>: $(html_escape "$DETAILS")\n"
+    done <<< "$LINES"
+    BODY+="\n"
+  done <<< "${TRIVY_SCANS:-}"
+  [[ -z "$BODY" ]] && return 0
+
+  local -a PARTS=()
+  (( RED > 0 )) && PARTS+=("${RED} 🔴")
+  (( ORANGE > 0 )) && PARTS+=("${ORANGE} 🟠")
+  (( GREEN > 0 )) && PARTS+=("${GREEN} 🟢")
+  (( FAILED > 0 )) && PARTS+=("${FAILED} ⚠️")
+  (( UNREADABLE > 0 )) && PARTS+=("${UNREADABLE} ⚪️")
+  SCANS="$(IFS='|'; printf '%s' "${PARTS[*]}")"
+  printf '%b' "<pre>Trivy (HIGH/CRITICAL with a fix)\n\n${SCANS//|/ · }</pre>\n${BODY%\\n}"
+}
+
 # Start of the window shared by the Claude Review and AI pipelines digests ($CLAUDE_REVIEW_PERIOD).
 digest_cutoff() {
   case "${CLAUDE_REVIEW_PERIOD:-week}" in
