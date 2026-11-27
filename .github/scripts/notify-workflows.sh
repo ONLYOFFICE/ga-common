@@ -115,10 +115,11 @@ trim() {
 
 html_escape() {
   local VALUE="${1:-}"
-  VALUE="${VALUE//&/&amp;}"
-  VALUE="${VALUE//</&lt;}"
-  VALUE="${VALUE//>/&gt;}"
-  VALUE="${VALUE//\"/&quot;}"
+  # Quoted replacements: since bash 5.2 an unquoted & in the replacement stands for the matched text.
+  VALUE="${VALUE//&/"&amp;"}"
+  VALUE="${VALUE//</"&lt;"}"
+  VALUE="${VALUE//>/"&gt;"}"
+  VALUE="${VALUE//\"/"&quot;"}"
   printf '%s' "$VALUE"
 }
 
